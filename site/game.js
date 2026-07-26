@@ -4,19 +4,67 @@
 // ============================================================================
 import { Renderer, BLOCK_MODES } from './engine.js';
 
+// ------------------------------------------------------------------ pixel icons
+// Each icon is an 8x8 grid, one character per pixel, '.' transparent. Rendered
+// to inline SVG with crispEdges so the pixels stay square at any size — the HUD
+// carries almost no words, so these have to do the explaining.
+const IPAL = {
+  k: '#140e26', w: '#f0e6ce', g: '#f2d580', o: '#e5a73c', e: '#ff7a2f',
+  r: '#c0392b', b: '#4a74e8', c: '#84e6ff', p: '#c47ce8', n: '#49a06f',
+  s: '#8d99b8', d: '#101a44'
+};
+const ICONS = {
+  realm:   ['oooooooo', 'ogggggo.', 'oggggo..', 'ogggo...', 'oggo....', 'ogo.....', 'oo......', 'o.......'],
+  life:    ['.rr..rr.', 'rrrrrrrr', 'rrrrrrrr', 'rrrrrrrr', '.rrrrrr.', '..rrrr..', '...rr...', '........'],
+  mana:    ['...c....', '..ccc...', '..ccc...', '.ccccc..', 'ccccccc.', 'ccccccc.', '.ccccc..', '..ccc...'],
+  keepMe:  ['b.b.b.b.', 'bbbbbbbb', 'bbbbbbbb', '.bbbbbb.', '.bbbbbb.', '.bbddbb.', '.bbddbb.', '........'],
+  keepYou: ['r.r.r.r.', 'rrrrrrrr', 'rrrrrrrr', '.rrrrrr.', '.rrrrrr.', '.rrkkrr.', '.rrkkrr.', '........'],
+  // one per spell, in slot order
+  firebolt: ['...e....', '..eoe...', '..eoe...', '.eoooe..', '.eogoe..', 'eoogooe.', '.eoooe..', '..eee...'],
+  storm:    ['....gg..', '...gg...', '..gg....', '.ggggg..', '...gg...', '..gg....', '.gg.....', '.g......'],
+  crater:   ['..oooo..', '.o....o.', 'o..kk..o', 'o.kkkk.o', 'o.kkkk.o', 'o..kk..o', '.o....o.', '..oooo..'],
+  volcano:  ['........', '...e....', '..e.e...', '..eeee..', '.ssssss.', '.ssssss.', 'ssssssss', 'ssssssss'],
+  quake:    ['........', '.ss..ss.', 's..ss..s', '........', '.ss..ss.', 's..ss..s', '........', '.ss..ss.'],
+  meteor:   ['.....ooo', '....oggo', 'e...oggo', '.ee..ooo', '..ee....', '...e....', '........', '........'],
+  ward:     ['.wwwwww.', 'wbbbbbbw', 'wbccccbw', 'wbccccbw', 'wbbbbbbw', '.wbbbbw.', '..wbbw..', '...ww...'],
+  mend:     ['........', '...nn...', '...nn...', '.nnnnnn.', '.nnnnnn.', '...nn...', '...nn...', '........'],
+  haste:    ['........', '.c..c...', '..c..c..', '...c..c.', '...c..c.', '..c..c..', '.c..c...', '........'],
+  siphon:   ['..pppp..', '.pppppp.', 'pppppp..', 'ppppp...', 'ppppp...', 'pppppp..', '.pppppp.', '..pppp..'],
+  wraith:   ['..pppp..', '.pppppp.', '.pkppkp.', '.pppppp.', '.pppppp.', '.pppppp.', '.pppppp.', '.p.pp.p.'],
+  sunburst: ['.g..g..g', '..ooooo.', '.ooooooo', 'goooooog', '.ooooooo', '..ooooo.', '.g..g..g', '........']
+};
+// merges runs of equal pixels into one rect each, so a whole bar of icons is
+// still only a few hundred nodes
+function iconSVG(name) {
+  const rows = ICONS[name];
+  let out = '';
+  for (let y = 0; y < rows.length; y++) {
+    const row = rows[y];
+    for (let x = 0; x < row.length;) {
+      const ch = row[x];
+      if (ch === '.') { x++; continue; }
+      let w = 1;
+      while (x + w < row.length && row[x + w] === ch) w++;
+      out += `<rect x="${x}" y="${y}" width="${w}" height="1" fill="${IPAL[ch] || '#fff'}"/>`;
+      x += w;
+    }
+  }
+  return `<svg viewBox="0 0 8 8" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">${out}</svg>`;
+}
+
 const SPELLS = [
-  { n: 'Firebolt',  k: '1', g: '✦', d: 'Fast bolt. Scorches a small crater.' },
-  { n: 'Storm',     k: '2', g: '⚡', d: 'Lightning that leaps between foes.' },
-  { n: 'Crater',    k: '3', g: '◉', d: 'Punches a hole in the world.' },
-  { n: 'Volcano',   k: '4', g: '▲', d: 'Raises a burning mountain.' },
-  { n: 'Quake',     k: '5', g: '≋', d: 'Sends a ripple tearing outward.' },
-  { n: 'Meteor',    k: '6', g: '☄', d: 'Calls a rock down from the sky.' },
-  { n: 'Ward',      k: '7', g: '◇', d: 'Blunts incoming magic for a while.' },
-  { n: 'Mend',      k: '8', g: '✚', d: 'Knits your wounds closed.' },
-  { n: 'Haste',     k: '9', g: '»', d: 'The carpet flies faster.' },
-  { n: 'Siphon',    k: '0', g: '◐', d: 'Pulls loose mana in. Drains rivals.' },
-  { n: 'Wraith',    k: '-', g: '☥', d: 'Binds a servant to fight for you.' },
-  { n: 'Sunburst',  k: '=', g: '☀', d: 'Smites every wild thing at once.' },
+  { n: 'Firebolt',  k: '1', i: 'firebolt', d: 'Fast bolt. Scorches a small crater.' },
+  { n: 'Storm',     k: '2', i: 'storm',    d: 'Lightning that leaps between foes.' },
+  { n: 'Crater',    k: '3', i: 'crater',   d: 'Punches a hole in the world.' },
+  { n: 'Volcano',   k: '4', i: 'volcano',  d: 'Raises a burning mountain.' },
+  { n: 'Quake',     k: '5', i: 'quake',    d: 'Sends a ripple tearing outward.' },
+  { n: 'Meteor',    k: '6', i: 'meteor',   d: 'Calls a rock down from the sky.' },
+  { n: 'Ward',      k: '7', i: 'ward',     d: 'Blunts incoming magic for a while.' },
+  { n: 'Mend',      k: '8', i: 'mend',     d: 'Knits your wounds closed.' },
+  { n: 'Haste',     k: '9', i: 'haste',    d: 'The carpet flies faster.' },
+  { n: 'Siphon',    k: '0', i: 'siphon',   d: 'Pulls loose mana in. Drains rivals.' },
+  { n: 'Wraith',    k: '-', i: 'wraith',   d: 'Binds a servant to fight for you.' },
+  { n: 'Sunburst',  k: '=', i: 'sunburst', d: 'Smites every wild thing at once.' },
 ];
 const EVT = {
   0:'cast',1:'zap',2:'boom',3:'release',4:'bigboom',5:'collapse',6:'rumble',7:'rumble',
@@ -129,7 +177,7 @@ class Game {
       claimMe: el('claimMe'), claimRival: el('claimRival'), claimTarget: el('claimTarget'),
       bar: el('spellbar'), map: el('map'), title: el('title'), overlay: el('overlay'),
       otitle: el('otitle'), obody: el('obody'), obtn: el('obtn'), stat: el('stat'),
-      err: el('err'), lvl: el('lvl'), tip: el('tip'), boot: el('boot')
+      err: el('err'), lvl: el('lvl'), boot: el('boot')
     };
     this.mapCtx = this.el.map.getContext('2d');
 
@@ -184,9 +232,7 @@ class Game {
     this.mapDirty = true;
     this.ended = false;
     this.el.overlay.classList.remove('show');
-    this.el.lvl.textContent = `Realm ${n}`;
-    const newly = SPELLS.filter((s, i) => this.ST[60 + i] > 0).length;
-    this.el.tip.textContent = `${newly} spells attuned · claim ${Math.round(this.ST[15] * 100)}% of the realm's mana before your rival does`;
+    this.el.lvl.textContent = String(n);
     if (!quiet) this.audio.play(16, 0);
   }
 
@@ -196,12 +242,17 @@ class Game {
       const b = document.createElement('button');
       b.className = 'slot'; b.type = 'button';
       b.innerHTML = `<span class="cd"></span><span class="key">${s.k}</span>` +
-                    `<span class="glyph">${s.g}</span><span class="nm">${s.n}</span><span class="cost">—</span>`;
-      b.title = `${s.n} — ${s.d}`;
+                    `<i class="ico">${iconSVG(s.i)}</i><span class="cost">—</span>`;
+      b.title = `${s.n} — ${s.d}`;      // the words live in the tooltip now
       b.addEventListener('click', (e) => { e.preventDefault(); this.sim.selectSpell(i); });
       this.el.bar.appendChild(b);
       return { b, cd: b.querySelector('.cd'), cost: b.querySelector('.cost') };
     });
+    for (const [id, name] of [['icRealm', 'realm'], ['icLife', 'life'],
+                              ['icMana', 'mana'], ['icMe', 'keepMe'], ['icRival', 'keepYou']]) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = iconSVG(name);
+    }
   }
 
   bindInput() {
@@ -360,7 +411,9 @@ Game.prototype.drawMinimap = function () {
       ctx.fillRect(x - 4, z - 4, 8, 8);
       ctx.strokeStyle = 'rgba(9,12,28,.85)'; ctx.lineWidth = 1.2; ctx.strokeRect(x - 4, z - 4, 8, 8);
     } else if (kind === 0) {
-      ctx.save(); ctx.translate(x, z); ctx.rotate(st[3]);
+      // Canvas y runs along world +z, and the marker is drawn pointing up, so
+      // the heading is pi - yaw. Plain rotate(yaw) had it facing backwards.
+      ctx.save(); ctx.translate(x, z); ctx.rotate(Math.PI - st[3]);
       ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(4.6, 5.5); ctx.lineTo(0, 2.8); ctx.lineTo(-4.6, 5.5); ctx.closePath();
       ctx.fill(); ctx.strokeStyle = 'rgba(9,12,28,.9)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
     } else {
@@ -389,7 +442,6 @@ Game.prototype.updateHUD = function () {
     const c = st[100 + i] | 0;
     if (s._c !== c) { s.cost.textContent = c; s._c = c; }
   }
-  e.stat.dataset.fps = this.fps;
 };
 
 Game.prototype.loop = function (t) {

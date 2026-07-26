@@ -86,6 +86,8 @@ statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 - Particles are additive camera-facing billboards with a radial falloff computed in the fragment shader — no textures anywhere in the project.
 - Water samples the height texture for depth-based colour, shoreline foam and specular.
 - Audio is synthesised from oscillators and one noise buffer; the sim emits positioned event codes and JS turns them into sound.
+- **The HUD is icons, not words.** Every symbol — life, mana, the two keeps on the claim bar, all twelve spells — is an 8×8 pixel grid in `game.js`, one character per pixel, expanded to inline SVG with `shape-rendering="crispEdges"` and runs of equal pixels merged into single rects. Spell names live in the tooltip. There is no screen border and no permanent text readout.
+- Castles level their own pad at placement: flat right out past the plinth, then a smoothstep skirt down to the hill. Anything that just samples the ground at its centre point lifts off the downhill side of a slope, so scenery and nests are sunk below their sample instead.
 
 ## A note on Rust
 

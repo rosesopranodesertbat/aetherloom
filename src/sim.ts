@@ -347,12 +347,22 @@ export function init(seed: u32, lv: i32): void {
     // level the castle pad
     deform(bx, bz, 30.0, 0.0, 2);
     const padH = heightAt(bx, bz);
+    // Cut a real shelf: dead flat right out past the keep's footprint, then a
+    // smooth skirt down to the original hill. The old 1-d^2 falloff was only
+    // fully flat at the exact centre, so on a steep peak the castle still had
+    // slope under its edges and read as hanging off the mountain.
     const gi = <i32>(bx / CELL), gj = <i32>(bz / CELL);
-    for (let j = gj - 8; j <= gj + 8; j++)
-      for (let i = gi - 8; i <= gi + 8; i++) {
-        const d: f32 = Mathf.sqrt(<f32>((i - gi) * (i - gi) + (j - gj) * (j - gj))) / 8.0;
+    const PAD: i32 = 13;                       // cells; 13 * CELL = 52 units
+    for (let j = gj - PAD; j <= gj + PAD; j++)
+      for (let i = gi - PAD; i <= gi + PAD; i++) {
+        const d: f32 = Mathf.sqrt(<f32>((i - gi) * (i - gi) + (j - gj) * (j - gj))) / <f32>PAD;
         if (d > 1.0) continue;
-        const cur = hGet(i, j); const w2: f32 = 1.0 - d * d;
+        // flat well past the plinth (FOOT=27) so ground wraps its base and you
+        // can never see under the terrace edge
+        let t: f32 = (d - 0.72) / 0.28;
+        if (t < 0.0) t = 0.0; if (t > 1.0) t = 1.0;
+        const w2: f32 = 1.0 - t * t * (3.0 - 2.0 * t);
+        const cur = hGet(i, j);
         hSet(i, j, cur + (padH - cur) * w2);
       }
     cx[w] = bx; cz[w] = bz; cy[w] = heightAt(bx, bz);
@@ -646,7 +656,10 @@ const BANK_FLOOR: f32 = 45.0;   // regen fills to here; deposits keep exactly th
 
 function updatePlayer(dt: f32): void {
   const w = 0;
-  wyaw[w] += iYaw; wpit[w] -= iPit;
+  // Same handedness trap as the strafe vector: d(forward)/d(yaw) points along
+  // -screen_right, so a rising yaw swings the view left. Mouse right must
+  // decrease it. (Pitch is already the right way round.)
+  wyaw[w] -= iYaw; wpit[w] -= iPit;
   if (wpit[w] > 1.05) wpit[w] = 1.05; if (wpit[w] < -1.05) wpit[w] = -1.05;
   const roll = -iStr * 0.42;
   wrol[w] += (roll - wrol[w]) * Mathf.min(1.0, dt * 6.0);
@@ -1120,9 +1133,24 @@ function updateOrbs(dt: f32): void {
   if (mapN >= 1024) return;
   const o = mapN * 4; MAP[o] = x; MAP[o + 1] = z; MAP[o + 2] = kind; MAP[o + 3] = sc; mapN++;
 }
+// Lowest ground under a footprint of radius r. A castle placed at the height
+// of its own centre point hangs in the air on the downhill side of any slope,
+// so the plinth is sunk to reach this instead.
+function groundMin(x: f32, z: f32, r: f32): f32 {
+  let m = heightAt(x, z);
+  for (let k = 0; k < 8; k++) {
+    const a: f32 = <f32>k * 0.7854;
+    const h = heightAt(x + Mathf.cos(a) * r, z + Mathf.sin(a) * r);
+    if (h < m) m = h;
+  }
+  return m;
+}
+const FOOT: f32 = 27.0;      // plinth half-width; must clear the tower ring
 function drawCastle(w: i32): void {
+  const gm = groundMin(cx[w], cz[w], FOOT);
   if (chp[w] <= 0) {
-    pushInst(cx[w], cy[w] + 3.0, cz[w], 26, 5, 26, 0.22, 0.19, 0.17, 0, 0, 0);
+    const top = cy[w] + 3.5, bot = gm - 5.0;
+    pushInst(cx[w], (top + bot) * 0.5, cz[w], 30, top - bot, 30, 0.22, 0.19, 0.17, 0, 0, 0);
     return;
   }
   const lv = clev[w];
@@ -1130,22 +1158,32 @@ function drawCastle(w: i32): void {
   if (w != 0) { r = 0.70; g = 0.20; b = 0.16; }
   const dmgF = chp[w] / chpm[w];
   const base = cy[w];
-  pushInst(cx[w], base + 5.0, cz[w], 34, 10, 34, r * 0.5 + 0.14, g * 0.5 + 0.12, b * 0.5 + 0.10, 0, 0, 0);
+  // Plinth: buried below the lowest ground it covers so it reads as cut into
+  // the hill. The pad is levelled at placement, so this normally only has a
+  // few units to make up — the clamp is for ground later blown away under it.
+  const deck = base + 6.0;
+  let bot = gm - 7.0;
+  if (bot < base - 26.0) bot = base - 26.0;
+  pushInst(cx[w], (deck + bot) * 0.5, cz[w], FOOT * 2.0, deck - bot, FOOT * 2.0,
+           r * 0.5 + 0.14, g * 0.5 + 0.12, b * 0.5 + 0.10, 0, 0, 0);
+  // a narrower skirt just under the deck reads as a stepped foundation
+  pushInst(cx[w], deck - 1.6, cz[w], FOOT * 2.0 - 7.0, 5.0, FOOT * 2.0 - 7.0,
+           r * 0.34 + 0.10, g * 0.34 + 0.09, b * 0.34 + 0.08, 0, 0, 0);
   const keepH: f32 = 14.0 + <f32>lv * 7.0;
-  pushInst(cx[w], base + 10.0 + keepH * 0.5, cz[w], 19, keepH, 19, r, g, b, 0, 0, 0);
-  pushInst(cx[w], base + 12.0 + keepH, cz[w], 15, 13, 15, r * 1.25, g * 1.25, b * 1.25, 0.785, 0.15, 2);
+  pushInst(cx[w], deck + keepH * 0.5, cz[w], 19, keepH, 19, r, g, b, 0, 0, 0);
+  pushInst(cx[w], deck + 2.0 + keepH, cz[w], 15, 13, 15, r * 1.25, g * 1.25, b * 1.25, 0.785, 0.15, 2);
   const towers = 2 + lv;
   for (let k = 0; k < towers; k++) {
     const a: f32 = <f32>k / <f32>towers * 6.2832 + 0.4;
-    const rad: f32 = 22.0;
+    const rad: f32 = 19.0;
     const txx = cx[w] + Mathf.cos(a) * rad, tzz = cz[w] + Mathf.sin(a) * rad;
     const th: f32 = 10.0 + <f32>lv * 3.4 + Mathf.sin(<f32>k * 2.1) * 3.0;
-    pushInst(txx, base + 8.0 + th * 0.5, tzz, 7, th, 7, r * 0.9, g * 0.9, b * 0.9, a, 0, 0);
-    pushInst(txx, base + 9.0 + th, tzz, 6.5, 8, 6.5, r * 1.4, g * 1.4, b * 1.4, a, 0.25, 2);
+    pushInst(txx, deck - 2.0 + th * 0.5, tzz, 7, th, 7, r * 0.9, g * 0.9, b * 0.9, a, 0, 0);
+    pushInst(txx, deck - 1.0 + th, tzz, 6.5, 8, 6.5, r * 1.4, g * 1.4, b * 1.4, a, 0.25, 2);
   }
   // banner glow scales with stored mana
   const glowH: f32 = 6.0 + <f32>lv * 2.0;
-  pushInst(cx[w], base + 22.0 + keepH, cz[w], 3.0, glowH, 3.0, 0.55, 0.85, 1.0, 0, 1.0, 1);
+  pushInst(cx[w], deck + 12.0 + keepH, cz[w], 3.0, glowH, 3.0, 0.55, 0.85, 1.0, 0, 1.0, 1);
   if (dmgF < 0.6) {
     if (rnd() < 0.4) spawnPart(cx[w] + rr(-16, 16), base + rr(6, keepH), cz[w] + rr(-16, 16), rr(-3, 3), rr(6, 16), rr(-3, 3), 1.4, 5.0, 0.35, 0.33, 0.3, 2.0, 0.9);
   }
@@ -1155,53 +1193,100 @@ function drawCreature(i: i32): void {
   const t = etype[i], x = ex[i], y = ey[i], z = ez[i], ya = eyaw[i];
   const hurt: f32 = ehurt[i] > 0 ? 1.0 : 0.0;
   const ph = ephase[i];
+  // sf/cf are the facing unit vector; +side is the creature's own right.
+  //   forward = (sf, cf)      right = (cf, -sf)
+  // Parts are kept flat and high-contrast, with dark or glowing eyes: the
+  // renderer's edge pass keys off local colour contrast, so hard internal
+  // borders are what give these a crisp pixel-art silhouette.
+  const sf = Mathf.sin(ya), cf = Mathf.cos(ya);
   if (t == 0) {                       // sand worm: segmented chain
-    for (let s = 0; s < 5; s++) {
-      const off: f32 = <f32>s * 6.0;
-      const sx2 = x - Mathf.sin(ya) * off, sz2 = z - Mathf.cos(ya) * off;
+    for (let s = 0; s < 6; s++) {
+      const off: f32 = <f32>s * 5.4;
+      const sx2 = x - sf * off, sz2 = z - cf * off;
       const bob: f32 = Mathf.sin(ph - <f32>s * 0.8) * 3.2;
-      const sc: f32 = 6.5 - <f32>s * 0.7;
+      const sc: f32 = 6.8 - <f32>s * 0.62;
       pushInst(sx2, y + bob + 1.0, sz2, sc, sc * 0.85, sc, 0.62 + hurt * 0.35, 0.52 - hurt * 0.2, 0.28, ya, hurt * 0.5, 1);
+      if (s < 5) pushInst(sx2, y + bob + 1.0 + sc * 0.42, sz2, sc * 0.5, sc * 0.36, sc * 0.8, 0.40, 0.30, 0.15, ya, 0, 0);
     }
+    const hb: f32 = Mathf.sin(ph) * 3.2;
+    pushInst(x + sf * 3.4, y + hb + 0.2, z + cf * 3.4, 3.6, 1.8, 2.2, 0.28, 0.09, 0.09, ya, 0, 0);
+    pushInst(x + sf * 2.4 + cf * 1.7, y + hb + 2.4, z + cf * 2.4 - sf * 1.7, 1.5, 1.5, 1.5, 0.04, 0.03, 0.04, ya, 0, 1);
+    pushInst(x + sf * 2.4 - cf * 1.7, y + hb + 2.4, z + cf * 2.4 + sf * 1.7, 1.5, 1.5, 1.5, 0.04, 0.03, 0.04, ya, 0, 1);
   } else if (t == 1) {                // wasp
     pushInst(x, y, z, 3.4, 3.0, 5.0, 0.85 + hurt * 0.15, 0.72, 0.18, ya, hurt * 0.6, 1);
+    pushInst(x - sf * 1.4, y, z - cf * 1.4, 3.2, 2.8, 1.2, 0.11, 0.08, 0.05, ya, 0, 0);
+    pushInst(x - sf * 2.8, y, z - cf * 2.8, 2.5, 2.2, 1.1, 0.11, 0.08, 0.05, ya, 0, 0);
+    pushInst(x - sf * 4.4, y, z - cf * 4.4, 1.4, 2.8, 1.4, 0.16, 0.12, 0.10, ya, 0, 2);
+    pushInst(x + sf * 2.9, y + 0.3, z + cf * 2.9, 2.7, 2.5, 2.5, 0.26, 0.19, 0.07, ya, 0, 1);
+    pushInst(x + sf * 3.7 + cf * 0.9, y + 0.7, z + cf * 3.7 - sf * 0.9, 1.2, 1.2, 1.2, 0.03, 0.03, 0.03, ya, 0, 1);
+    pushInst(x + sf * 3.7 - cf * 0.9, y + 0.7, z + cf * 3.7 + sf * 0.9, 1.2, 1.2, 1.2, 0.03, 0.03, 0.03, ya, 0, 1);
     const fl = Mathf.sin(ph) * 0.9;
     pushInst(x, y + 2.2, z, 7.5, 0.4, 2.2, 0.9, 0.9, 0.95, ya + fl, 0.1, 0);
   } else if (t == 2) {                // troll
-    pushInst(x, y + 5.0, z, 8.0, 11.0, 6.5, 0.35 + hurt * 0.5, 0.42, 0.32, ya, hurt * 0.5, 0);
-    pushInst(x, y + 12.5, z, 5.4, 4.6, 5.0, 0.42 + hurt * 0.5, 0.48, 0.36, ya, hurt * 0.5, 0);
+    const sk: f32 = 0.35 + hurt * 0.5;
+    pushInst(x, y + 5.8, z, 8.0, 10.0, 6.5, sk, 0.42, 0.32, ya, hurt * 0.5, 0);
+    pushInst(x, y + 12.6, z, 5.4, 4.6, 5.0, sk + 0.07, 0.48, 0.36, ya, hurt * 0.5, 0);
+    pushInst(x + sf * 2.5 + cf * 1.3, y + 13.4, z + cf * 2.5 - sf * 1.3, 1.2, 1.2, 0.7, 1.0, 0.80, 0.22, ya, 0.7, 0);
+    pushInst(x + sf * 2.5 - cf * 1.3, y + 13.4, z + cf * 2.5 + sf * 1.3, 1.2, 1.2, 0.7, 1.0, 0.80, 0.22, ya, 0.7, 0);
+    pushInst(x + cf * 2.3, y + 15.8, z - sf * 2.3, 1.6, 3.6, 1.6, 0.88, 0.84, 0.72, ya, 0, 2);
+    pushInst(x - cf * 2.3, y + 15.8, z + sf * 2.3, 1.6, 3.6, 1.6, 0.88, 0.84, 0.72, ya, 0, 2);
     const sw = Mathf.sin(ph) * 1.6;
-    pushInst(x - Mathf.cos(ya) * 5.5, y + 6.0 + sw, z + Mathf.sin(ya) * 5.5, 2.6, 8.0, 2.6, 0.32, 0.38, 0.3, ya, 0, 0);
-    pushInst(x + Mathf.cos(ya) * 5.5, y + 6.0 - sw, z - Mathf.sin(ya) * 5.5, 2.6, 8.0, 2.6, 0.32, 0.38, 0.3, ya, 0, 0);
+    pushInst(x - cf * 5.5, y + 6.0 + sw, z + sf * 5.5, 2.6, 8.0, 2.6, 0.30, 0.36, 0.28, ya, 0, 0);
+    pushInst(x + cf * 5.5, y + 6.0 - sw, z - sf * 5.5, 2.6, 8.0, 2.6, 0.30, 0.36, 0.28, ya, 0, 0);
+    pushInst(x - cf * 2.2, y + 1.5, z + sf * 2.2, 2.9, 4.4, 3.2, 0.26, 0.31, 0.24, ya, 0, 0);
+    pushInst(x + cf * 2.2, y + 1.5, z - sf * 2.2, 2.9, 4.4, 3.2, 0.26, 0.31, 0.24, ya, 0, 0);
   } else if (t == 3) {                // griffin
     pushInst(x, y, z, 4.6, 4.2, 8.0, 0.80 + hurt * 0.2, 0.68, 0.42, ya, hurt * 0.5, 1);
+    pushInst(x + sf * 4.4, y + 1.6, z + cf * 4.4, 3.4, 3.2, 3.4, 0.94, 0.90, 0.78, ya, 0, 1);
+    pushInst(x + sf * 6.1, y + 1.3, z + cf * 6.1, 1.7, 1.9, 2.6, 0.95, 0.70, 0.14, ya, 0, 2);
+    pushInst(x + sf * 5.0 + cf * 1.2, y + 2.4, z + cf * 5.0 - sf * 1.2, 1.0, 1.0, 1.0, 0.04, 0.03, 0.03, ya, 0, 1);
+    pushInst(x + sf * 5.0 - cf * 1.2, y + 2.4, z + cf * 5.0 + sf * 1.2, 1.0, 1.0, 1.0, 0.04, 0.03, 0.03, ya, 0, 1);
+    pushInst(x - sf * 5.4, y - 0.4, z - cf * 5.4, 2.2, 2.2, 5.2, 0.68, 0.55, 0.32, ya, 0, 2);
     const fl = Mathf.sin(ph * 2.0) * 0.55;
-    pushInst(x - Mathf.cos(ya) * 7.0, y + 1.5 + fl * 4.0, z + Mathf.sin(ya) * 7.0, 12.0, 1.2, 6.0, 0.92, 0.86, 0.7, ya, 0.05, 2);
-    pushInst(x + Mathf.cos(ya) * 7.0, y + 1.5 - fl * 4.0, z - Mathf.sin(ya) * 7.0, 12.0, 1.2, 6.0, 0.92, 0.86, 0.7, ya, 0.05, 2);
+    pushInst(x - cf * 7.0, y + 1.5 + fl * 4.0, z + sf * 7.0, 12.0, 1.2, 6.0, 0.92, 0.86, 0.7, ya, 0.05, 2);
+    pushInst(x + cf * 7.0, y + 1.5 - fl * 4.0, z - sf * 7.0, 12.0, 1.2, 6.0, 0.92, 0.86, 0.7, ya, 0.05, 2);
   } else if (t == 4) {                // nest
     const pu: f32 = 1.0 + Mathf.sin(ph * 0.7) * 0.06;
-    pushInst(x, y + 1.0, z, 20, 4, 20, 0.24, 0.16, 0.26, 0, 0, 0);
+    // sunk well below its own ground point so it never perches on a slope
+    pushInst(x, y - 5.0, z, 19, 17, 19, 0.24, 0.16, 0.26, 0, 0, 0);
     pushInst(x, y + 9.0, z, 15 * pu, 17 * pu, 15 * pu, 0.40, 0.18, 0.44, ph * 0.1, 0.25, 2);
+    for (let k = 0; k < 4; k++) {
+      const a: f32 = <f32>k * 1.5708 + 0.7854;
+      pushInst(x + Mathf.cos(a) * 7.6, y + 4.2, z + Mathf.sin(a) * 7.6, 2.2, 7.4, 2.2, 0.28, 0.11, 0.32, a, 0, 2);
+    }
     pushInst(x, y + 20.0, z, 4, 4, 4, 0.85, 0.35, 1.0, 0, 1.0, 1);
   } else if (t == 5) {                // wraith
     pushInst(x, y, z, 5.0, 6.5, 5.0, 0.55, 0.42, 1.0, ya, 0.75, 1);
+    pushInst(x, y + 3.7, z, 5.8, 5.2, 5.8, 0.28, 0.20, 0.64, ya, 0.2, 2);
+    pushInst(x + sf * 1.9 + cf * 1.2, y + 1.1, z + cf * 1.9 - sf * 1.2, 1.1, 1.1, 1.1, 1.0, 0.95, 0.55, ya, 1.0, 1);
+    pushInst(x + sf * 1.9 - cf * 1.2, y + 1.1, z + cf * 1.9 + sf * 1.2, 1.1, 1.1, 1.1, 1.0, 0.95, 0.55, ya, 1.0, 1);
     pushInst(x, y - 5.5, z, 6.0, 7.0, 6.0, 0.36, 0.28, 0.85, ya, 0.5, 2);
     if (rnd() < 0.4) spawnPart(x + rr(-4, 4), y + rr(-4, 4), z + rr(-4, 4), 0, rr(2, 8), 0, 0.6, 2.4, 0.5, 0.4, 1.0, 0, 1.0);
   } else if (t == 6) {                // balloon
     const isP = eown[i] == 1;
     pushInst(x, y, z, 9.0, 11.0, 9.0, isP ? 0.35 : 0.85, isP ? 0.6 : 0.3, isP ? 1.0 : 0.28, ya, 0.15, 1);
+    pushInst(x, y + 5.6, z, 4.6, 3.4, 4.6, 0.92, 0.88, 0.72, ya, 0.1, 2);
+    pushInst(x, y - 2.0, z, 9.4, 1.4, 9.4, 0.20, 0.16, 0.12, ya, 0, 0);
+    pushInst(x, y - 6.0, z, 0.9, 6.0, 0.9, 0.28, 0.22, 0.16, ya, 0, 0);
     pushInst(x, y - 9.0, z, 4.0, 3.4, 4.0, 0.42, 0.32, 0.2, ya, 0, 0);
   } else if (t == 7) {                // dragon
-    for (let s = 0; s < 3; s++) {
-      const off: f32 = <f32>s * 8.0;
-      const sx2 = x - Mathf.sin(ya) * off, sz2 = z - Mathf.cos(ya) * off;
-      const sc: f32 = 8.0 - <f32>s * 1.4;
-      pushInst(sx2, y + Mathf.sin(ph - <f32>s) * 1.4, sz2, sc, sc * 0.9, sc * 1.2, 0.55 + hurt * 0.4, 0.16, 0.18, ya, hurt * 0.5, 1);
+    for (let s = 0; s < 4; s++) {
+      const off: f32 = <f32>s * 7.0;
+      const sx2 = x - sf * off, sz2 = z - cf * off;
+      const sc: f32 = 8.0 - <f32>s * 1.3;
+      const sy2 = y + Mathf.sin(ph - <f32>s) * 1.4;
+      pushInst(sx2, sy2, sz2, sc, sc * 0.9, sc * 1.2, 0.55 + hurt * 0.4, 0.16, 0.18, ya, hurt * 0.5, 1);
+      if (s > 0) pushInst(sx2, sy2 + sc * 0.52, sz2, sc * 0.26, sc * 0.55, sc * 0.72, 0.28, 0.07, 0.09, ya, 0, 2);
     }
     const fl = Mathf.sin(ph * 1.6) * 0.6;
-    pushInst(x - Mathf.cos(ya) * 11.0, y + 2.0 + fl * 6.0, z + Mathf.sin(ya) * 11.0, 20.0, 1.6, 9.0, 0.35, 0.10, 0.14, ya, 0.05, 2);
-    pushInst(x + Mathf.cos(ya) * 11.0, y + 2.0 - fl * 6.0, z - Mathf.sin(ya) * 11.0, 20.0, 1.6, 9.0, 0.35, 0.10, 0.14, ya, 0.05, 2);
-    pushInst(x + Mathf.sin(ya) * 8.0, y + 1.0, z + Mathf.cos(ya) * 8.0, 5.0, 5.0, 7.0, 0.9, 0.4, 0.2, ya, 0.4, 2);
+    pushInst(x - cf * 11.0, y + 2.0 + fl * 6.0, z + sf * 11.0, 20.0, 1.6, 9.0, 0.35, 0.10, 0.14, ya, 0.05, 2);
+    pushInst(x + cf * 11.0, y + 2.0 - fl * 6.0, z - sf * 11.0, 20.0, 1.6, 9.0, 0.35, 0.10, 0.14, ya, 0.05, 2);
+    pushInst(x + sf * 8.0, y + 1.0, z + cf * 8.0, 5.0, 5.0, 7.0, 0.9, 0.4, 0.2, ya, 0.4, 2);
+    pushInst(x + sf * 6.8 + cf * 1.8, y + 3.6, z + cf * 6.8 - sf * 1.8, 1.4, 3.2, 1.4, 0.86, 0.80, 0.66, ya, 0, 2);
+    pushInst(x + sf * 6.8 - cf * 1.8, y + 3.6, z + cf * 6.8 + sf * 1.8, 1.4, 3.2, 1.4, 0.86, 0.80, 0.66, ya, 0, 2);
+    pushInst(x + sf * 9.6 + cf * 1.5, y + 1.7, z + cf * 9.6 - sf * 1.5, 1.3, 1.3, 1.3, 1.0, 0.86, 0.20, ya, 1.0, 1);
+    pushInst(x + sf * 9.6 - cf * 1.5, y + 1.7, z + cf * 9.6 + sf * 1.5, 1.3, 1.3, 1.3, 1.0, 0.86, 0.20, ya, 1.0, 1);
+    pushInst(x - sf * 25.0, y, z - cf * 25.0, 2.4, 5.2, 2.4, 0.38, 0.09, 0.11, ya, 0, 2);
   }
   if (t != 6) {
     let mk: f32 = 2.0;
@@ -1221,11 +1306,13 @@ function buildRender(): void {
     const h = heightAt(dx_[i], dz_[i]);
     if (h < 1.0) continue;                       // sank under water (crater/quake)
     const s = dsc[i];
+    // Both are sunk past their own ground sample: the height is taken at one
+    // point, so anything sitting exactly on it lifts off the downhill side.
     if (dkind[i] == 0) {
-      pushInst(dx_[i], h + 6.0 * s, dz_[i], 1.5 * s, 12.0 * s, 1.5 * s, 0.36, 0.27, 0.16, drot[i], 0, 0);
+      pushInst(dx_[i], h + 5.0 * s, dz_[i], 1.5 * s, 14.0 * s, 1.5 * s, 0.36, 0.27, 0.16, drot[i], 0, 0);
       pushInst(dx_[i], h + 14.0 * s, dz_[i], 9.0 * s, 5.0 * s, 9.0 * s, 0.22, 0.44, 0.20, drot[i], 0, 2);
     } else {
-      pushInst(dx_[i], h + 1.6 * s, dz_[i], 5.0 * s, 4.0 * s, 4.4 * s, 0.44, 0.41, 0.38, drot[i], 0, 0);
+      pushInst(dx_[i], h + 0.4 * s, dz_[i], 5.0 * s, 6.0 * s, 4.4 * s, 0.44, 0.41, 0.38, drot[i], 0, 0);
     }
   }
   for (let w = 0; w <= nRival; w++) drawCastle(w);
