@@ -928,11 +928,26 @@ impl World {
         const ORB_HOVER: f32 = 5.0;
         const ORB_BOB: f32 = 1.6;
         const ORB_SETTLE_RATE: f32 = 0.8;
+        /// Sparkles shed per second. Emitted here rather than while drawing:
+        /// the draw pass runs inside `step`, so a random draw taken there
+        /// shifts this generator's whole sequence, and a draw taken only for
+        /// orbs near the camera makes the simulation depend on where the
+        /// player is looking.
+        const ORB_SPARKS_PER_SECOND: f32 = 6.0;
         for i in 0..MAX_ORBS {
             if !self.orbs.alive[i] || self.orbs.carried_by[i].is_some() {
                 continue;
             }
             self.orbs.bob_phase[i] += dt * 2.4;
+            if self.rng.chance(ORB_SPARKS_PER_SECOND * dt) {
+                let at = [self.orbs.pos_x[i], self.orbs.pos_y[i], self.orbs.pos_z[i]];
+                let drift = [
+                    self.rng.range(-3.0, 3.0),
+                    self.rng.range(3.0, 9.0),
+                    self.rng.range(-3.0, 3.0),
+                ];
+                self.spawn_particle(at, drift, 0.8, 1.8, [0.45, 0.8, 1.0], 0.0, 1.2);
+            }
             let resting = self.surface_at(self.orbs.pos_x[i], self.orbs.pos_z[i])
                 + ORB_HOVER
                 + sin(self.orbs.bob_phase[i]) * ORB_BOB;

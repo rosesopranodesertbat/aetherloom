@@ -89,13 +89,37 @@ evtPtr()     → f32[n*4]         evtCount()
 statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 ```
 
+### Models
+
+```
+src/render/
+  mod.rs       buffers, the frame, the shared body/detail/variation helpers
+  mesh.rs      the ten prototype meshes and the conventions they obey
+  scenery.rs   palms, boulders, burnt stumps
+  castle.rs    keeps and the ruins they leave
+  ground.rs    walkers: worm, troll, nest, villager, soldier
+  flyer.rs     wasp, griffin, dragon, wraith, balloon, and the wing they share
+  effects.rs   carpets, riders, mana orbs, projectiles, the fireball
+  minimap.rs   the minimap raster
+```
+
+What actually stops assembled primitives reading as a pile of shapes, in
+rough order of effect: per-instance orientation; per-entity variation; joints
+that overlap by 15-30% rather than butting; silhouettes broken by a spine, a
+strap or a snapped edge at every rim; left/right pairs that are never perfect
+mirrors; a slightly different tint on every piece; and chains — a neck, a tail,
+a trunk — that taper *and* curve *and* twist rather than stepping in a line.
+
 ### Rendering
 
 - **Terrain** is a static 320×320 grid mesh displaced in the vertex shader from an `r32float` height texture, with normals from neighbour taps. Deforming the world means writing one dirty row-band per frame — the mesh never changes. `bytesPerRow` is 1280, so the 256-byte alignment rule is satisfied for free.
 - **Pixels live on the edges, not on everything.** The scene renders at full resolution and stays smooth across open sky, water and grass. In the composite pass each screen-space block compares itself against its four neighbours; where that contrast is high — a silhouette, a shoreline, the line between grass and rock, the rim of a cloud — the block collapses to a single flat colour and the animated static, 4×4 Bayer dither and 20-level quantise fade in with it. Everywhere else keeps full precision. Blanket low-res pixelation puts the same chunk size on a blank sky as on a tree, which reads as a broken display rather than an art style. The 4px block is fixed — it is the art direction, not a setting.
 - HDR `rgba16float` target, threshold → separable blur bloom at quarter res, ACES tonemap, vignette.
 - **Draw range is deliberately short** (1600 units, on a 2560-unit map). Haze is exponential up close and then closed off hard by a `smoothstep` on `dist / far`, so the world always reaches full sky before the far plane and the clipped edge of the sea is never visible. The haze colour is `skyColor()` evaluated with the ray clamped to the horizon — a downward ray through thick air ends in bright air, not in the dark band the sky puts below the horizon — and the sky holds that same colour flat at and below the horizon, so the join is seamless wherever the world runs out.
-- Everything solid is instanced from four procedural prototypes (box, sphere, cone, and a flat disc used only for shadows) partitioned by shape each frame; creatures are assembled from a few dozen parts each.
+- **Everything solid is instanced from ten procedural prototypes**, partitioned by shape each frame: box, sphere, cone, cylinder, frustum (a box tapering to 45%), wedge, **frond** (a leaf with its droop, taper, central rib and cut leaflets in the mesh), **boulder** (an irregular flat-shaded lump), **crenels** (a whole parapet ring — merlons, embrasures and walkway in one instance), and a flat disc used only for shadows. The last four exist because a palm frond drawn as five cuboids costs five instances and still reads as five cuboids; drawn as one `Frond` it costs one and reads as a leaf. Cost is per instance, not per triangle, so an intricate mesh is always cheaper than the boxes that approximate it.
+- **Instances carry pitch and roll, not just yaw.** Yaw alone leaves every piece of every model square to the world axes, which is most of why parts assembled from prototypes read as a stack of blocks rather than as a creature. Drooping fronds, splayed limbs, canted roofs and banked wings all need the other two angles. Local +Z is forward, +X is the model's own right; positive pitch tips the nose down, positive roll raises the right side; applied roll, then pitch, then yaw.
+- **Nothing is allowed to come out the same twice.** Every creature hashes its slot index, every scenery item hashes its own, and every proportion, count, angle, tint and optional feature comes off that hash. A grove where each tree carries the same seven fronds at the same seven bearings reads as wallpaper however well one tree is built — and the same is true of a keep's garrison. The hash is an integer mixer, not the usual `fract(sin(x) * 43758.5)`: at f32 precision that lands on a couple of hundred distinct values and correlates strongly between neighbouring slots, and neighbouring slots are exactly what a clump is made of.
+- **Models thin out with distance.** Creatures, scenery and keeps each resolve a detail tier from range and drop trim first, then limbs, then everything but the silhouette. A troll is sixty pieces close up and five across the bay.
 - **Shading is stepped, which is what gives shadows a pixel edge.** A smooth lambert ramp has no contrast boundary anywhere along it, so the edge pass never finds one and shadows stay airbrushed. The diffuse term is snapped to eight levels and pulled 58% of the way toward them, so shaded faces and hillsides get hard terminators the pixel pass can bite on; the steps ease back to smooth past 260 units so distant slopes don't band into stripes.
 - **Ground shadows** are flat discs laid under every caster, depth-tested but never depth-written, multiplied into the scene rather than painted over it. Their falloff is snapped to a grid in the disc's own space, so the rim breaks into steps instead of fading out. A blob broadens and fades with the caster's altitude — flying over a flat sea of terrain, it is the only read you get on your own height, which is why the player's shadow is pushed *outside* the instance range that first-person view drops.
 - **Scenery is drawn last, to a budget, nearest tier first.** Palms and boulders outnumber everything else by two orders of magnitude, and a hillside of trees must never crowd the creature about to eat you out of the instance buffer. Each item is built from up to twenty pieces close up and two at range; when the budget runs out it is the far tier that stops, which is the one place it isn't noticed.
@@ -120,7 +144,7 @@ src/
   spells.rs     casting: one function per spell
   creatures.rs  creature AI, projectiles, orbs, particles
   wizards.rs    player flight and the rival AI
-  render.rs     instance and particle buffers, meshes, minimap, state block
+  render/       instance and particle buffers, meshes, every model, minimap
 ```
 
 ### No unsafe
@@ -131,6 +155,7 @@ The crate is `#![deny(unsafe_code)]` and contains **no unsafe blocks at all**. S
 
 ### Things that will bite
 
+- **The draw pass runs inside `step()`.** `advance` calls `build_frame`, so a random draw taken while building the frame advances the simulation's generator and changes the world. Worse, anything conditioned on camera distance makes the world depend on where the player is looking. Particle emission for orb sparkles and keep smoke used to live in the draw routines for exactly this reason and has been moved into the simulation; `src/render/` now contains no `self.rng` at all, and it must stay that way.
 - **Wrapping arithmetic.** The value-noise hash multiplies deliberately overflow. Rust panics on overflow in debug where the original wrapped silently, so those sites use `wrapping_mul`/`wrapping_add`. Without them the same seed grows different terrain.
 - **Short-circuit order is load-bearing.** Random draws inside a condition must stay inside it. Hoisting the rival's aggression roll out of its `&&` chain consumed a number on frames where the rival was never going to engage, which shifted the entire sequence and changed the world. Every RNG call site is written to draw exactly when the original did.
 
@@ -154,7 +179,7 @@ npm test           # headless sim balance sweep + validating render harness
 `npm test` runs two things worth knowing about:
 
 - **`balance-sim-test.mjs`** drives the WASM core with a scripted bot for thousands of simulated seconds across several seeds and difficulty levels, and reports who won. This is how the economy was tuned — it caught a faction-ID bug where player spells couldn't damage wild creatures at all, and an exploit where parking on your own castle won the level.
-- **`headless-render-test.mjs`** runs the real game loop against a WebGPU stub that *validates arguments* the way the driver would — buffer overflows, non-4-aligned writes, `bytesPerRow` alignment, reads past the end of source arrays. Useful because it catches renderer bugs without a GPU.
+- **`headless-render-test.mjs`** runs the real game loop against a WebGPU stub that *validates arguments* the way the driver would — buffer overflows, non-4-aligned writes, `bytesPerRow` alignment, reads past the end of source arrays. Useful because it catches renderer bugs without a GPU. It also checks every prototype mesh fits its arrays and that no index dangles: the mesh builders drop vertices silently when a shape outgrows its capacity, so an overflowing prototype renders with holes and nothing says why.
 
 ## Deploy
 

@@ -363,7 +363,16 @@ fn instanceBasis(rot: vec3<f32>) -> mat3x3<f32> {
   let ndl = terraceLight(max(dot(n, L), 0.0), length(toCam));
   // Sky fill never reaches zero: an unlit face is in shade, not in a cave.
   let sky = 0.44 + 0.28 * clamp(n.y, 0.0, 1.0);
-  var col = i.col * (sky * vec3<f32>(0.50, 0.60, 0.86) + ndl * vec3<f32>(1.22, 1.06, 0.82) * U.sun.w);
+  // Surface grain. A model assembled from prototypes has large, perfectly
+  // uniform faces, and a uniform face reads as moulded plastic however good the
+  // silhouette is. Two cheap noise fields on different planes, blended by the
+  // face normal, give stone, hide and cloth something to catch. Emissive pieces
+  // are left alone — grain on a flame reads as dirt.
+  let planar = mix(vnoise(i.wp.xz * 0.5), vnoise(i.wp.zy * 0.5), abs(n.y) * 0.5 + 0.25);
+  // faded out with range, or a two-unit noise cell goes sub-pixel and fizzes
+  let grainFade = 1.0 - smoothstep(140.0, 420.0, length(toCam));
+  let grain = 1.0 + (planar - 0.5) * 0.16 * (1.0 - i.glow) * grainFade;
+  var col = i.col * grain * (sky * vec3<f32>(0.50, 0.60, 0.86) + ndl * vec3<f32>(1.22, 1.06, 0.82) * U.sun.w);
   let rim = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 2.5);
   col += i.col * rim * 0.30;
   col = mix(col, i.col * 2.9 + vec3<f32>(0.25), i.glow);

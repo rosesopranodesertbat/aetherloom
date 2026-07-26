@@ -114,6 +114,27 @@ if (els.err && els.err.innerHTML) console.log('ERR PANEL:', els.err.innerHTML.sl
 if (!g || !g.sim) { console.log('BOOT FAILED'); process.exit(1); }
 console.log('booted. terrain', g.TW, 'cell', g.cell, 'world', g.world);
 
+// Prototype meshes: the builders drop vertices and triangles silently when a
+// mesh outgrows its arrays, so a shape that overflows just renders with holes
+// and nothing says why. Check every one fits and that no index dangles.
+{
+  const names = ['cuboid','sphere','cone','shadow','cylinder','frustum','wedge','frond','boulder','crenels'];
+  g.sim.buildMeshes();
+  const shapes = [];
+  for (let i = 0; i < g.sim.shapeCount(); i++) {
+    const verts = g.sim.meshVertFloats(i) / 6, idx = g.sim.meshIdxCount(i);
+    const name = names[i] || `shape${i}`;
+    if (verts === 0 || idx === 0) note(`mesh ${name} is empty`);
+    let worst = -1;
+    const view = new Uint16Array(g.sim.memory.buffer, g.sim.meshIdxPtr(i), idx);
+    for (const v of view) if (v > worst) worst = v;
+    if (worst >= verts) note(`mesh ${name} index ${worst} past its ${verts} vertices — the builder truncated`);
+    if (idx % 3 !== 0) note(`mesh ${name} has ${idx} indices, not a whole number of triangles`);
+    shapes.push(`${name} ${verts}v/${idx}i`);
+  }
+  console.log('meshes:', shapes.join('  '));
+}
+
 // drive frames: title screen, then gameplay with input and casting
 let t = 0;
 const step = (n, setup) => {

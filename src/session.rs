@@ -258,6 +258,7 @@ impl World {
             self.update_creatures(dt);
             self.update_projectiles(dt);
             self.update_orbs(dt);
+            self.smoke_damaged_keeps(dt);
             self.update_fires(dt);
             self.restock_wildlife(dt);
             self.settle_outcome();
@@ -268,6 +269,50 @@ impl World {
                 max(self.session.screen_shake - dt * SHAKE_DECAY_RATE, 0.0);
         }
         self.build_frame();
+    }
+
+    /// Cracked keeps smoke. This lives in the simulation rather than in the
+    /// draw pass because it draws random numbers, and `build_frame` runs inside
+    /// `step` — a random draw taken while drawing shifts this generator's whole
+    /// sequence, so the world would depend on the renderer.
+    fn smoke_damaged_keeps(&mut self, dt: f32) {
+        /// Below this share of health a keep starts smoking.
+        const SMOKE_THRESHOLD: f32 = 0.6;
+        /// Puffs per second from one burning keep.
+        const PUFFS_PER_SECOND: f32 = 24.0;
+        /// Spread of the plume across the keep, and how high it starts.
+        const PLUME_SPREAD: f32 = 16.0;
+        const PLUME_RISE: (f32, f32) = (6.0, 28.0);
+        for wizard in 0..=self.session.rival_count {
+            let full = self.castles.max_health[wizard];
+            if full <= 0.0 || self.castles.health[wizard] / full >= SMOKE_THRESHOLD {
+                continue;
+            }
+            if !self.rng.chance(PUFFS_PER_SECOND * dt) {
+                continue;
+            }
+            let offset_x = self.rng.range(-PLUME_SPREAD, PLUME_SPREAD);
+            let offset_z = self.rng.range(-PLUME_SPREAD, PLUME_SPREAD);
+            let rise = self.rng.range(PLUME_RISE.0, PLUME_RISE.1);
+            let drift = [
+                self.rng.range(-3.0, 3.0),
+                self.rng.range(6.0, 16.0),
+                self.rng.range(-3.0, 3.0),
+            ];
+            self.spawn_particle(
+                [
+                    self.castles.pos_x[wizard] + offset_x,
+                    self.castles.pos_y[wizard] + rise,
+                    self.castles.pos_z[wizard] + offset_z,
+                ],
+                drift,
+                1.4,
+                5.0,
+                [0.35, 0.33, 0.3],
+                2.0,
+                0.9,
+            );
+        }
     }
 
     fn tick_spell_cooldowns(&mut self, dt: f32) {

@@ -56,8 +56,6 @@ const CASTLE_PLINTH_MAX_DROP: f32 = 26.0;
 const CASTLE_TOWER_RING: f32 = 19.0;
 const CASTLE_KEEP_BASE_HEIGHT: f32 = 14.0;
 const CASTLE_KEEP_HEIGHT_PER_TIER: f32 = 7.0;
-/// Below this share of health the keep starts smoking.
-const CASTLE_SMOKE_THRESHOLD: f32 = 0.6;
 
 
 mod castle;
@@ -230,12 +228,19 @@ impl World {
             (_, Faction(2)) => MapBlip::RivalOrb,
             _ => MapBlip::WildCreature,
         };
+        // Dot size tracks the creature's bulk, so the minimap says what is out
+        // there and not merely that something is. Every kind gets its own size.
         let scale = match kind {
-            CreatureKind::Nest => 1.6,
-            CreatureKind::Dragon => 1.5,
+            CreatureKind::Dragon => 1.7,
+            CreatureKind::Nest => 1.5,
+            CreatureKind::Troll => 1.25,
+            CreatureKind::Griffin => 1.1,
+            CreatureKind::SandWorm => 1.0,
+            CreatureKind::Wraith => 0.9,
             CreatureKind::Balloon => 0.8,
-            CreatureKind::Villager | CreatureKind::Soldier => 0.6,
-            _ => 1.0,
+            CreatureKind::Wasp => 0.7,
+            CreatureKind::Soldier => 0.55,
+            CreatureKind::Villager => 0.45,
         };
         self.push_blip(body.x, body.z, blip, scale);
         let shadow_radius = match kind {
@@ -555,15 +560,6 @@ impl CreatureBody {
             self.x + self.facing_sin * forward + self.facing_cos * side,
             self.y + up,
             self.z + self.facing_cos * forward - self.facing_sin * side,
-        ]
-    }
-
-    /// A point purely to one side, at a given height.
-    fn beside(&self, side: f32, up: f32) -> [f32; 3] {
-        [
-            self.x + self.facing_cos * side,
-            self.y + up,
-            self.z - self.facing_sin * side,
         ]
     }
 }
