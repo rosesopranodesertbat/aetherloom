@@ -120,13 +120,11 @@ npm test           # headless sim balance sweep + validating render harness
 
 Static files, no build step on the server, no special headers.
 
-**GitHub Pages**
+**GitHub Pages** — `.github/workflows/pages.yml` publishes `site/` on every push to `main`. Set Settings → Pages → Source to **GitHub Actions** once, then:
 ```bash
-git init && git add . && git commit -m "Aetherloom"
-git branch -M main && git remote add origin git@github.com:USER/aetherloom.git
-git push -u origin main
-# Settings → Pages → Deploy from branch → main → /site
+git push
 ```
+(A *branch* deploy will not work here: GitHub only offers `/` or `/docs` as the folder, and the playable files live in `site/`.)
 
 **Cloudflare Pages / Netlify**
 ```bash
