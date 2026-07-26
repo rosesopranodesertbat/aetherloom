@@ -1,0 +1,14 @@
+{
+  "name": "aetherloom",
+  "version": "1.0.0",
+  "description": "A flying-carpet wizard duel. WebGPU renderer, WebAssembly simulation.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node serve.mjs",
+    "test": "node test/balance-sim-test.mjs && node test/headless-render-test.mjs"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.27.36"
+  }
+}

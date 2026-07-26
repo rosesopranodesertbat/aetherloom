@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aetherloom — a flying-carpet wizard duel in your browser</title>
+<meta name="description" content="Fly a carpet, sculpt the ground with spells, and out-claim a rival wizard. WebGPU renderer, WebAssembly simulation, no install.">
+<meta name="theme-color" content="#090c1b">
+<meta property="og:title" content="Aetherloom">
+<meta property="og:description" content="A flying-carpet wizard duel. WebGPU + WebAssembly, running in the browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Spectral:ital,wght@0,300;0,500;1,300&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23101a44'/%3E%3Cpath d='M16 3 29 16 16 29 3 16z' fill='none' stroke='%23e5a73c' stroke-width='2'/%3E%3Cpath d='M16 9 23 16 16 23 9 16z' fill='%23c0392b'/%3E%3C/svg%3E">
+<style>
+:root{
+  --night:#090c1b; --lapis:#17255a; --lapis-deep:#101a44;
+  --saffron:#e5a73c; --gold:#f2d580; --cinnabar:#c0392b;
+  --ivory:#f0e6ce; --verdigris:#2f7d6e; --ink:#050710;
+  --display:'Cinzel','Trajan Pro','Palatino Linotype',Palatino,Georgia,serif;
+  --body:'Spectral','Iowan Old Style',Georgia,'Times New Roman',serif;
+  --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --trim:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Crect width='26' height='26' fill='%23101a44'/%3E%3Cpath d='M13 1.2 24.8 13 13 24.8 1.2 13z' fill='none' stroke='%23e5a73c' stroke-width='1.3'/%3E%3Cpath d='M13 6.4 19.6 13 13 19.6 6.4 13z' fill='%23c0392b'/%3E%3Ccircle cx='13' cy='13' r='1.5' fill='%23f0e6ce'/%3E%3C/svg%3E");
+  --band:12px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--ink);color:var(--ivory);
+  font-family:var(--body);overflow:hidden;-webkit-text-size-adjust:100%}
+#view{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair;
+  image-rendering:pixelated;image-rendering:crisp-edges}
+body.locked #view{cursor:none}
+
+/* ---------- woven kilim frame: the signature device ---------- */
+.frame{position:fixed;inset:0;pointer-events:none;z-index:5}
+.frame i{position:absolute;background-image:var(--trim);image-rendering:auto}
+.frame .t{top:0;left:0;right:0;height:var(--band);background-repeat:repeat-x}
+.frame .b{bottom:0;left:0;right:0;height:var(--band);background-repeat:repeat-x}
+.frame .l{top:0;bottom:0;left:0;width:var(--band);background-repeat:repeat-y}
+.frame .r{top:0;bottom:0;right:0;width:var(--band);background-repeat:repeat-y}
+.frame .in{inset:var(--band);border:1px solid rgba(229,167,60,.34);
+  box-shadow:inset 0 0 0 1px rgba(9,12,28,.8),inset 0 0 120px rgba(9,12,28,.55);background:none}
+
+/* ---------- hud ---------- */
+#hud{position:fixed;inset:var(--band);z-index:6;pointer-events:none;
+  display:grid;grid-template-columns:1fr auto 1fr;grid-template-rows:auto 1fr auto;
+  gap:14px;padding:16px 20px;transition:opacity .25s}
+#hud.dim{opacity:.28}
+.plate{background:linear-gradient(180deg,rgba(16,26,68,.86),rgba(9,12,28,.9));
+  border:1px solid rgba(229,167,60,.3);border-radius:2px;
+  box-shadow:0 2px 18px rgba(0,0,0,.5),inset 0 1px 0 rgba(242,213,128,.14)}
+
+/* realm label */
+.realm{grid-column:1;grid-row:1;justify-self:start;align-self:start;padding:9px 14px}
+.realm h2{margin:0;font:700 15px/1 var(--display);letter-spacing:.18em;text-transform:uppercase;color:var(--gold)}
+.realm p{margin:5px 0 0;font:300 12.5px/1.35 var(--body);color:rgba(240,230,206,.7);max-width:30ch}
+
+/* claim balance */
+.claim{grid-column:2;grid-row:1;align-self:start;width:min(46vw,420px);padding:9px 12px 11px}
+.claim .lab{display:flex;justify-content:space-between;font:500 10px/1 var(--display);
+  letter-spacing:.2em;text-transform:uppercase;color:rgba(240,230,206,.62);margin-bottom:7px}
+.claim .lab b{color:var(--gold);font-weight:700}
+.claim .lab s{color:var(--cinnabar);text-decoration:none;font-weight:700}
+.track{position:relative;height:13px;background:rgba(5,7,16,.85);
+  border:1px solid rgba(229,167,60,.24);overflow:hidden}
+.track .fill{position:absolute;top:0;bottom:0;left:0;width:0;transition:width .18s linear}
+.weave{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.22) 0 2px,transparent 2px 5px)}
+#claimMe{background-color:#3b62d8}
+#claimRival{background-color:var(--cinnabar);opacity:.72;top:auto;height:4px;bottom:0}
+#claimTarget{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--gold);
+  box-shadow:0 0 7px rgba(242,213,128,.9)}
+
+/* vitals */
+.vitals{grid-column:1;grid-row:3;align-self:end;justify-self:start;padding:11px 13px;width:min(38vw,300px)}
+.vitals .row{display:flex;align-items:center;gap:9px}
+.vitals .row+.row{margin-top:9px}
+.vitals span.k{font:700 9.5px/1 var(--display);letter-spacing:.2em;color:rgba(240,230,206,.6);width:3.4em}
+.vitals .track{flex:1;height:15px}
+#hp{background-color:#b8322a}
+#mana{background-color:#2f6fb0}
+#manaMark{position:absolute;top:0;bottom:0;width:2px;background:rgba(242,213,128,.85);left:0}
+
+/* spell tablets */
+.bar{grid-column:2;grid-row:3;align-self:end;display:flex;gap:5px;pointer-events:auto}
+.slot{position:relative;width:60px;height:64px;padding:5px 3px 4px;overflow:hidden;cursor:pointer;
+  background:linear-gradient(180deg,rgba(16,26,68,.9),rgba(9,12,28,.94));
+  border:1px solid rgba(229,167,60,.26);border-radius:2px;color:var(--ivory);
+  font-family:var(--body);display:flex;flex-direction:column;align-items:center;justify-content:flex-end;
+  transition:transform .12s,border-color .12s}
+.slot .cd{position:absolute;left:0;right:0;bottom:0;height:0;background:rgba(5,7,16,.72);pointer-events:none}
+.slot .key{position:absolute;top:3px;left:5px;font:500 9px/1 var(--mono);color:rgba(240,230,206,.5)}
+.slot .cost{position:absolute;top:3px;right:5px;font:500 9.5px/1 var(--mono);color:var(--saffron)}
+.slot .glyph{font-size:19px;line-height:1;color:var(--gold);margin-bottom:3px;text-shadow:0 0 10px rgba(242,213,128,.35)}
+.slot .nm{font:500 9px/1 var(--display);letter-spacing:.1em;text-transform:uppercase;
+  color:rgba(240,230,206,.78);white-space:nowrap}
+.slot:hover{transform:translateY(-2px);border-color:rgba(242,213,128,.6)}
+.slot:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.slot.sel{border-color:var(--gold);background:linear-gradient(180deg,rgba(38,54,120,.95),rgba(16,26,68,.95));
+  box-shadow:0 0 0 1px rgba(242,213,128,.5),0 0 22px rgba(242,213,128,.24)}
+.slot.locked{opacity:.3;filter:grayscale(1);cursor:not-allowed}
+.slot.locked .nm::after{content:' ·locked'}
+.slot.poor .glyph,.slot.poor .cost{color:var(--cinnabar)}
+
+/* medallion minimap */
+.medallion{grid-column:3;grid-row:3;justify-self:end;align-self:end;position:relative;
+  width:196px;height:196px;border-radius:50%;background-image:var(--trim);
+  box-shadow:0 3px 22px rgba(0,0,0,.6),inset 0 0 0 1px rgba(242,213,128,.35)}
+.medallion::after{content:'';position:absolute;inset:11px;border-radius:50%;
+  border:1px solid rgba(242,213,128,.4);box-shadow:inset 0 0 26px rgba(5,7,16,.75)}
+#map{position:absolute;top:14px;left:14px;width:168px;height:168px;border-radius:50%}
+.medallion .legend{position:absolute;bottom:-2px;left:0;right:0;text-align:center;
+  font:500 8.5px/1 var(--display);letter-spacing:.22em;text-transform:uppercase;color:rgba(240,230,206,.5)}
+
+#stat{grid-column:3;grid-row:1;justify-self:end;align-self:start;font:300 12px/1.4 var(--body);
+  color:rgba(240,230,206,.66);text-align:right;max-width:26ch}
+#stat::after{content:attr(data-fps) ' fps';display:block;font:500 9.5px/1.6 var(--mono);color:rgba(240,230,206,.34)}
+
+/* ---------- overlays ---------- */
+.veil{position:fixed;inset:0;z-index:9;display:none;place-items:center;padding:24px;
+  background:radial-gradient(120% 90% at 50% 0%,rgba(23,37,90,.72),rgba(5,7,16,.93))}
+.veil.show{display:grid}
+.card{max-width:660px;text-align:center;padding:38px 34px;pointer-events:auto;
+  background:linear-gradient(180deg,rgba(16,26,68,.94),rgba(9,12,28,.96));
+  border:1px solid rgba(229,167,60,.4);
+  box-shadow:0 26px 90px rgba(0,0,0,.7),inset 0 1px 0 rgba(242,213,128,.2)}
+.card .rule{width:74px;height:3px;margin:0 auto 22px;background-image:var(--trim);background-size:auto 100%}
+h1{margin:0 0 6px;font:700 clamp(32px,7vw,62px)/1 var(--display);letter-spacing:.12em;
+  text-transform:uppercase;color:var(--gold);
+  text-shadow:0 0 40px rgba(242,213,128,.28),0 2px 0 rgba(5,7,16,.9)}
+.tag{margin:0 0 22px;font:300 italic 15px/1.5 var(--body);color:rgba(240,230,206,.74)}
+h3{margin:0 0 10px;font:700 22px/1.2 var(--display);letter-spacing:.1em;text-transform:uppercase;color:var(--gold)}
+.card p{margin:0 auto 18px;max-width:52ch;font:300 14.5px/1.62 var(--body);color:rgba(240,230,206,.8)}
+.btn{appearance:none;cursor:pointer;padding:13px 30px;font:700 12px/1 var(--display);
+  letter-spacing:.22em;text-transform:uppercase;color:var(--ink);background:var(--saffron);
+  border:1px solid var(--gold);border-radius:1px;transition:background .15s,transform .12s}
+.btn:hover{background:var(--gold);transform:translateY(-1px)}
+.btn:focus-visible{outline:2px solid var(--ivory);outline-offset:3px}
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(154px,1fr));gap:9px 22px;
+  margin:24px auto 26px;max-width:560px;text-align:left}
+.keys div{display:flex;gap:9px;align-items:baseline;font:300 12.5px/1.45 var(--body);color:rgba(240,230,206,.74)}
+.keys kbd{flex:0 0 auto;min-width:2.1em;text-align:center;padding:3px 6px;font:500 10.5px/1 var(--mono);
+  color:var(--gold);background:rgba(5,7,16,.8);border:1px solid rgba(229,167,60,.36);border-radius:2px}
+.fine{margin-top:6px;font:300 11.5px/1.5 var(--body);color:rgba(240,230,206,.42)}
+
+#err{position:fixed;inset:auto 0 0 0;z-index:20;display:none;margin:0;padding:20px 24px;
+  background:rgba(120,26,20,.95);border-top:2px solid var(--cinnabar);
+  font:300 13.5px/1.6 var(--body);color:#ffeee9}
+#err.show{display:block}
+#boot{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:var(--ink);
+  font:500 11px/1 var(--display);letter-spacing:.3em;text-transform:uppercase;color:rgba(240,230,206,.5)}
+
+@media (max-width:900px){
+  .slot{width:46px;height:52px}
+  .slot .nm{display:none}
+  .medallion{width:132px;height:132px}
+  #map{top:10px;left:10px;width:112px;height:112px}
+  .medallion::after{inset:8px}
+  #stat{display:none}
+  .realm p{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div class="frame" aria-hidden="true"><i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i><i class="in"></i></div>
+
+<div id="hud">
+  <div class="realm plate"><h2 id="lvl">Realm 1</h2><p id="tip"></p></div>
+
+  <div class="claim plate">
+    <div class="lab"><b>Your claim</b><span>mana banked</span><s>Rival</s></div>
+    <div class="track">
+      <div class="fill weave" id="claimMe"></div>
+      <div class="fill" id="claimRival"></div>
+      <div id="claimTarget"></div>
+    </div>
+  </div>
+
+  <div id="stat"></div>
+
+  <div class="vitals plate">
+    <div class="row"><span class="k">Life</span><div class="track"><div class="fill weave" id="hp"></div></div></div>
+    <div class="row"><span class="k">Mana</span><div class="track"><div class="fill weave" id="mana"></div><div id="manaMark"></div></div></div>
+  </div>
+
+  <div class="bar" id="spellbar"></div>
+
+  <div class="medallion"><canvas id="map" width="168" height="168"></canvas><span class="legend">The realm</span></div>
+</div>
+
+<div class="veil" id="title">
+  <div class="card">
+    <div class="rule"></div>
+    <h1>Aetherloom</h1>
+    <p class="tag">Two wizards, one archipelago, and all the mana in it. Whoever banks half the realm first keeps the sky.</p>
+    <div class="keys">
+      <div><kbd>W</kbd><span>Thrust forward</span></div>
+      <div><kbd>A D</kbd><span>Slide left and right</span></div>
+      <div><kbd>Mouse</kbd><span>Steer the carpet</span></div>
+      <div><kbd>Space</kbd><span>Climb</span></div>
+      <div><kbd>Shift</kbd><span>Dive</span></div>
+      <div><kbd>X</kbd><span>Hold to slow down</span></div>
+      <div><kbd>Click</kbd><span>Cast the held spell</span></div>
+      <div><kbd>1–9</kbd><span>Choose a spell</span></div>
+      <div><kbd>Q E</kbd><span>Cycle spells</span></div>
+      <div><kbd>C</kbd><span>Swap to chase view</span></div>
+      <div><kbd>V</kbd><span>Scene resolution</span></div>
+      <div><kbd>P</kbd><span>Pause</span></div>
+      <div><kbd>M</kbd><span>Mute</span></div>
+    </div>
+    <p>Kill the wildlife and their nests to shake mana loose, fly low to draw it in, then carry it home to your keep. Banked mana raises your castle, and a taller castle feeds you spells faster. Crack your rival's keep and it spills everything it holds.</p>
+    <button class="btn" id="begin" type="button">Unroll the carpet</button>
+    <p class="fine">Needs WebGPU · click the sky to capture the mouse, Esc to release</p>
+  </div>
+</div>
+
+<div class="veil" id="overlay">
+  <div class="card">
+    <div class="rule"></div>
+    <h3 id="otitle"></h3>
+    <p id="obody"></p>
+    <button class="btn" id="obtn" type="button"></button>
+  </div>
+</div>
+
+<p id="err"></p>
+<div id="boot">Weaving the realm</div>
+
+<!--BOOT-->
+<script type="module">
+  import { start } from './game.js';
+  start('./sim.wasm');
+</script>
+<!--/BOOT-->
+</body>
+</html>
