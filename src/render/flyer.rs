@@ -385,7 +385,11 @@ impl World {
         // a gappy wing is a shorter, duller wing — all draw_wing will take.
         let moult = if body.quirk(19.0, 0.34) { 1.0 } else { -1.0 };
         for side in [1.0f32, -1.0] {
-            let (reach, wear) = if side == moult { (0.86, 0.84) } else { (1.0, 1.0) };
+            let (reach, wear) = if side * moult > 0.0 {
+                (0.86, 0.84)
+            } else {
+                (1.0, 1.0)
+            };
             self.draw_wing(
                 body,
                 side,
@@ -418,13 +422,16 @@ impl World {
         // The fur line, sunk into the crease between the two masses rather
         // than painted across one of them — where the breast plumage stops
         // being feathers and the pelt starts being fur.
+        // Sized to the trunk where the two ellipsoids actually cross, which is
+        // well inside their widest point: a ring cut to the chest's girth
+        // stands off the waist as a collar rather than sinking into it.
         let (at, rotation, _) = shaft(
-            body.ahead(-2.4 * build, -0.1 * build, 0.0),
-            body.ahead(-0.6 * build, 0.1 * build, 0.0),
+            body.ahead(-2.0 * build, -0.05 * build, 0.0),
+            body.ahead(-0.4 * build, 0.05 * build, 0.0),
         );
         self.push_oriented(
             at,
-            [4.9 * build * barrel, 1.8 * build, 5.3 * build],
+            [3.5 * build * barrel, 1.8 * build, 3.8 * build],
             shaded(pelt, 0.56),
             rotation,
             0.0,
@@ -488,138 +495,183 @@ impl World {
         if !body.detail.at_least(BodyDetail::Full) {
             return;
         }
-        // collar, fattening the neck where it meets the shoulders
-        let (at, rotation, length) =
-            shaft(neck_base, body.ahead(4.4 * build, 2.4 * build, lean * 0.5));
+        // Cere: the waxy saddle where the bill meets the skull. Pitched a
+        // quarter turn so the frustum tapers forward into the beak rather than
+        // standing on end, and dulled well off the horn so the join reads as
+        // flesh and not as more bill.
         self.push_oriented(
-            at,
-            [3.2 * build, length * 1.5, 3.2 * build],
-            shaded(plume, 0.84),
-            rotation,
+            head_at(1.1 * build, 0.3 * build, 0.0),
+            [2.6 * build, 2.2 * build, 2.1 * build],
+            shaded(horn, 0.62),
+            Rotation::new(body.facing + peer, QUARTER_TURN + 0.12, 0.0),
             0.0,
-            Shape::Cylinder,
+            Shape::Frustum,
         );
-        // breast feathering, laid on in two overlapping sheets
-        for side in [1.0f32, -1.0] {
-            let salt = 45.0 + side * 3.0;
-            let rotation = Rotation::new(
-                body.facing + side * (0.28 + body.vary(salt) * 0.10),
-                1.02 + body.vary(salt + 2.0) * 0.16,
-                -side * 0.38,
-            );
-            let length = 4.4 * build * (1.0 + body.vary(salt + 4.0) * 0.10);
-            let root = body.ahead(3.3 * build, 1.1 * build, side * 1.0 * build);
-            self.push_oriented(
-                rooted(root, rotation, length),
-                [2.7 * build, 1.0 * build, length],
-                shaded(plume, 0.97),
-                rotation,
-                0.0,
-                Shape::Frond,
-            );
-        }
-        // the ruff: feather groups swept back over the shoulders in two tiers
-        for feather in 0..RUFF_FEATHERS {
-            let side = if feather % 2 == 0 { 1.0 } else { -1.0 };
-            let tier = (feather / 2) as f32;
-            let salt = 31.0 + feather as f32 * 5.0;
-            let rotation = Rotation::new(
-                body.facing + side * (1.55 + tier * 0.55 + body.vary(salt) * 0.20),
-                0.30 + tier * 0.34 + body.vary(salt + 2.0) * 0.18,
-                -side * (0.50 + tier * 0.30),
-            );
-            let length = (3.7 - tier * 0.8) * build * (1.0 + body.vary(salt + 4.0) * 0.14);
-            let root = body.ahead(
-                2.6 * build - tier * 1.1 * build,
-                1.9 * build - tier * 0.5 * build,
-                side * 0.9 * build,
-            );
-            self.push_oriented(
-                rooted(root, rotation, length),
-                [2.0 * build, 0.9 * build, length],
-                shaded(plume, 0.88 - tier * 0.06),
-                rotation,
-                0.0,
-                Shape::Frond,
-            );
-        }
-        // the hook, steeper than the culmen behind it
+        // Brow: a heavy shelf across the skull, tipped down at the front so
+        // the eyes sit in its shadow. Rolled a shade, because a head that is
+        // exactly symmetrical is the loudest tell there is.
         self.push_oriented(
-            head_at(3.0 * build, -1.3 * build, 0.0),
-            [1.2 * build, 1.7 * build, 1.7 * build],
-            shaded(horn, 0.9),
-            Rotation::new(body.facing + peer, 1.05, 0.0),
+            head_at(0.7 * build, 1.3 * build, 0.0),
+            [4.0 * build, 1.4 * build, 3.0 * build],
+            shaded(hackle, 0.72),
+            Rotation::new(body.facing + peer, 0.28, body.vary(47.0) * 0.10),
             0.0,
             Shape::Wedge,
         );
+        let eye = body.tint([0.98, 0.66, 0.10], 53.0, 0.16);
+        // long-eared or nearly bare, and it holds for the life of the bird
+        let tuft = if body.quirk(59.0, 0.35) { 1.7 } else { 0.0 };
         for side in [1.0f32, -1.0] {
-            // ear tufts, swept back and never the same length
             let salt = 51.0 + side * 4.0;
-            let base = head_at(-0.5 * build, 1.2 * build, side * 1.0 * build);
+            // deep-set: back under the brow, not stuck on the cheek where a
+            // sphere naturally lands
+            self.push_instance(
+                head_at(0.9 * build, 0.4 * build, side * 1.25 * build),
+                [1.0 * build, 1.1 * build, 0.9 * build],
+                eye,
+                body.facing + peer,
+                0.55,
+                Shape::Sphere,
+            );
+            // ear tufts, swept back and never the same length on both sides
+            let base = head_at(-0.7 * build, 1.1 * build, side * 1.05 * build);
             let tip = head_at(
-                -2.1 * build - body.vary_unit(salt) * 0.9,
-                3.3 * build + body.vary(salt + 2.0) * 0.8,
-                side * 2.2 * build,
+                -2.5 * build - body.vary_unit(salt) * 1.0,
+                (2.4 + tuft) * build + body.vary(salt + 2.0) * 0.7,
+                side * (2.3 * build + body.vary(salt + 4.0) * 0.4),
             );
             let (at, rotation, length) = shaft(base, tip);
             self.push_oriented(
                 at,
-                [0.8 * build, length, 0.8 * build],
-                shaded(plume, 0.72),
+                [0.85 * build, length, 0.85 * build],
+                shaded(hackle, 0.70),
                 rotation,
                 0.0,
                 Shape::Cone,
             );
         }
-        // tail fan
-        for feather in 0..TAIL_FEATHERS {
-            let spread = feather as f32 - 1.0;
-            let salt = 61.0 + feather as f32 * 6.0;
+        // Hackles: one group at one shared sweep, back off the nape and down
+        // over the withers, with only enough variation inside it to stop the
+        // three reading as a single moulded collar.
+        let sweep = 0.32 + body.vary_unit(67.0) * 0.16;
+        for feather in 0..HACKLES {
+            let rank = feather as f32 - (HACKLES - 1) as f32 * 0.5;
+            let salt = 31.0 + feather as f32 * 5.0;
             let rotation = Rotation::new(
-                body.facing + core::f32::consts::PI + spread * (0.32 + body.vary(salt) * 0.10),
-                -0.16 + body.vary(salt + 3.0) * 0.22,
-                spread * 0.42,
+                body.facing + core::f32::consts::PI - rank * (sweep + body.vary(salt) * 0.06),
+                0.30 + body.vary(salt + 2.0) * 0.09,
+                rank * 0.44,
             );
-            let length = (4.6 - abs(spread) * 0.8) * build;
+            let root = head_at(
+                -1.3 * build,
+                -1.5 * build - abs(rank) * 0.5 * build,
+                rank * 1.2 * build,
+            );
+            let length = (5.2 - abs(rank) * 0.6) * build * (1.0 + body.vary(salt + 4.0) * 0.08);
             self.push_oriented(
-                rooted(tail_tip, rotation, length),
-                [2.1 * build, 1.2 * build, length],
-                shaded(plume, 0.86),
+                rooted(root, rotation, length),
+                [2.6 * build, 1.0 * build, length],
+                shaded(hackle, 0.88 - abs(rank) * 0.07),
+                rotation,
+                0.0,
+                Shape::Frond,
+            );
+        }
+        // Breast plumage: broad sheets hung off the throat and falling down
+        // the front of the chest, overlapping each other along the midline.
+        // Solved end to end so they lie on the breast instead of sticking out
+        // in front of it, which is where a guessed angle always puts them.
+        for sheet in 0..BREAST_SHEETS {
+            let side = if sheet % 2 == 0 { 1.0 } else { -1.0 };
+            let salt = 45.0 + sheet as f32 * 7.0;
+            let root = body.ahead(3.6 * build, 2.4 * build, side * 1.2 * build);
+            let fall = body.ahead(
+                4.5 * build + body.vary(salt) * 0.5,
+                -2.1 * build,
+                side * (2.1 * build + body.vary(salt + 2.0) * 0.4),
+            );
+            let roll = -side * (0.40 + body.vary(salt + 4.0) * 0.08);
+            let (rotation, length) = blade(root, fall, roll);
+            self.push_oriented(
+                rooted(root, rotation, length),
+                [3.6 * build, 1.2 * build, length],
+                shaded(plume, 1.06),
                 rotation,
                 0.0,
                 Shape::Frond,
             );
         }
         for side in [1.0f32, -1.0] {
-            // lion haunch and hock, tucked up under the belly
+            // Haunches, sitting below the fur line so the boundary has
+            // something to bound: furred, lumpy, and each at its own angle.
             let salt = 83.0 + side * 5.0;
-            let haunch = body.ahead(
-                -3.6 * build,
-                -1.4 * build,
-                side * (2.0 * build + body.vary(salt) * 0.35),
-            );
             self.push_instance(
-                haunch,
-                [2.7 * build, 3.3 * build, 3.7 * build],
-                shaded(pelt, 1.05),
-                body.facing + side * 0.22,
+                body.ahead(
+                    -3.3 * build + body.vary(salt) * 0.5,
+                    -1.7 * build,
+                    side * (1.9 * build + body.vary(salt + 2.0) * 0.3),
+                ),
+                [3.0 * build, 3.7 * build, 4.3 * build],
+                shaded(pelt, 1.07),
+                body.facing + side * 0.24 + body.vary(salt + 4.0) * 0.15,
                 0.0,
                 Shape::Boulder,
             );
-            let paw = body.ahead(
-                -2.3 * build,
-                -4.5 * build + body.vary(salt + 2.0) * 0.5,
-                side * 1.7 * build,
+        }
+        for side in [1.0f32, -1.0] {
+            // Forelimbs. Two salts per side, so the pair is never a mirror.
+            let salt = 71.0 + side * 5.0;
+            let splay = 1.7 * build + body.vary(salt) * 0.35;
+            let stand = 2.6 * build + body.vary(salt + 4.0) * 0.5;
+            let tread = -6.3 * build;
+            let out = side * (splay + 0.5);
+            let hip = body.ahead(2.6 * build, -1.9 * build, side * splay);
+            let knee = body.ahead(
+                3.4 * build + body.vary(salt + 2.0) * 0.6,
+                -4.4 * build,
+                side * (splay + 0.7),
             );
-            let (at, rotation, length) = shaft(haunch, paw);
+            let foot = body.ahead(stand, tread, out);
+            // feathered thigh, heaviest at the hip and buried in the chest
+            let (at, rotation, length) = shaft(hip, knee);
             self.push_oriented(
                 at,
-                [1.5 * build, length * 1.1, 1.5 * build],
-                shaded(pelt, 0.88),
+                [2.3 * build, length * 1.25, 2.3 * build],
+                shaded(plume, 0.90),
+                rotation,
+                0.0,
+                Shape::Frustum,
+            );
+            // bare scaled shank, starting where the feathering stops
+            let (at, rotation, length) = shaft(knee, foot);
+            self.push_oriented(
+                at,
+                [1.05 * build, length * 1.14, 1.05 * build],
+                shaded(horn, 0.60),
                 rotation,
                 0.0,
                 Shape::Cylinder,
             );
+            // three talons off the foot, one forward and one to each side,
+            // every one with its own reach and its own hook
+            for toe in 0..3 {
+                let fan = toe as f32 - 1.0;
+                let claw = salt + 20.0 + toe as f32 * 3.0;
+                let tip = body.ahead(
+                    stand + (1.9 - abs(fan) * 0.6) * build + body.vary(claw) * 0.35,
+                    tread - (1.4 + body.vary_unit(claw + 1.5) * 0.8) * build,
+                    out + fan * 1.2 * build,
+                );
+                let (at, rotation, length) = shaft(foot, tip);
+                self.push_oriented(
+                    at,
+                    [0.8 * build, length * 1.1, 0.8 * build],
+                    shaded(horn, 0.90),
+                    rotation,
+                    0.0,
+                    Shape::Cone,
+                );
+            }
         }
     }
 
