@@ -1,12 +1,12 @@
 # Aetherloom
 
-A flying-carpet wizard duel that runs in a browser tab. Original game, built as an homage to Bullfrog's *Magic Carpet* (1994) and *Magic Carpet 2* (1995) — the terrain you can blow holes in, the mana you have to physically carry home, and a rival wizard racing you for the same pool.
+A flying-carpet wizard duel that runs in a browser tab. Original game, built as an homage to Bullfrog's *Magic Carpet* (1994) and *Magic Carpet 2* (1995) — the terrain you can blow holes in, the mana your balloons have to physically carry home, and a rival wizard racing you for the same pool.
 
 No original assets are used. Every texture, shape, sound and level is generated procedurally at runtime.
 
 ## Play it
 
-**Fastest:** open `standalone.html` directly. One file, ~215 KB, WASM embedded as base64, no server needed.
+**Fastest:** open `standalone.html` directly. One file, ~180 KB, WASM embedded as base64, no server needed.
 
 **As a site:**
 ```bash
@@ -45,7 +45,7 @@ Mana is the whole game, and you never carry it home yourself — your balloons d
 Two halves that barely talk to each other, which is the point.
 
 ```
-src/sim.ts   ──asc──►  sim.wasm      the entire simulation
+src/lib.rs  ──cargo──►  sim.wasm     the entire simulation
                           │           (no imports, no JS calls, no GC)
                           │  linear memory, read directly as typed arrays
                           ▼
@@ -53,7 +53,7 @@ site/engine.js         WebGPU renderer + WGSL  ─────►  screen
 site/game.js           input, HUD, audio, level flow
 ```
 
-**The simulation is a freestanding WASM module with zero imports.** Terrain, creatures, AI, projectiles, particles, spells, the mana economy and the win condition all live in linear memory as flat `f32` arrays. JS never marshals anything: it maps `memory.buffer` once and reads through `Float32Array` views.
+**The simulation is `#![no_std]` Rust compiled to a freestanding WASM module with zero imports.** Terrain, creatures, AI, projectiles, particles, spells, the mana economy and the win condition all live in linear memory as flat `f32` arrays. JS never marshals anything: it maps `memory.buffer` once and reads through `Float32Array` views.
 
 The sim doesn't return "entities" — it writes **GPU-ready instance data**. Each frame it emits a packed instance array (position, scale, colour, yaw, glow, shape) that goes almost straight into `writeBuffer`. Measured cost: **~81 µs per 60 Hz step** (~12,000 steps/sec of headroom), so the simulation uses well under 1% of a frame.
 
@@ -87,28 +87,32 @@ statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 - **The HUD is icons, not words.** Every symbol — life, mana, the two keeps on the claim bar, all thirteen spells — is an 8×8 pixel grid in `game.js`, one character per pixel, expanded to inline SVG with `shape-rendering="crispEdges"` and runs of equal pixels merged into single rects. Spell names live in the tooltip. There is no screen border and no permanent text readout.
 - Castles level their own pad at placement: flat right out past the plinth, then a smoothstep skirt down to the hill. Anything that just samples the ground at its centre point lifts off the downhill side of a slope, so scenery and nests are sunk below their sample instead.
 
-## A note on Rust
+## The simulation core
 
-The brief asked for Rust. I built this in a sandbox where `static.rust-lang.org` and `sh.rustup.rs` both return HTTP 403, and Ubuntu's packaged `rustc` ships no `wasm32-unknown-unknown` standard library — so no Rust toolchain could be obtained or built. Rather than hand you untested Rust that I could never compile, I wrote the core in **AssemblyScript**, which compiles through Binaryen to real WebAssembly. The output is genuine `wasm32`: zero imports, native math, `-O3`, 106 KB.
+`src/lib.rs` is `#![no_std]` Rust built for `wasm32-unknown-unknown` as a `cdylib`. There is no allocator, no panic runtime and no host interface — the only dependency is [`libm`](https://crates.io/crates/libm), because `core` has arithmetic but no `sin`/`cos`/`atan2`, and linking `std` would drag in a runtime the module has no use for. `build.mjs` asserts the output has zero imports; `game.js` instantiates with an empty import object, so a single stray import would break instantiation outright.
 
-The ABI above is deliberately Rust-shaped. Porting is mechanical rather than a rewrite:
+State is a set of `static mut` arrays — structure-of-arrays, fixed capacity, `.bss`-allocated. The exports hand JS raw offsets into linear memory and JS maps them once as `Float32Array` views. Nothing is marshalled and nothing is copied per frame.
 
 ```rust
 static mut HEIGHT: [f32; 320 * 320] = [0.0; 320 * 320];
 
-#[no_mangle] pub extern "C" fn height_ptr() -> *const f32 { unsafe { HEIGHT.as_ptr() } }
+#[no_mangle] pub extern "C" fn heightPtr() -> usize { unsafe { HEIGHT.as_ptr() as usize } }
 #[no_mangle] pub extern "C" fn step(dt: f32) { /* ... */ }
 ```
 
-Build with `cargo build --release --target wasm32-unknown-unknown` (no `wasm-bindgen` needed — the interface is pointers and scalars), point `game.js` at the new `.wasm`, and nothing else changes. The struct-of-arrays layout, the dirty-row protocol and the instance packing are all already in the shape Rust would want.
+The exports are camelCase because `game.js` calls them by name, hence the `#![allow(non_snake_case)]` at the top of the file.
+
+A note on wrapping arithmetic: the value-noise hash multiplies deliberately overflow. Rust panics on overflow in debug builds and the original core wrapped silently, so those sites use `wrapping_mul`/`wrapping_add` explicitly — without them the same seed produces different terrain.
 
 ## Build
 
 ```bash
-npm install
-npm run build      # compiles src/sim.ts → wasm, writes dist/ + standalone.html
+rustup target add wasm32-unknown-unknown
+npm run build      # cargo → site/sim.wasm, then inlines site/ into standalone.html
 npm test           # headless sim balance sweep + validating render harness
 ```
+
+`npm run build --no-wasm` skips cargo and rebuilds `standalone.html` from the existing `site/sim.wasm`. There are no npm dependencies — node is only used for the bundler, the static server and the test harnesses.
 
 `npm test` runs two things worth knowing about:
 

@@ -1,0 +1,23 @@
+[package]
+name    = "aetherloom-sim"
+version = "1.0.0"
+edition = "2021"
+description = "Aetherloom simulation core — freestanding wasm32, zero imports."
+license = "MIT"
+
+[lib]
+name       = "sim"
+crate-type = ["cdylib"]
+path       = "src/lib.rs"
+
+# Transcendentals in pure Rust. core has no sin/cos/atan2, and pulling in std
+# would drag a runtime we have no use for — the module must stay importless.
+[dependencies]
+libm = { version = "0.2", default-features = false }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = true

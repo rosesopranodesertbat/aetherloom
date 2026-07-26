@@ -1,16 +1,37 @@
 // Compiles the simulation to WebAssembly and produces the single-file build.
-//   src/sim.ts  --asc-->  site/sim.wasm
-//   site/*      -------->  standalone.html   (modules inlined, wasm as base64)
+//   src/lib.rs  --cargo-->  site/sim.wasm
+//   site/*      --------->  standalone.html   (modules inlined, wasm as base64)
 import fs from 'fs';
 import { execSync } from 'child_process';
 
-console.log('compiling src/sim.ts -> site/sim.wasm');
-execSync([
-  'npx asc src/sim.ts --outFile site/sim.wasm',
-  '-O3 --shrinkLevel 0 --noAssert --runtime stub',
-  '--use abort= --use Math=NativeMath --use Mathf=NativeMathf',
-  '--initialMemory 64 --maximumMemory 256'
-].join(' '), { stdio: 'inherit' });
+const TARGET = 'wasm32-unknown-unknown';
+const OUT = `target/${TARGET}/release/sim.wasm`;
+// rustup installs to ~/.cargo/bin, which is not always on a non-login PATH
+const env = { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}` };
+
+if (!process.argv.includes('--no-wasm')) {
+  console.log(`compiling src/lib.rs -> site/sim.wasm  (${TARGET})`);
+  try {
+    execSync(`cargo build --release --target ${TARGET}`, { stdio: 'inherit', env });
+  } catch {
+    console.error(
+      '\ncargo failed. This needs a Rust toolchain with the wasm target:\n' +
+      "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh\n" +
+      `  rustup target add ${TARGET}\n` +
+      'Pass --no-wasm to rebuild standalone.html from the existing site/sim.wasm.');
+    process.exit(1);
+  }
+  fs.copyFileSync(OUT, 'site/sim.wasm');
+}
+
+// The module has to stay freestanding: game.js instantiates it with an empty
+// import object, so one stray import would break instantiation outright.
+const mod = new WebAssembly.Module(fs.readFileSync('site/sim.wasm'));
+const imports = WebAssembly.Module.imports(mod);
+if (imports.length) {
+  console.error('sim.wasm is not freestanding, it imports:', imports);
+  process.exit(1);
+}
 
 const strip = (f) => fs.readFileSync(f, 'utf8')
   .replace(/^import[^\n]*\n/gm, '')
