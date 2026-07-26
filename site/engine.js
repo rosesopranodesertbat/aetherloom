@@ -101,6 +101,20 @@ fn territory(wp: vec2<f32>) -> vec3<f32> {
   return tint;
 }
 
+// Lighting is stepped rather than smooth, which is what gives shaded faces and
+// terrain shadows a hard boundary for the edge pass to find and blockify. A
+// smooth ramp has no contrast edge anywhere along it, so it never pixelates.
+// Steps are eased back with distance so far hillsides do not band into stripes.
+fn terraceLight(v: f32, dist: f32) -> f32 {
+  let steps = 8.0;
+  let stepped = floor(v * steps + 0.5) / steps;
+  // Pulled part of the way to the steps, not all: full quantisation turns a
+  // whole hillside into one flat slab of shade, and banding a curved surface
+  // into halves reads as a fault rather than a shadow.
+  let terraced = mix(v, stepped, 0.58);
+  return mix(terraced, v, smoothstep(260.0, 900.0, dist));
+}
+
 // ---------------------------------------------------------------- sky pass
 struct FSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn fsTri(@builtin(vertex_index) vi: u32) -> FSOut {
@@ -148,33 +162,58 @@ struct TOut {
   let n = normalize(i.nrm);
   let slope = 1.0 - clamp(n.y, 0.0, 1.0);
   let h = i.hgt;
-  // Both terms are deliberately low frequency: with a working hash, a 0.6-scale
-  // term is sub-pixel at range and aliases into fizz the edge pass would block.
-  let grain = fbm2(i.wp.xz * 0.055) * 0.15 + vnoise(i.wp.xz * 0.22) * 0.05;
+  let p = i.wp.xz;
+
+  // Four bands of noise, each doing a different job. All are deliberately low
+  // frequency: with a working hash, a 0.6-scale term is sub-pixel at range and
+  // aliases into fizz the edge pass would block.
+  let region  = fbm2(p * 0.0038);            // which biome this ground leans to
+  let soil    = fbm2(p * 0.011);             // meadow / scrub / bare-dirt drift
+  let grain   = fbm2(p * 0.055) * 0.15 + vnoise(p * 0.22) * 0.05;
+  let mottle  = vnoise(p * 0.09);            // clumpy tonal blotches
 
   let seabed = vec3<f32>(0.20, 0.26, 0.24);
   let sand   = vec3<f32>(0.80, 0.68, 0.42);
-  let scrub  = vec3<f32>(0.30, 0.40, 0.20);
+  let dirt   = vec3<f32>(0.44, 0.34, 0.22);
+  let grass  = vec3<f32>(0.26, 0.44, 0.19);
+  let dry    = vec3<f32>(0.47, 0.49, 0.22);
+  let moss   = vec3<f32>(0.17, 0.34, 0.20);
   let rock   = vec3<f32>(0.40, 0.37, 0.34);
+  let slate  = vec3<f32>(0.33, 0.31, 0.33);
   let snow   = vec3<f32>(0.90, 0.89, 0.84);
 
-  var base = mix(seabed, sand, smoothstep(-14.0, 1.5, h));
-  base = mix(base, scrub, smoothstep(4.0, 20.0, h));
-  base = mix(base, rock,  smoothstep(58.0, 104.0, h));
-  base = mix(base, snow,  smoothstep(132.0, 176.0, h));
-  base = mix(base, rock, smoothstep(0.30, 0.72, slope) * 0.80);
-  base *= (0.86 + grain);
-  base += territory(i.wp.xz);
+  // The green is never one green: it swings between lush, dry and mossy on a
+  // very long wavelength, so no two hillsides read the same.
+  var ground = mix(grass, dry, smoothstep(-0.10, 0.34, region));
+  ground = mix(ground, moss, smoothstep(0.06, -0.30, region));
+  // scrubby patches and bare earth inside each region
+  ground = mix(ground, dirt, smoothstep(0.16, 0.42, soil) * 0.42);
+  ground = mix(ground, dry,  smoothstep(-0.14, -0.40, soil) * 0.35);
 
+  // Stone alternates between warm rock and cold slate in wide strata, which
+  // gives the peaks visible bedding rather than one flat grey.
+  let strata = sin(h * 0.09 + region * 4.0) * 0.5 + 0.5;
+  let stone = mix(rock, slate, strata);
+
+  var base = mix(seabed, sand, smoothstep(-14.0, 1.5, h));
+  base = mix(base, ground, smoothstep(3.0, 16.0, h));
+  base = mix(base, stone,  smoothstep(52.0, 104.0, h));
+  base = mix(base, snow,   smoothstep(126.0, 176.0, h + mottle * 22.0));
+  // anything steep sheds its soil and shows the rock underneath
+  base = mix(base, stone, smoothstep(0.26, 0.66, slope) * 0.85);
+  base *= (0.82 + grain * 1.35);
+  base *= (0.90 + mottle * 0.21);
+  base += territory(p);
+
+  let toCam = i.wp - U.cam.xyz;
+  let dist = length(toCam);
   let L = normalize(U.sun.xyz);
-  let ndl = max(dot(n, L), 0.0);
-  let sky = 0.30 + 0.30 * clamp(n.y, 0.0, 1.0);
+  let ndl = terraceLight(max(dot(n, L), 0.0), dist);
+  let sky = 0.38 + 0.28 * clamp(n.y, 0.0, 1.0);
   var col = base * (sky * vec3<f32>(0.52, 0.62, 0.86) + ndl * vec3<f32>(1.24, 1.06, 0.80) * U.sun.w);
   // damp shoreline
   col *= mix(0.68, 1.0, smoothstep(-2.5, 3.0, h));
 
-  let toCam = i.wp - U.cam.xyz;
-  let dist = length(toCam);
   col = applyFog(col, dist, normalize(toCam));
   return vec4<f32>(col, 1.0);
 }
@@ -232,6 +271,45 @@ struct WOut { @builtin(position) pos: vec4<f32>, @location(0) wp: vec3<f32> };
   return vec4<f32>(col, alpha * U.misc2.z);
 }
 
+// -------------------------------------------------------------- shadows
+// A flat disc laid on the ground under each caster, darkening whatever it
+// covers. The falloff is snapped to a grid in the disc's own space, so the rim
+// breaks into steps: a shadow with a pixel edge, rather than an airbrushed
+// blob that the edge pass would leave perfectly smooth.
+struct ShOut {
+  @builtin(position) pos   : vec4<f32>,
+  @location(0) disc  : vec2<f32>,   // -1..1 across the disc
+  @location(1) str   : f32,
+  @location(2) wp    : vec3<f32>,
+};
+@vertex fn shadowVS(
+  @location(0) vpos : vec3<f32>,
+  @location(1) vnrm : vec3<f32>,
+  @location(2) ipos : vec3<f32>,
+  @location(3) iscl : vec3<f32>,
+  @location(4) icol : vec3<f32>,
+  @location(5) iext : vec3<f32>
+) -> ShOut {
+  var o: ShOut;
+  o.disc = vpos.xz;
+  o.str = icol.x;
+  o.wp = ipos + vec3<f32>(vpos.x * iscl.x * 0.5, 0.0, vpos.z * iscl.z * 0.5);
+  o.pos = U.vp * vec4<f32>(o.wp, 1.0);
+  return o;
+}
+@fragment fn shadowFS(i: ShOut) -> @location(0) vec4<f32> {
+  let steps = 6.0;
+  let snapped = floor(i.disc * steps + 0.5) / steps;
+  let r = length(snapped);
+  if (r > 1.0) { discard; }
+  // wide falloff: a hard-edged disc reads as a hole cut in the ground
+  var a = i.str * (1.0 - smoothstep(0.08, 1.0, r));
+  // gone by the time the haze has taken over, so shadows never float in fog
+  a *= 1.0 - smoothstep(U.grade.w * 0.45, U.grade.w * 0.95, length(i.wp - U.cam.xyz));
+  if (a <= 0.004) { discard; }
+  return vec4<f32>(0.0, 0.0, 0.0, a);
+}
+
 // ---------------------------------------------------------------- solids
 struct SOut {
   @builtin(position) pos : vec4<f32>,
@@ -265,11 +343,12 @@ struct SOut {
 @fragment fn solidFS(i: SOut) -> @location(0) vec4<f32> {
   let n = normalize(i.nrm);
   let L = normalize(U.sun.xyz);
-  let ndl = max(dot(n, L), 0.0);
-  let sky = 0.34 + 0.30 * clamp(n.y, 0.0, 1.0);
-  var col = i.col * (sky * vec3<f32>(0.50, 0.60, 0.86) + ndl * vec3<f32>(1.28, 1.10, 0.84) * U.sun.w);
   let toCam = U.cam.xyz - i.wp;
   let V = normalize(toCam);
+  let ndl = terraceLight(max(dot(n, L), 0.0), length(toCam));
+  // Sky fill never reaches zero: an unlit face is in shade, not in a cave.
+  let sky = 0.44 + 0.28 * clamp(n.y, 0.0, 1.0);
+  var col = i.col * (sky * vec3<f32>(0.50, 0.60, 0.86) + ndl * vec3<f32>(1.22, 1.06, 0.82) * U.sun.w);
   let rim = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 2.5);
   col += i.col * rim * 0.30;
   col = mix(col, i.col * 2.9 + vec3<f32>(0.25), i.glow);
@@ -420,7 +499,10 @@ fn tone(scene: vec3<f32>, bloom: vec3<f32>) -> vec3<f32> {
 
 
 // ============================ renderer ======================================
-const MAXI = 12288, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
+const MAXI = 20480, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;   // MAXI must match MAX_INSTANCES in the core
+// Prototype meshes, in the order the core numbers them: cuboid, sphere, cone,
+// then the ground-shadow disc, which is drawn by its own pass.
+const SHAPES = [0, 1, 2, 3], SHADOW_SHAPE = 3;
 
 export class Renderer {
   constructor(canvas, sim) {
@@ -467,7 +549,7 @@ export class Renderer {
       d.queue.writeBuffer(ib, 0, idx);
       return { vb, ib, count: idx.length };
     };
-    this.shapes = [mk(0), mk(1), mk(2)];
+    this.shapes = SHAPES.map(mk);
     // 32 floats: view-projection, then its inverse
     this.camM = new Float32Array(mem, this.sim.camera(1.0, 1.0, 1, 2, 0, 0, 0, 0, 0, 1, 0, 1, 0), 32);
 
@@ -501,8 +583,8 @@ export class Renderer {
     });
 
     // ---- instance / particle buffers
-    this.instBuf = [0, 1, 2].map(() => d.createBuffer({ size: MAXI * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
-    this.instData = [0, 1, 2].map(() => new Float32Array(MAXI * 12));
+    this.instBuf = SHAPES.map(() => d.createBuffer({ size: MAXI * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
+    this.instData = SHAPES.map(() => new Float32Array(MAXI * 12));
     this.partBuf = d.createBuffer({ size: MAXPT * PART_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 
     // ---- bind group layouts
@@ -554,6 +636,26 @@ export class Renderer {
       fragment: { module: mod, entryPoint: 'solidFS', targets: [{ format: HDR }] },
       primitive: { topology: 'triangle-list', cullMode: 'back' },
       depthStencil: dss(true, 'less'), multisample: { count: this.sampleCount }
+    });
+    // Depth-tested so hills occlude it, but never written: a shadow is paint
+    // on the ground, not an object. `zero / one-minus-src-alpha` multiplies the
+    // scene down instead of laying grey over it, so dark ground stays dark.
+    this.pShadow = d.createRenderPipeline({
+      layout: pl([bglU]),
+      vertex: { module: mod, entryPoint: 'shadowVS', buffers: [
+        { arrayStride: 24, attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x3' },
+          { shaderLocation: 1, offset: 12, format: 'float32x3' }] },
+        { arrayStride: INST_STRIDE, stepMode: 'instance', attributes: [
+          { shaderLocation: 2, offset: 0, format: 'float32x3' },
+          { shaderLocation: 3, offset: 12, format: 'float32x3' },
+          { shaderLocation: 4, offset: 24, format: 'float32x3' },
+          { shaderLocation: 5, offset: 36, format: 'float32x3' }] }] },
+      fragment: { module: mod, entryPoint: 'shadowFS', targets: [{ format: HDR, blend: {
+        color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' },
+        alpha: { srcFactor: 'zero', dstFactor: 'one' } } }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: dss(false, 'less-equal'), multisample: { count: this.sampleCount }
     });
     this.pWater = d.createRenderPipeline({
       layout: pl([bglU, bglH]),
@@ -635,11 +737,11 @@ export class Renderer {
   // [skipLo, skipHi) is dropped entirely — the player's own carpet, in first
   // person, where it would otherwise sit across the bottom of the screen.
   partition(src, n, skipLo, skipHi) {
-    const c = [0, 0, 0], dst = this.instData;
+    const c = SHAPES.map(() => 0), dst = this.instData;
     for (let i = 0; i < n; i++) {
       if (i >= skipLo && i < skipHi) continue;
       const o = i * 12;
-      let s = src[o + 11] | 0; if (s < 0 || s > 2) s = 0;
+      let s = src[o + 11] | 0; if (s < 0 || s >= SHAPES.length) s = 0;
       const k = c[s]; if (k >= MAXI) continue;
       const t = dst[s], p = k * 12;
       t[p] = src[o]; t[p + 1] = src[o + 1]; t[p + 2] = src[o + 2];
@@ -648,7 +750,7 @@ export class Renderer {
       t[p + 9] = src[o + 9]; t[p + 10] = src[o + 10]; t[p + 11] = 0;
       c[s]++;
     }
-    for (let s = 0; s < 3; s++) if (c[s]) this.device.queue.writeBuffer(this.instBuf[s], 0, this.instData[s], 0, c[s] * 12);
+    for (let s = 0; s < SHAPES.length; s++) if (c[s]) this.device.queue.writeBuffer(this.instBuf[s], 0, this.instData[s], 0, c[s] * 12);
     return c;
   }
 
@@ -689,12 +791,20 @@ export class Renderer {
     pass.setVertexBuffer(0, this.gridVB); pass.setIndexBuffer(this.gridIB, 'uint32');
     pass.drawIndexed(this.gridCount);
     pass.setPipeline(this.pSolid);
-    for (let s = 0; s < 3; s++) {
-      if (!counts[s]) continue;
+    for (let s = 0; s < SHAPES.length; s++) {
+      if (s === SHADOW_SHAPE || !counts[s]) continue;
       const sh = this.shapes[s];
       pass.setVertexBuffer(0, sh.vb); pass.setVertexBuffer(1, this.instBuf[s]);
       pass.setIndexBuffer(sh.ib, 'uint16');
       pass.drawIndexed(sh.count, counts[s]);
+    }
+    // after the solids, so a caster never darkens itself
+    if (counts[SHADOW_SHAPE]) {
+      const sh = this.shapes[SHADOW_SHAPE];
+      pass.setPipeline(this.pShadow);
+      pass.setVertexBuffer(0, sh.vb); pass.setVertexBuffer(1, this.instBuf[SHADOW_SHAPE]);
+      pass.setIndexBuffer(sh.ib, 'uint16');
+      pass.drawIndexed(sh.count, counts[SHADOW_SHAPE]);
     }
     pass.setPipeline(this.pWater); pass.setBindGroup(1, this.bgH);
     pass.setVertexBuffer(0, this.waterVB); pass.draw(6);

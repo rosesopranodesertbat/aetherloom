@@ -36,6 +36,14 @@ pub fn atan2(y: f32, x: f32) -> f32 {
 }
 
 #[inline(always)]
+pub fn abs(x: f32) -> f32 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
+}
+
 pub fn min(a: f32, b: f32) -> f32 {
     if a < b {
         a

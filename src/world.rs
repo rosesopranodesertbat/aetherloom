@@ -22,7 +22,9 @@ pub const MAX_CREATURES: usize = 460;
 pub const MAX_PROJECTILES: usize = 128;
 pub const MAX_ORBS: usize = 768;
 pub const MAX_PARTICLES: usize = 4096;
-pub const MAX_INSTANCES: usize = 12288;
+// Raised for the palm groves: scenery is drawn last and to a budget, so this
+// is really the ceiling on how much of a forest is on screen at once.
+pub const MAX_INSTANCES: usize = 20480;
 pub const MAX_SCENERY: usize = 5200;
 pub const MAX_MAP_BLIPS: usize = 2048;
 pub const MAX_SOUND_CUES: usize = 128;
@@ -254,6 +256,10 @@ pub struct Scenery {
     pub kind: [SceneryKind; MAX_SCENERY],
     pub scale: [f32; MAX_SCENERY],
     pub rotation: [f32; MAX_SCENERY],
+    /// Cleared when a palm burns down to a stump.
+    pub standing: [bool; MAX_SCENERY],
+    /// Seconds of fire left. Zero means not alight.
+    pub burn_remaining: [f32; MAX_SCENERY],
     pub count: usize,
 }
 
@@ -432,6 +438,8 @@ impl World {
                 kind: [SceneryKind::Palm; MAX_SCENERY],
                 scale: [0.0; MAX_SCENERY],
                 rotation: [0.0; MAX_SCENERY],
+                standing: [false; MAX_SCENERY],
+                burn_remaining: [0.0; MAX_SCENERY],
                 count: 0,
             },
             render: RenderBuffers {
@@ -623,6 +631,126 @@ impl World {
         }
     }
 
+    /// A hit needs to read as a hit, not just a tint change: a tight cone of
+    /// sparks thrown back along the incoming direction, plus a couple of dark
+    /// chips knocked loose. Scaled by the blow so a firebolt and a meteor do
+    /// not look the same.
+    pub fn spawn_impact(&mut self, at: [f32; 3], away: [f32; 3], damage: f32) {
+        const MAX_SPARKS: i32 = 9;
+        let weight = clamp(damage / 60.0, 0.25, 1.6);
+        let sparks = 3 + (weight * MAX_SPARKS as f32) as i32;
+        let spread = length3(away[0], away[1], away[2]) + 0.001;
+        let push = [away[0] / spread, away[1] / spread, away[2] / spread];
+        for _ in 0..sparks {
+            let speed = self.rng.range(16.0, 46.0) * weight;
+            let scatter = [
+                self.rng.range(-0.55, 0.55),
+                self.rng.range(-0.35, 0.75),
+                self.rng.range(-0.55, 0.55),
+            ];
+            let life = self.rng.range(0.18, 0.42);
+            let size = self.rng.range(1.2, 2.6) * weight;
+            let heat = self.rng.range(0.55, 1.0);
+            self.spawn_particle(
+                at,
+                [
+                    (push[0] + scatter[0]) * speed,
+                    (push[1] + scatter[1]) * speed + 8.0,
+                    (push[2] + scatter[2]) * speed,
+                ],
+                life,
+                size,
+                [1.0, heat, 0.22],
+                -46.0,
+                2.4,
+            );
+        }
+        for _ in 0..3 {
+            let drift = [
+                self.rng.range(-14.0, 14.0),
+                self.rng.range(6.0, 22.0),
+                self.rng.range(-14.0, 14.0),
+            ];
+            let life = self.rng.range(0.35, 0.7);
+            self.spawn_particle(at, drift, life, 1.8 * weight, [0.22, 0.15, 0.12], -58.0, 1.1);
+        }
+    }
+
+    /// Sets light to any palm near a blast. Rocks do not burn.
+    pub fn ignite_scenery(&mut self, at: [f32; 3], radius: f32) {
+        /// A tree burns for this long before it is gone.
+        const BURN_SECONDS: f32 = 7.0;
+        let radius_sq = radius * radius;
+        for i in 0..self.scenery.count {
+            if !self.scenery.standing[i]
+                || self.scenery.kind[i] != SceneryKind::Palm
+                || self.scenery.burn_remaining[i] > 0.0
+            {
+                continue;
+            }
+            if length_sq2(self.scenery.pos_x[i] - at[0], self.scenery.pos_z[i] - at[2]) > radius_sq {
+                continue;
+            }
+            self.scenery.burn_remaining[i] = BURN_SECONDS;
+        }
+    }
+
+    /// Burns down anything alight, throwing flame as it goes. Fire spreads to
+    /// close neighbours, so a grove goes up rather than a single tree.
+    pub fn update_fires(&mut self, dt: f32) {
+        const SPREAD_RADIUS: f32 = 46.0;
+        /// Chance per second that a burning tree lights its neighbours.
+        const SPREAD_CHANCE: f32 = 0.35;
+        for i in 0..self.scenery.count {
+            if self.scenery.burn_remaining[i] <= 0.0 {
+                continue;
+            }
+            self.scenery.burn_remaining[i] -= dt;
+            let x = self.scenery.pos_x[i];
+            let z = self.scenery.pos_z[i];
+            let scale = self.scenery.scale[i];
+            let ground = self.height_at(x, z);
+            if self.rng.chance(0.55) {
+                let jitter_x = self.rng.range(-4.0, 4.0) * scale;
+                let jitter_z = self.rng.range(-4.0, 4.0) * scale;
+                let rise = self.rng.range(14.0, 40.0);
+                let life = self.rng.range(0.4, 0.9);
+                let size = self.rng.range(2.5, 5.5) * scale;
+                let heat = self.rng.range(0.3, 0.75);
+                self.spawn_particle(
+                    [x + jitter_x, ground + 10.0 * scale, z + jitter_z],
+                    [0.0, rise, 0.0],
+                    life,
+                    size,
+                    [1.0, heat, 0.1],
+                    6.0,
+                    0.9,
+                );
+            }
+            if self.rng.chance(0.18) {
+                let jitter_x = self.rng.range(-5.0, 5.0) * scale;
+                let jitter_z = self.rng.range(-5.0, 5.0) * scale;
+                let rise = self.rng.range(10.0, 26.0);
+                self.spawn_particle(
+                    [x + jitter_x, ground + 18.0 * scale, z + jitter_z],
+                    [0.0, rise, 0.0],
+                    1.6,
+                    6.0 * scale,
+                    [0.24, 0.22, 0.21],
+                    4.0,
+                    0.7,
+                );
+            }
+            if self.rng.chance(SPREAD_CHANCE * dt) {
+                self.ignite_scenery([x, ground, z], SPREAD_RADIUS);
+            }
+            if self.scenery.burn_remaining[i] <= 0.0 {
+                self.scenery.standing[i] = false;
+                self.spawn_burst([x, ground + 6.0, z], 12, 12.0, 3.0, [0.3, 0.26, 0.24], 1.1);
+            }
+        }
+    }
+
     // ---- sound -------------------------------------------------------------
     pub fn emit_sound(&mut self, cue: SoundCue, position: [f32; 3]) {
         let r = &mut self.render;
@@ -799,6 +927,15 @@ impl World {
             let falloff = 1.0 - sqrt(dist_sq) / radius;
             self.creatures.health[i] -= damage * (0.45 + 0.55 * falloff);
             self.creatures.hurt_flash[i] = 0.25;
+            self.spawn_impact(
+                [
+                    self.creatures.pos_x[i],
+                    self.creatures.pos_y[i],
+                    self.creatures.pos_z[i],
+                ],
+                [offset[0], offset[1], offset[2]],
+                damage,
+            );
             let inv_dist = 1.0 / (sqrt(dist_sq) + 0.001);
             self.creatures.vel_x[i] += offset[0] * inv_dist * damage * 0.5;
             self.creatures.vel_y[i] += offset[1] * inv_dist * damage * 0.25 + 4.0;

@@ -11,6 +11,27 @@ use crate::world::*;
 
 /// Scenery beyond this is not submitted at all; the haze hides the pop-in.
 const SCENERY_CULL_RANGE: f32 = 1050.0;
+/// Scenery is built from a dozen-odd pieces up close and a couple far away.
+/// Without this the instance buffer is exhausted by trees before a single
+/// creature is drawn — half the map is inside the cull range at any time.
+const SCENERY_DETAIL_RANGE: f32 = 380.0;
+const SCENERY_MID_RANGE: f32 = 610.0;
+/// Scenery stops being submitted at this instance count, leaving the rest of
+/// the buffer for whatever the frame still has to draw.
+const SCENERY_INSTANCE_BUDGET: usize = MAX_INSTANCES * 3 / 4;
+/// Fronds per palm crown, and the droop of their outer half.
+const PALM_FRONDS: i32 = 7;
+const PALM_FROND_DROOP: f32 = 2.6;
+/// Lumps per boulder. Overlapping ellipsoids read as weathered stone where a
+/// single box reads as a crate.
+const ROCK_LUMPS: i32 = 3;
+/// Above this the caster is too high for its shadow to read, and it is dropped.
+const SHADOW_MAX_ALTITUDE: f32 = 210.0;
+/// How much wider the blob gets at that altitude, and how much it fades.
+const SHADOW_SPREAD: f32 = 1.9;
+const SHADOW_FADE: f32 = 0.78;
+/// Clearance above the ground, so the disc never fights the terrain in depth.
+const SHADOW_LIFT: f32 = 0.6;
 /// Plinth half-width. The tower ring must fit inside it.
 const CASTLE_FOOTPRINT: f32 = 27.0;
 /// Height of the terrace above the levelled pad.
@@ -56,6 +77,30 @@ impl World {
         r.instance_count += 1;
     }
 
+    /// A blob shadow on the ground. It broadens and fades the higher the
+    /// caster is, which is the only altitude cue you get looking straight down
+    /// at a flat sea of terrain.
+    fn push_shadow(&mut self, x: f32, z: f32, y: f32, radius: f32, strength: f32) {
+        let ground = self.height_at(x, z);
+        if ground < SEA_LEVEL {
+            return; // over water: nothing to fall on
+        }
+        let altitude = max(y - ground, 0.0);
+        if altitude > SHADOW_MAX_ALTITUDE {
+            return;
+        }
+        let spread = 1.0 + altitude / SHADOW_MAX_ALTITUDE * SHADOW_SPREAD;
+        let fade = 1.0 - altitude / SHADOW_MAX_ALTITUDE * SHADOW_FADE;
+        self.push_instance(
+            [x, ground + SHADOW_LIFT, z],
+            [radius * 2.0 * spread, 1.0, radius * 2.0 * spread],
+            [strength * fade, 0.0, 0.0],
+            0.0,
+            0.0,
+            Shape::Shadow,
+        );
+    }
+
     fn push_blip(&mut self, x: f32, z: f32, blip: MapBlip, scale: f32) {
         let r = &mut self.render;
         if r.map_blip_count >= MAX_MAP_BLIPS {
@@ -74,7 +119,9 @@ impl World {
         self.render.instance_count = 0;
         self.render.particle_count = 0;
         self.render.map_blip_count = 0;
-        self.draw_scenery();
+        // Scenery is drawn last, and to a budget: there is far more of it than
+        // of anything else, and a hillside of palms must never crowd out the
+        // creature about to eat you.
         for wizard in 0..=self.session.rival_count {
             self.draw_castle(wizard);
         }
@@ -87,6 +134,7 @@ impl World {
         self.draw_player_carpet();
         let orb_count = self.draw_orbs();
         self.draw_projectiles();
+        self.draw_scenery();
         self.pack_particles();
         self.push_blip(
             self.wizards.pos_x[PLAYER],
@@ -97,13 +145,50 @@ impl World {
         self.write_state_block(orb_count);
     }
 
+    /// Cheap deterministic variation from a scenery item's own stored spin
+    /// and scale. It has to be stable frame to frame, so it cannot come from
+    /// the RNG — every draw would reshuffle the boulders.
+    fn scenery_jitter(spin: f32, scale: f32, salt: f32) -> f32 {
+        sin(spin * (7.13 + salt * 3.9) + scale * (5.31 + salt * 2.7) + salt)
+    }
+
+    /// Three passes, nearest tier first, each stopping at the budget. Far
+    /// scenery is what disappears when the frame is full, which is the one
+    /// place it will not be noticed.
     fn draw_scenery(&mut self) {
+        for tier in [
+            SceneryDetail::Full,
+            SceneryDetail::Reduced,
+            SceneryDetail::Distant,
+        ] {
+            if !self.draw_scenery_tier(tier) {
+                return;
+            }
+        }
+    }
+
+    /// Returns false once the budget is spent, so the remaining tiers are
+    /// skipped rather than part-drawn.
+    fn draw_scenery_tier(&mut self, tier: SceneryDetail) -> bool {
+        let eye_x = self.wizards.pos_x[PLAYER];
+        let eye_z = self.wizards.pos_z[PLAYER];
         for index in 0..self.scenery.count {
+            if self.render.instance_count >= SCENERY_INSTANCE_BUDGET {
+                return false;
+            }
             let x = self.scenery.pos_x[index];
             let z = self.scenery.pos_z[index];
-            if length_sq2(x - self.wizards.pos_x[PLAYER], z - self.wizards.pos_z[PLAYER])
-                > SCENERY_CULL_RANGE * SCENERY_CULL_RANGE
-            {
+            let range_sq = length_sq2(x - eye_x, z - eye_z);
+            let detail = if range_sq < SCENERY_DETAIL_RANGE * SCENERY_DETAIL_RANGE {
+                SceneryDetail::Full
+            } else if range_sq < SCENERY_MID_RANGE * SCENERY_MID_RANGE {
+                SceneryDetail::Reduced
+            } else if range_sq < SCENERY_CULL_RANGE * SCENERY_CULL_RANGE {
+                SceneryDetail::Distant
+            } else {
+                continue;
+            };
+            if detail != tier {
                 continue;
             }
             let ground = self.height_at(x, z);
@@ -112,36 +197,267 @@ impl World {
             }
             let scale = self.scenery.scale[index];
             let spin = self.scenery.rotation[index];
-            // Both kinds are sunk past their own ground sample: height is taken
-            // at one point, so anything wide lifts off the downhill side.
+            let burn = self.scenery.burn_remaining[index];
+            // only the near tier is shadowed: past that the blob is a couple
+            // of pixels and costs an instance each
+            if detail == SceneryDetail::Full && self.scenery.standing[index] {
+                let radius = match self.scenery.kind[index] {
+                    SceneryKind::Palm => 7.0 * scale,
+                    SceneryKind::Rock => 4.4 * scale,
+                };
+                self.push_shadow(x, z, ground, radius, 0.34);
+            }
             match self.scenery.kind[index] {
                 SceneryKind::Palm => {
-                    self.push_instance(
-                        [x, ground + 5.0 * scale, z],
-                        [1.5 * scale, 14.0 * scale, 1.5 * scale],
-                        [0.36, 0.27, 0.16],
-                        spin,
-                        0.0,
-                        Shape::Cuboid,
-                    );
-                    self.push_instance(
-                        [x, ground + 14.0 * scale, z],
-                        [9.0 * scale, 5.0 * scale, 9.0 * scale],
-                        [0.22, 0.44, 0.20],
-                        spin,
-                        0.0,
-                        Shape::Cone,
-                    );
+                    if self.scenery.standing[index] {
+                        self.draw_palm(x, ground, z, scale, spin, burn, detail);
+                    } else {
+                        self.draw_burnt_stump(x, ground, z, scale, spin);
+                    }
                 }
-                SceneryKind::Rock => self.push_instance(
-                    [x, ground + 0.4 * scale, z],
-                    [5.0 * scale, 6.0 * scale, 4.4 * scale],
-                    [0.44, 0.41, 0.38],
-                    spin,
+                SceneryKind::Rock => self.draw_boulder(x, ground, z, scale, spin, detail),
+            }
+        }
+        true
+    }
+
+    /// A leaning segmented trunk under a crown of drooping fronds, with a few
+    /// coconuts tucked underneath. Charring and embers ride on `burn`.
+    fn draw_palm(
+        &mut self,
+        x: f32,
+        ground: f32,
+        z: f32,
+        scale: f32,
+        spin: f32,
+        burn: f32,
+        detail: SceneryDetail,
+    ) {
+        let trunk_segments = if detail == SceneryDetail::Full { 5 } else { 3 };
+        const TRUNK_HEIGHT: f32 = 17.0;
+        // how far the crown ends up from directly above the roots
+        let lean = World::scenery_jitter(spin, scale, 0.0) * 3.4 * scale;
+        let lean_x = cos(spin) * lean;
+        let lean_z = sin(spin) * lean;
+        let crown_y = ground + TRUNK_HEIGHT * scale;
+        let char_mix = clamp(burn * 0.16, 0.0, 0.85);
+        let bark = [
+            0.47 - char_mix * 0.38,
+            0.36 - char_mix * 0.31,
+            0.22 - char_mix * 0.18,
+        ];
+        let frond = [
+            0.24 - char_mix * 0.18,
+            0.47 - char_mix * 0.40,
+            0.19 - char_mix * 0.15,
+        ];
+
+        if detail == SceneryDetail::Distant {
+            // one post and one canopy: enough to read as a palm on the horizon
+            self.push_instance(
+                [x + lean_x * 0.5, ground + TRUNK_HEIGHT * 0.5 * scale, z + lean_z * 0.5],
+                [1.9 * scale, TRUNK_HEIGHT * scale, 1.9 * scale],
+                bark,
+                spin,
+                0.0,
+                Shape::Cuboid,
+            );
+            self.push_instance(
+                [x + lean_x, crown_y + 1.0 * scale, z + lean_z],
+                [11.0 * scale, 3.4 * scale, 11.0 * scale],
+                frond,
+                spin,
+                0.0,
+                Shape::Cone,
+            );
+            return;
+        }
+
+        // Trunk: stacked blocks that narrow and step sideways as they rise, so
+        // the silhouette is notched rather than a smooth pole.
+        for segment in 0..trunk_segments {
+            let along = (segment as f32 + 0.5) / trunk_segments as f32;
+            let girth = (2.0 - along * 0.8) * scale;
+            let notch = World::scenery_jitter(spin, scale, segment as f32) * 0.35 * scale;
+            self.push_instance(
+                [
+                    x + lean_x * along + notch,
+                    ground + TRUNK_HEIGHT * scale * along,
+                    z + lean_z * along + notch,
+                ],
+                [girth, TRUNK_HEIGHT * scale / trunk_segments as f32 + 0.6, girth],
+                [
+                    bark[0] + notch * 0.06,
+                    bark[1] + notch * 0.05,
+                    bark[2] + notch * 0.03,
+                ],
+                spin + along * 0.4,
+                0.0,
+                Shape::Cuboid,
+            );
+        }
+
+        let crown_x = x + lean_x;
+        let crown_z = z + lean_z;
+        // A crown of four flat blades reads as a plate at any distance; the
+        // droop is what makes it a palm, so it survives into the reduced tier.
+        let fronds = if detail == SceneryDetail::Full {
+            PALM_FRONDS
+        } else {
+            5
+        };
+        for blade in 0..fronds {
+            let angle = spin + blade as f32 * core::f32::consts::TAU / fronds as f32;
+            let droop = World::scenery_jitter(spin, scale, blade as f32 + 1.5);
+            let length = (8.4 + droop * 1.8) * scale;
+            let dir_x = sin(angle);
+            let dir_z = cos(angle);
+            // inner half rides out roughly level
+            self.push_instance(
+                [
+                    crown_x + dir_x * length * 0.5,
+                    crown_y + 1.6 * scale,
+                    crown_z + dir_z * length * 0.5,
+                ],
+                [2.1 * scale, 0.7 * scale, length],
+                frond,
+                angle,
+                0.0,
+                Shape::Cuboid,
+            );
+            {
+                // outer half hangs, which is what makes it read as a palm
+                self.push_instance(
+                    [
+                        crown_x + dir_x * length * 1.15,
+                        crown_y + 1.6 * scale - PALM_FROND_DROOP * scale,
+                        crown_z + dir_z * length * 1.15,
+                    ],
+                    [1.5 * scale, 0.6 * scale, length * 0.8],
+                    [frond[0] * 0.82, frond[1] * 0.82, frond[2] * 0.82],
+                    angle,
                     0.0,
                     Shape::Cuboid,
-                ),
+                );
             }
+        }
+
+        if detail == SceneryDetail::Full {
+            for nut in 0..3 {
+                let angle = spin * 2.0 + nut as f32 * 2.1;
+                self.push_instance(
+                    [
+                        crown_x + sin(angle) * 1.9 * scale,
+                        crown_y + 0.2 * scale,
+                        crown_z + cos(angle) * 1.9 * scale,
+                    ],
+                    [1.5 * scale, 1.5 * scale, 1.5 * scale],
+                    [0.30, 0.22, 0.12],
+                    angle,
+                    0.0,
+                    Shape::Sphere,
+                );
+            }
+        }
+
+        if burn > 0.0 {
+            // flame bodies sit in the crown; the smoke comes from update_fires
+            let flare = 0.7 + sin(self.session.elapsed * 9.0 + spin * 4.0) * 0.3;
+            self.push_instance(
+                [crown_x, crown_y + 3.0 * scale, crown_z],
+                [7.0 * scale * flare, 9.0 * scale * flare, 7.0 * scale * flare],
+                [1.0, 0.55, 0.16],
+                spin + self.session.elapsed * 2.0,
+                1.0,
+                Shape::Cone,
+            );
+            self.push_instance(
+                [crown_x, crown_y + 7.0 * scale, crown_z],
+                [3.4 * scale * flare, 5.0 * scale * flare, 3.4 * scale * flare],
+                [1.0, 0.86, 0.42],
+                spin - self.session.elapsed * 2.6,
+                1.0,
+                Shape::Cone,
+            );
+        }
+    }
+
+    /// What a palm leaves behind once the fire has finished with it.
+    fn draw_burnt_stump(&mut self, x: f32, ground: f32, z: f32, scale: f32, spin: f32) {
+        self.push_instance(
+            [x, ground + 1.6 * scale, z],
+            [2.4 * scale, 4.0 * scale, 2.4 * scale],
+            [0.13, 0.10, 0.09],
+            spin,
+            0.0,
+            Shape::Cuboid,
+        );
+    }
+
+    /// Overlapping squashed ellipsoids with one angular chip, sizes and tints
+    /// driven off the item's own stored spin so no two boulders match.
+    fn draw_boulder(
+        &mut self,
+        x: f32,
+        ground: f32,
+        z: f32,
+        scale: f32,
+        spin: f32,
+        detail: SceneryDetail,
+    ) {
+        // One jitter shifts the value, a second swings the hue between warm
+        // sandstone and cold slate, so a boulder field is not one grey.
+        let value = World::scenery_jitter(spin, scale, 2.0);
+        let hue = World::scenery_jitter(spin, scale, 6.0);
+        let stone = [
+            0.40 + value * 0.13 + hue * 0.06,
+            0.38 + value * 0.12,
+            0.36 + value * 0.10 - hue * 0.05,
+        ];
+        let lumps = match detail {
+            SceneryDetail::Full => ROCK_LUMPS,
+            SceneryDetail::Reduced => 2,
+            SceneryDetail::Distant => 1,
+        };
+        for lump in 0..lumps {
+            let salt = lump as f32 + 0.5;
+            let offset_angle = spin + lump as f32 * 2.4;
+            let offset = if lump == 0 {
+                0.0
+            } else {
+                (1.4 + abs(World::scenery_jitter(spin, scale, salt)) * 1.8) * scale
+            };
+            // each lump squashes on a different axis, so the mass looks worn
+            let width = (3.6 + World::scenery_jitter(spin, scale, salt + 0.3) * 1.5) * scale;
+            let height = (2.6 + World::scenery_jitter(spin, scale, salt + 0.7) * 1.1) * scale;
+            let depth = (3.4 + World::scenery_jitter(spin, scale, salt + 1.1) * 1.4) * scale;
+            let shrink = if lump == 0 { 1.0 } else { 0.68 };
+            let shade = World::scenery_jitter(spin, scale, salt + 2.5) * 0.05;
+            self.push_instance(
+                [
+                    x + sin(offset_angle) * offset,
+                    // sunk, so it sits in the ground rather than on it
+                    ground + height * shrink * 0.32,
+                    z + cos(offset_angle) * offset,
+                ],
+                [width * shrink, height * shrink, depth * shrink],
+                [stone[0] + shade, stone[1] + shade, stone[2] + shade],
+                offset_angle,
+                0.0,
+                Shape::Sphere,
+            );
+        }
+        if detail == SceneryDetail::Full {
+            // one flat slab keeps some hard edges among the round mass
+            let slab = World::scenery_jitter(spin, scale, 4.0);
+            self.push_instance(
+                [x + slab * 1.2 * scale, ground + 0.5 * scale, z - slab * 1.0 * scale],
+                [(3.0 + slab) * scale, 1.4 * scale, (2.4 - slab * 0.6) * scale],
+                [stone[0] - 0.04, stone[1] - 0.04, stone[2] - 0.03],
+                spin * 1.7,
+                0.0,
+                Shape::Cuboid,
+            );
         }
     }
 
@@ -322,6 +638,8 @@ impl World {
             CreatureKind::Wraith => self.draw_wraith(&body),
             CreatureKind::Balloon => self.draw_balloon(&body),
             CreatureKind::Dragon => self.draw_dragon(&body),
+            CreatureKind::Villager => self.draw_villager(&body),
+            CreatureKind::Soldier => self.draw_soldier(&body),
         }
         let blip = match (kind, self.creatures.faction[index]) {
             (CreatureKind::Balloon, _) => MapBlip::Balloon,
@@ -334,9 +652,23 @@ impl World {
             CreatureKind::Nest => 1.6,
             CreatureKind::Dragon => 1.5,
             CreatureKind::Balloon => 0.8,
+            CreatureKind::Villager | CreatureKind::Soldier => 0.6,
             _ => 1.0,
         };
         self.push_blip(body.x, body.z, blip, scale);
+        let shadow_radius = match kind {
+            CreatureKind::Dragon => 20.0,
+            CreatureKind::Nest => 14.0,
+            CreatureKind::Balloon => 9.0,
+            CreatureKind::Troll => 8.0,
+            CreatureKind::SandWorm => 11.0,
+            CreatureKind::Griffin => 10.0,
+            CreatureKind::Wasp => 5.0,
+            CreatureKind::Wraith => 6.0,
+            CreatureKind::Villager => 2.4,
+            CreatureKind::Soldier => 3.0,
+        };
+        self.push_shadow(body.x, body.z, body.y, shadow_radius, 0.55);
     }
 
     fn draw_sand_worm(&mut self, body: &CreatureBody) {
@@ -507,6 +839,108 @@ impl World {
         }
     }
 
+    /// A wing built from panels that step outward, sweep back and lift more
+    /// the further they are from the shoulder — so the tip whips and the root
+    /// barely moves, instead of the whole slab see-sawing as one oval.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_wing(
+        &mut self,
+        body: &CreatureBody,
+        side: f32,
+        flap: f32,
+        span: f32,
+        chord: f32,
+        membrane: [f32; 3],
+        bone: [f32; 3],
+        feathered: bool,
+    ) {
+        const PANELS: i32 = 4;
+        /// Fraction of the chord each panel is dragged backwards, at the tip.
+        const TIP_SWEEP: f32 = 0.55;
+        /// How much narrower the chord is at the tip than at the shoulder.
+        const TIP_TAPER: f32 = 0.48;
+
+        let panel_span = span / PANELS as f32;
+        for panel in 0..PANELS {
+            let along = (panel as f32 + 1.0) / PANELS as f32;
+            // squared, so the outer panels carry the stroke
+            let lift = flap * along * along;
+            let sweep = -chord * TIP_SWEEP * along;
+            let out = span * along;
+            let panel_chord = chord * (1.0 - TIP_TAPER * along);
+            let twist = side * along * 0.3 + flap * 0.05;
+            self.push_instance(
+                body.ahead(sweep, lift, side * out),
+                [panel_span * 1.12, 0.75, panel_chord],
+                [
+                    membrane[0] * (1.0 - along * 0.12),
+                    membrane[1] * (1.0 - along * 0.12),
+                    membrane[2] * (1.0 - along * 0.12),
+                ],
+                body.facing + twist,
+                0.04,
+                Shape::Cuboid,
+            );
+            // leading-edge bone, thicker at the shoulder
+            self.push_instance(
+                body.ahead(sweep + panel_chord * 0.44, lift + 0.35, side * out),
+                [panel_span * 0.95, 1.15 - along * 0.4, panel_chord * 0.2],
+                bone,
+                body.facing + twist,
+                0.0,
+                Shape::Cuboid,
+            );
+        }
+
+        let tip_lift = flap;
+        let tip_sweep = -chord * TIP_SWEEP;
+        if feathered {
+            // primaries fan off the tip and trail behind
+            for feather in 0..4 {
+                let spread = feather as f32 * 0.16;
+                self.push_instance(
+                    body.ahead(
+                        tip_sweep - chord * (0.35 + spread),
+                        tip_lift - spread * 1.2,
+                        side * (span * (1.0 + spread * 0.5)),
+                    ),
+                    [1.5, 0.55, chord * (0.75 - spread * 0.5)],
+                    [bone[0] * 1.05, bone[1] * 1.02, bone[2]],
+                    body.facing + side * (0.35 + spread),
+                    0.0,
+                    Shape::Cuboid,
+                );
+            }
+        } else {
+            // finger struts run from the shoulder out to the trailing edge,
+            // pinching the membrane into scallops the way a bat wing does
+            for finger in 0..3 {
+                let along = 0.4 + finger as f32 * 0.28;
+                self.push_instance(
+                    body.ahead(
+                        -chord * (0.2 + finger as f32 * 0.22),
+                        flap * along * along,
+                        side * span * along,
+                    ),
+                    [span * 0.5, 0.85, 0.9],
+                    bone,
+                    body.facing + side * (0.5 + finger as f32 * 0.2),
+                    0.0,
+                    Shape::Cuboid,
+                );
+            }
+            // claw at the leading tip
+            self.push_instance(
+                body.ahead(tip_sweep + chord * 0.4, tip_lift + 0.4, side * span * 1.06),
+                [1.1, 1.1, 2.6],
+                [0.9, 0.86, 0.74],
+                body.facing + side * 0.4,
+                0.0,
+                Shape::Cone,
+            );
+        }
+    }
+
     fn draw_griffin(&mut self, body: &CreatureBody) {
         self.push_instance(
             [body.x, body.y, body.z],
@@ -550,14 +984,49 @@ impl World {
             0.0,
             Shape::Cone,
         );
-        let beat = sin(body.phase * 2.0) * 0.55;
-        for (side, lift) in [(-1.0f32, beat), (1.0, -beat)] {
+        // shoulders, so the wings look joined on rather than stuck through
+        for side in [1.0f32, -1.0] {
             self.push_instance(
-                body.beside(side * 7.0, 1.5 + lift * 4.0),
-                [12.0, 1.2, 6.0],
-                [0.92, 0.86, 0.7],
+                body.ahead(0.6, 1.8, side * 2.4),
+                [2.6, 2.6, 3.4],
+                [0.86, 0.80, 0.60],
                 body.facing,
-                0.05,
+                0.0,
+                Shape::Sphere,
+            );
+        }
+        let beat = sin(body.phase * 2.0) * 4.2;
+        for side in [1.0f32, -1.0] {
+            self.draw_wing(
+                body,
+                side,
+                2.0 + beat,
+                11.0,
+                6.4,
+                [0.92, 0.86, 0.70],
+                [0.74, 0.64, 0.44],
+                true,
+            );
+        }
+        // hind legs, tucked
+        for side in [1.0f32, -1.0] {
+            self.push_instance(
+                body.ahead(-2.6, -2.4, side * 2.0),
+                [2.0, 2.4, 3.6],
+                [0.70, 0.58, 0.36],
+                body.facing,
+                0.0,
+                Shape::Cuboid,
+            );
+        }
+        // front talons
+        for side in [1.0f32, -1.0] {
+            self.push_instance(
+                body.ahead(2.6, -2.8, side * 1.8),
+                [1.6, 2.0, 2.8],
+                [0.95, 0.72, 0.18],
+                body.facing,
+                0.0,
                 Shape::Cone,
             );
         }
@@ -710,76 +1179,326 @@ impl World {
     }
 
     fn draw_dragon(&mut self, body: &CreatureBody) {
-        const SEGMENTS: i32 = 4;
+        /// Neck, trunk and tail are one continuous run of segments.
+        const SEGMENTS: i32 = 9;
+        const SEGMENT_SPACING: f32 = 6.2;
+        /// Segment where the shoulders — and so the wings — sit.
+        const SHOULDER_SEGMENT: i32 = 2;
+        /// Lateral travel of the body wave, and how fast it runs down the body.
+        const WAVE_AMPLITUDE: f32 = 5.5;
+        const WAVE_LAG: f32 = 0.72;
+        const WAVE_RISE: f32 = 2.6;
+
+        let scale_dark = [0.34 + body.hurt * 0.4, 0.09, 0.12];
+        let scale_lit = [0.58 + body.hurt * 0.4, 0.17, 0.19];
+        let belly = [0.72, 0.46, 0.24];
+
         for segment in 0..SEGMENTS {
-            let back = segment as f32 * 7.0;
-            let at_x = body.x - body.facing_sin * back;
-            let at_z = body.z - body.facing_cos * back;
-            let girth = 8.0 - segment as f32 * 1.3;
-            let at_y = body.y + sin(body.phase - segment as f32) * 1.4;
+            // segment 0 is the base of the neck; positive goes back down
+            // the tail, negative forward into the neck
+            let back = (segment - SHOULDER_SEGMENT) as f32 * SEGMENT_SPACING;
+            let wave = sin(body.phase - (segment as f32) * WAVE_LAG);
+            let lateral = wave * WAVE_AMPLITUDE;
+            let rise = cos(body.phase - (segment as f32) * WAVE_LAG) * WAVE_RISE;
+            // thickest at the shoulders, tapering both ways
+            let from_shoulder = abs((segment - SHOULDER_SEGMENT) as f32);
+            let girth = max(8.4 - from_shoulder * 1.15, 1.8);
+            let at = body.ahead(-back, rise, lateral);
+            let tilt = body.facing + wave * 0.22;
             self.push_instance(
-                [at_x, at_y, at_z],
-                [girth, girth * 0.9, girth * 1.2],
-                [0.55 + body.hurt * 0.4, 0.16, 0.18],
-                body.facing,
+                at,
+                [girth, girth * 0.88, girth * 1.25],
+                scale_lit,
+                tilt,
                 body.hurt * 0.5,
                 Shape::Sphere,
             );
+            // pale underside
+            self.push_instance(
+                [at[0], at[1] - girth * 0.34, at[2]],
+                [girth * 0.62, girth * 0.3, girth * 1.1],
+                belly,
+                tilt,
+                0.0,
+                Shape::Sphere,
+            );
+            // dorsal spine, taller over the shoulders
             if segment > 0 {
+                let spine = max(girth * 0.62, 1.4);
                 self.push_instance(
-                    [at_x, at_y + girth * 0.52, at_z],
-                    [girth * 0.26, girth * 0.55, girth * 0.72],
-                    [0.28, 0.07, 0.09],
-                    body.facing,
+                    [at[0], at[1] + girth * 0.5 + spine * 0.3, at[2]],
+                    [girth * 0.22, spine, girth * 0.7],
+                    scale_dark,
+                    tilt,
                     0.0,
                     Shape::Cone,
                 );
             }
         }
-        let beat = sin(body.phase * 1.6) * 0.6;
-        for (side, lift) in [(-1.0f32, beat), (1.0, -beat)] {
-            self.push_instance(
-                body.beside(side * 11.0, 2.0 + lift * 6.0),
-                [20.0, 1.6, 9.0],
-                [0.35, 0.10, 0.14],
-                body.facing,
-                0.05,
-                Shape::Cone,
+
+        // wings, off the shoulder segment so they ride the body wave
+        let shoulder_wave = sin(body.phase - SHOULDER_SEGMENT as f32 * WAVE_LAG);
+        let shoulder = CreatureBody {
+            x: body.x + body.facing_cos * shoulder_wave * WAVE_AMPLITUDE,
+            y: body.y + cos(body.phase - SHOULDER_SEGMENT as f32 * WAVE_LAG) * WAVE_RISE,
+            z: body.z - body.facing_sin * shoulder_wave * WAVE_AMPLITUDE,
+            ..*body
+        };
+        let beat = sin(body.phase * 1.5) * 7.0;
+        for side in [1.0f32, -1.0] {
+            self.draw_wing(
+                &shoulder,
+                side,
+                3.0 + beat,
+                19.0,
+                10.0,
+                [0.40, 0.13, 0.16],
+                [0.24, 0.07, 0.09],
+                false,
             );
         }
+
+        // head, at the front of the neck run
+        let head_wave = sin(body.phase + WAVE_LAG * 2.0);
+        let head_side = head_wave * WAVE_AMPLITUDE * 0.8;
+        let head_rise = cos(body.phase + WAVE_LAG * 2.0) * WAVE_RISE;
+        let snout_yaw = body.facing + head_wave * 0.3;
+        let head_forward = (SHOULDER_SEGMENT as f32 + 2.4) * SEGMENT_SPACING;
         self.push_instance(
-            body.ahead(8.0, 1.0, 0.0),
-            [5.0, 5.0, 7.0],
-            [0.9, 0.4, 0.2],
-            body.facing,
-            0.4,
-            Shape::Cone,
+            body.ahead(head_forward, head_rise + 1.0, head_side),
+            [5.2, 4.6, 8.0],
+            scale_lit,
+            snout_yaw,
+            body.hurt * 0.5,
+            Shape::Sphere,
+        );
+        // jaw and snout
+        self.push_instance(
+            body.ahead(head_forward + 4.2, head_rise - 0.6, head_side),
+            [3.6, 2.6, 5.4],
+            scale_dark,
+            snout_yaw,
+            0.0,
+            Shape::Cuboid,
         );
         for side in [1.0f32, -1.0] {
+            // teeth
             self.push_instance(
-                body.ahead(6.8, 3.6, side * 1.8),
-                [1.4, 3.2, 1.4],
-                [0.86, 0.80, 0.66],
-                body.facing,
+                body.ahead(head_forward + 6.4, head_rise - 1.2, head_side + side * 1.1),
+                [0.9, 1.6, 0.9],
+                [0.94, 0.90, 0.78],
+                snout_yaw,
                 0.0,
                 Shape::Cone,
             );
+            // swept horns
             self.push_instance(
-                body.ahead(9.6, 1.7, side * 1.5),
+                body.ahead(head_forward - 2.4, head_rise + 4.0, head_side + side * 2.0),
+                [1.4, 4.4, 1.4],
+                [0.86, 0.80, 0.66],
+                snout_yaw + side * 0.4,
+                0.0,
+                Shape::Cone,
+            );
+            // eyes
+            self.push_instance(
+                body.ahead(head_forward + 2.2, head_rise + 1.8, head_side + side * 1.9),
                 [1.3, 1.3, 1.3],
                 [1.0, 0.86, 0.20],
-                body.facing,
+                snout_yaw,
                 1.0,
                 Shape::Sphere,
             );
+            // jaw frill
+            self.push_instance(
+                body.ahead(head_forward - 1.0, head_rise - 0.4, head_side + side * 3.0),
+                [2.6, 3.4, 3.0],
+                scale_dark,
+                snout_yaw + side * 0.5,
+                0.0,
+                Shape::Cone,
+            );
+        }
+
+        // tail fin, riding the end of the wave
+        let tail_index = SEGMENTS - 1;
+        let tail_wave = sin(body.phase - tail_index as f32 * WAVE_LAG);
+        let tail_back = (tail_index - SHOULDER_SEGMENT) as f32 * SEGMENT_SPACING + 4.0;
+        self.push_instance(
+            body.ahead(
+                -tail_back,
+                cos(body.phase - tail_index as f32 * WAVE_LAG) * WAVE_RISE,
+                tail_wave * WAVE_AMPLITUDE,
+            ),
+            [2.6, 6.0, 5.0],
+            scale_dark,
+            body.facing + tail_wave * 0.3,
+            0.0,
+            Shape::Cone,
+        );
+    }
+
+    /// Townsfolk: a blocky little figure with a walk bob. Deliberately small
+    /// and low-contrast next to the soldiers so the two read apart at range.
+    fn draw_villager(&mut self, body: &CreatureBody) {
+        let stride = sin(body.phase * 3.0);
+        let bob = abs(stride) * 0.5;
+        let smock = if body.faction.is_player() {
+            [0.52, 0.44, 0.68]
+        } else {
+            [0.62, 0.46, 0.32]
+        };
+        let flash = body.hurt * 0.4;
+        // legs, swinging out of phase with each other
+        for (side, swing) in [(1.0f32, stride), (-1.0, -stride)] {
+            self.push_instance(
+                body.ahead(swing * 0.9, 1.4 + bob, side * 0.9),
+                [1.3, 3.0, 1.4],
+                [0.30, 0.26, 0.22],
+                body.facing,
+                0.0,
+                Shape::Cuboid,
+            );
         }
         self.push_instance(
-            body.ahead(-25.0, 0.0, 0.0),
-            [2.4, 5.2, 2.4],
-            [0.38, 0.09, 0.11],
+            [body.x, body.y + 4.4 + bob, body.z],
+            [3.2, 3.6, 2.4],
+            [smock[0] + flash, smock[1], smock[2]],
+            body.facing,
+            body.hurt * 0.4,
+            Shape::Cuboid,
+        );
+        // arms
+        for side in [1.0f32, -1.0] {
+            self.push_instance(
+                body.ahead(-side * stride * 0.8, 4.4 + bob, side * 2.1),
+                [1.0, 2.8, 1.0],
+                [smock[0] * 0.86, smock[1] * 0.86, smock[2] * 0.86],
+                body.facing,
+                0.0,
+                Shape::Cuboid,
+            );
+        }
+        self.push_instance(
+            [body.x, body.y + 7.2 + bob, body.z],
+            [2.2, 2.2, 2.2],
+            [0.86, 0.68, 0.52],
+            body.facing,
+            0.0,
+            Shape::Cuboid,
+        );
+        // hair, offset back so the face reads as facing forwards
+        self.push_instance(
+            body.ahead(-0.5, 8.2 + bob, 0.0),
+            [2.4, 1.2, 2.0],
+            [0.28, 0.20, 0.12],
+            body.facing,
+            0.0,
+            Shape::Cuboid,
+        );
+    }
+
+    /// Garrison troops: taller, armoured, and carrying a spear and shield so
+    /// the silhouette is unmistakable from the air.
+    fn draw_soldier(&mut self, body: &CreatureBody) {
+        let stride = sin(body.phase * 2.6);
+        let bob = abs(stride) * 0.6;
+        let livery = if body.faction.is_player() {
+            [0.26, 0.40, 0.74]
+        } else {
+            [0.66, 0.22, 0.20]
+        };
+        let steel = [0.62, 0.64, 0.68];
+        for (side, swing) in [(1.0f32, stride), (-1.0, -stride)] {
+            self.push_instance(
+                body.ahead(swing * 1.1, 1.8 + bob, side * 1.1),
+                [1.6, 3.8, 1.7],
+                [0.28, 0.26, 0.26],
+                body.facing,
+                0.0,
+                Shape::Cuboid,
+            );
+        }
+        // cuirass over a surcoat
+        self.push_instance(
+            [body.x, body.y + 5.6 + bob, body.z],
+            [4.0, 4.4, 2.9],
+            [
+                livery[0] + body.hurt * 0.4,
+                livery[1] + body.hurt * 0.2,
+                livery[2],
+            ],
+            body.facing,
+            body.hurt * 0.4,
+            Shape::Cuboid,
+        );
+        self.push_instance(
+            [body.x, body.y + 6.6 + bob, body.z],
+            [4.2, 1.8, 3.1],
+            steel,
+            body.facing,
+            0.05,
+            Shape::Cuboid,
+        );
+        // head under a helm with a crest
+        self.push_instance(
+            [body.x, body.y + 8.8 + bob, body.z],
+            [2.4, 2.4, 2.4],
+            [0.84, 0.66, 0.50],
+            body.facing,
+            0.0,
+            Shape::Cuboid,
+        );
+        self.push_instance(
+            [body.x, body.y + 9.6 + bob, body.z],
+            [2.7, 1.8, 2.7],
+            steel,
+            body.facing,
+            0.05,
+            Shape::Cuboid,
+        );
+        self.push_instance(
+            [body.x, body.y + 11.0 + bob, body.z],
+            [0.8, 1.6, 3.0],
+            [livery[0] * 1.2, livery[1] * 1.2, livery[2] * 1.2],
             body.facing,
             0.0,
             Shape::Cone,
+        );
+        // spear in the right hand, shield on the left
+        self.push_instance(
+            body.ahead(0.6, 7.0 + bob, 2.6),
+            [0.7, 11.0, 0.7],
+            [0.36, 0.26, 0.16],
+            body.facing,
+            0.0,
+            Shape::Cuboid,
+        );
+        self.push_instance(
+            body.ahead(0.6, 12.6 + bob, 2.6),
+            [0.9, 2.4, 0.9],
+            steel,
+            body.facing,
+            0.1,
+            Shape::Cone,
+        );
+        // Held clear of the body, and rimmed in steel: pressed against the
+        // surcoat it just widened the torso into a slab.
+        self.push_instance(
+            body.ahead(1.0, 5.4 + bob, -3.6),
+            [0.8, 4.8, 4.0],
+            steel,
+            body.facing,
+            0.05,
+            Shape::Cuboid,
+        );
+        self.push_instance(
+            body.ahead(1.5, 5.4 + bob, -3.6),
+            [0.5, 3.2, 2.6],
+            [livery[0] * 0.9, livery[1] * 0.9, livery[2] * 0.9],
+            body.facing,
+            0.0,
+            Shape::Cuboid,
         );
     }
 
@@ -796,6 +1515,7 @@ impl World {
             ];
             let yaw = self.wizards.yaw[wizard];
             self.push_instance(at, [13.0, 1.1, 17.0], [0.72, 0.16, 0.14], yaw, 0.2, Shape::Cuboid);
+            self.push_shadow(at[0], at[2], at[1], 9.0, 0.5);
             self.push_instance(
                 [at[0], at[1] + 4.0, at[2]],
                 [4.0, 6.0, 4.0],
@@ -821,12 +1541,16 @@ impl World {
     /// Emitted as one contiguous run so the renderer can drop the whole thing
     /// in first person — see `carpet_first`/`carpet_last`.
     fn draw_player_carpet(&mut self) {
-        self.render.carpet_first = self.render.instance_count as i32;
         let at = [
             self.wizards.pos_x[PLAYER],
             self.wizards.pos_y[PLAYER],
             self.wizards.pos_z[PLAYER],
         ];
+        // Pushed before the skipped range: in first person the carpet itself is
+        // dropped, but its shadow is the player's only read on their own height
+        // above the ground, so it has to survive.
+        self.push_shadow(at[0], at[2], at[1], 10.0, 0.55);
+        self.render.carpet_first = self.render.instance_count as i32;
         let yaw = self.wizards.yaw[PLAYER];
         let bob = sin(self.session.elapsed * 2.3) * 0.35;
         self.push_instance(
@@ -914,20 +1638,152 @@ impl World {
             if !self.projectiles.alive[index] {
                 continue;
             }
+            let at = [
+                self.projectiles.pos_x[index],
+                self.projectiles.pos_y[index],
+                self.projectiles.pos_z[index],
+            ];
+            let velocity = [
+                self.projectiles.vel_x[index],
+                self.projectiles.vel_y[index],
+                self.projectiles.vel_z[index],
+            ];
             let (colour, size) = self.projectiles.kind[index].head_style();
+            match self.projectiles.kind[index] {
+                ProjectileKind::Firebolt
+                | ProjectileKind::Meteor
+                | ProjectileKind::DragonFire => {
+                    self.draw_fireball(at, velocity, size, colour, index)
+                }
+                ProjectileKind::CreatureBolt => {
+                    self.push_instance(at, [size, size, size], colour, 0.0, 1.0, Shape::Sphere)
+                }
+            }
+        }
+    }
+
+    /// A fireball, not a glowing marble: a white-hot core inside a swollen
+    /// orange body, a tapering wake of cooling blobs behind it, and tongues
+    /// that lick outward and shift frame to frame.
+    ///
+    /// Only the core is fully emissive. Everything else keeps enough ordinary
+    /// shading to show its own form — push the glow up and the bloom fuses the
+    /// whole thing back into the white ball this was written to replace.
+    fn draw_fireball(
+        &mut self,
+        at: [f32; 3],
+        velocity: [f32; 3],
+        size: f32,
+        warm: [f32; 3],
+        index: usize,
+    ) {
+        /// Blobs in the wake behind the head.
+        const WAKE: i32 = 5;
+        /// Licking tongues around the head.
+        const TONGUES: i32 = 4;
+
+        let speed = length3(velocity[0], velocity[1], velocity[2]);
+        // a stalled projectile still needs an axis to build the wake along
+        let along = if speed > 0.001 {
+            [
+                velocity[0] / speed,
+                velocity[1] / speed,
+                velocity[2] / speed,
+            ]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        // any two directions across the flight axis, for the tongues
+        let across = {
+            let raw = [along[2], 0.0, -along[0]];
+            let len = length3(raw[0], raw[1], raw[2]);
+            if len > 0.001 {
+                [raw[0] / len, raw[1] / len, raw[2] / len]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        };
+        let up = [
+            along[1] * across[2] - along[2] * across[1],
+            along[2] * across[0] - along[0] * across[2],
+            along[0] * across[1] - along[1] * across[0],
+        ];
+        // every projectile flickers on its own clock
+        let clock = self.session.elapsed * 14.0 + index as f32 * 1.7;
+        let flare = 0.86 + sin(clock) * 0.14;
+
+        // wake: blobs trailing back, growing then shrinking, cooling to smoke
+        for step in 0..WAKE {
+            let along_wake = (step as f32 + 1.0) / WAKE as f32;
+            let back = size * (0.9 + along_wake * 3.6);
+            let swell = sin(along_wake * 3.14159) * 0.5 + 0.55;
+            let blob = size * swell * (1.0 - along_wake * 0.35) * flare;
+            let wobble = sin(clock * 0.7 + step as f32 * 2.1) * size * 0.28;
             self.push_instance(
                 [
-                    self.projectiles.pos_x[index],
-                    self.projectiles.pos_y[index],
-                    self.projectiles.pos_z[index],
+                    at[0] - along[0] * back + across[0] * wobble,
+                    at[1] - along[1] * back + across[1] * wobble,
+                    at[2] - along[2] * back + across[2] * wobble,
                 ],
-                [size, size, size],
-                colour,
+                [blob, blob, blob],
+                [
+                    warm[0] * (1.0 - along_wake * 0.55),
+                    warm[1] * (1.0 - along_wake * 0.72),
+                    warm[2] * (1.0 - along_wake * 0.82),
+                ],
                 0.0,
-                1.0,
+                0.42 * (1.0 - along_wake * 0.85),
                 Shape::Sphere,
             );
         }
+
+        // outer body: the bulk of the flame, a little ahead of the wake
+        let body = size * 1.5 * flare;
+        self.push_instance(
+            at,
+            [body, body, body],
+            [warm[0] * 0.92, warm[1] * 0.62, warm[2] * 0.36],
+            0.0,
+            0.46,
+            Shape::Sphere,
+        );
+
+        // tongues, splayed around the axis and dragged backwards
+        for tongue in 0..TONGUES {
+            let angle = tongue as f32 * core::f32::consts::TAU / TONGUES as f32 + clock * 0.35;
+            let reach = size * (0.9 + sin(clock * 1.3 + tongue as f32 * 2.3) * 0.45);
+            let out_x = across[0] * cos(angle) + up[0] * sin(angle);
+            let out_y = across[1] * cos(angle) + up[1] * sin(angle);
+            let out_z = across[2] * cos(angle) + up[2] * sin(angle);
+            let lick = size * 1.1;
+            self.push_instance(
+                [
+                    at[0] + out_x * reach - along[0] * size * 0.5,
+                    at[1] + out_y * reach - along[1] * size * 0.5,
+                    at[2] + out_z * reach - along[2] * size * 0.5,
+                ],
+                [lick * 0.72, lick * 1.7, lick * 0.72],
+                [0.98, 0.44, 0.10],
+                angle,
+                0.62,
+                Shape::Cone,
+            );
+        }
+
+        // white-hot core, slightly ahead so the leading edge is brightest
+        let core = size * 0.62 * flare;
+        self.push_instance(
+            [
+                at[0] + along[0] * size * 0.35,
+                at[1] + along[1] * size * 0.35,
+                at[2] + along[2] * size * 0.35,
+            ],
+            [core, core, core],
+            [1.0, 0.95, 0.74],
+            0.0,
+            1.0,
+            Shape::Sphere,
+        );
     }
 
     fn pack_particles(&mut self) {
@@ -1068,6 +1924,14 @@ impl World {
 }
 
 /// The values every creature-drawing routine needs, resolved once.
+/// How much geometry a scenery item is worth at its current distance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SceneryDetail {
+    Full,
+    Reduced,
+    Distant,
+}
+
 struct CreatureBody {
     x: f32,
     y: f32,
@@ -1189,6 +2053,26 @@ impl MeshLibrary {
         self.build_cuboid();
         self.build_sphere();
         self.build_cone();
+        self.build_disc();
+    }
+
+    /// A flat unit disc lying in the XZ plane, used only for ground shadows.
+    /// Its own y extent is zero: the shadow pass lifts it clear of the terrain
+    /// with a depth bias rather than by scaling.
+    fn build_disc(&mut self) {
+        const SHAPE: usize = 3;
+        const SEGMENTS: usize = 16;
+        const UP: [f32; 3] = [0.0, 1.0, 0.0];
+        let centre = self.vertex_count(SHAPE);
+        self.add_vertex(SHAPE, [0.0, 0.0, 0.0], UP);
+        for segment in 0..=SEGMENTS {
+            let angle = segment as f32 / SEGMENTS as f32 * core::f32::consts::TAU;
+            self.add_vertex(SHAPE, [cos(angle), 0.0, sin(angle)], UP);
+        }
+        for segment in 0..SEGMENTS {
+            // counter-clockwise seen from above
+            self.add_triangle(SHAPE, centre, centre + 2 + segment, centre + 1 + segment);
+        }
     }
 
     fn build_cuboid(&mut self) {

@@ -287,16 +287,51 @@ impl World {
         )
     }
 
+    /// Scenery is placed in clumps rather than uniformly: a scatter of seed
+    /// points, each with its own spread, then draws around them. Uniform
+    /// noise gives an even grey rash across every hillside; clumps give you
+    /// boulder fields and groves with clear ground between them.
     pub fn scatter_scenery(&mut self) {
         /// Below this height it is beach or seabed and stays bare.
         const MIN_PLANTING_HEIGHT: f32 = 2.0;
         /// Palms only below this; above it is rock, with a mixed band between.
         const PALM_LINE: f32 = 16.0;
         const TREE_LINE: f32 = 60.0;
+        const CLUMPS: usize = 210;
+        const CLUMP_SPREAD: (f32, f32) = (40.0, 190.0);
+        /// A minority are placed loose so the clumps do not look laid out.
+        const STRAY_FRACTION: f32 = 0.18;
+
         self.scenery.count = 0;
-        for _ in 0..MAX_SCENERY {
-            let x = self.rng.range(0.0, WORLD_SIZE);
-            let z = self.rng.range(0.0, WORLD_SIZE);
+        let mut clump_x = [0.0f32; CLUMPS];
+        let mut clump_z = [0.0f32; CLUMPS];
+        let mut clump_spread = [0.0f32; CLUMPS];
+        for i in 0..CLUMPS {
+            clump_x[i] = self.rng.range(0.0, WORLD_SIZE);
+            clump_z[i] = self.rng.range(0.0, WORLD_SIZE);
+            clump_spread[i] = self.rng.range(CLUMP_SPREAD.0, CLUMP_SPREAD.1);
+        }
+
+        // Most of the map is ocean and most draws land in it, so the loop
+        // runs well past the cap and stops on whichever comes first.
+        for _ in 0..(MAX_SCENERY * 2) {
+            if self.scenery.count >= MAX_SCENERY {
+                break;
+            }
+            let (x, z) = if self.rng.unit() < STRAY_FRACTION {
+                (self.rng.range(0.0, WORLD_SIZE), self.rng.range(0.0, WORLD_SIZE))
+            } else {
+                let clump = self.rng.below(CLUMPS as i32) as usize;
+                let spread = clump_spread[clump];
+                // two draws per axis biases toward the middle, so a clump is
+                // dense at its heart and thins out
+                let jitter_x = self.rng.range(-spread, spread) * self.rng.range(0.35, 1.0);
+                let jitter_z = self.rng.range(-spread, spread) * self.rng.range(0.35, 1.0);
+                (
+                    clamp(clump_x[clump] + jitter_x, 0.0, WORLD_SIZE),
+                    clamp(clump_z[clump] + jitter_z, 0.0, WORLD_SIZE),
+                )
+            };
             let height = self.height_at(x, z);
             if height < MIN_PLANTING_HEIGHT {
                 continue;
@@ -312,7 +347,11 @@ impl World {
             } else {
                 SceneryKind::Rock
             };
-            let scale = self.rng.range(0.7, 1.5);
+            // rocks vary far more in size than palms do
+            let scale = match kind {
+                SceneryKind::Rock => self.rng.range(0.45, 2.3),
+                SceneryKind::Palm => self.rng.range(0.75, 1.45),
+            };
             let rotation = self.rng.range(0.0, core::f32::consts::TAU);
             let slot = self.scenery.count;
             self.scenery.pos_x[slot] = x;
@@ -320,6 +359,8 @@ impl World {
             self.scenery.kind[slot] = kind;
             self.scenery.scale[slot] = scale;
             self.scenery.rotation[slot] = rotation;
+            self.scenery.standing[slot] = true;
+            self.scenery.burn_remaining[slot] = 0.0;
             self.scenery.count += 1;
         }
     }

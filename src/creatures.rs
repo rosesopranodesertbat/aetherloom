@@ -20,7 +20,22 @@ const MELEE_COOLDOWN: f32 = 1.45;
 /// Radius of a melee swing, and how close a wizard must be to be caught by it.
 const MELEE_BLAST_RADIUS: f32 = 20.0;
 const MELEE_WIZARD_REACH: f32 = 26.0;
-const CREATURE_CEILING: f32 = 260.0;
+const CREATURE_CEILING: f32 = 300.0;
+/// Serpentine flight: a dragon weaves this far to either side of its heading
+/// and rises and falls on a slower beat, so it reads as swimming through the
+/// air rather than walking on it.
+const SERPENTINE_SWAY: f32 = 34.0;
+const SERPENTINE_SWAY_RATE: f32 = 0.55;
+const SERPENTINE_RISE: f32 = 26.0;
+const SERPENTINE_RISE_RATE: f32 = 0.31;
+/// How hard a flier is pulled back to its preferred cruising altitude.
+const CRUISE_PULL: f32 = 0.55;
+/// Villagers bolt when anything hostile comes within this.
+const VILLAGER_PANIC_RANGE: f32 = 190.0;
+/// Garrison creatures belong to their keep. Past this radius they are steered
+/// back, so a fleeing villager does not end up two islands away.
+const GARRISON_LEASH: f32 = 175.0;
+const GARRISON_RECALL: f32 = 2.4;
 const CREATURE_GRAVITY: f32 = 90.0;
 /// Fraction of the spawn hover height a flier is allowed to sink to.
 const FLIER_FLOOR_FRACTION: f32 = 0.6;
@@ -310,6 +325,21 @@ impl World {
             }
         }
 
+        // Villagers never engage; they run from whatever is nearest and
+        // otherwise mill about.
+        if kind.is_civilian() {
+            match self.nearest_enemy_creature(index, VILLAGER_PANIC_RANGE) {
+                Some(threat) => self.flee_from(index, threat, dt),
+                None => self.wander(index, dt),
+            }
+            self.leash_to_keep(index, dt);
+            self.integrate_creature(index, dt);
+            if self.creatures.health[index] <= 0.0 {
+                self.kill_creature(index);
+            }
+            return;
+        }
+
         let target = if faction.is_wild() {
             self.pick_target_for_wild(index)
         } else {
@@ -320,6 +350,7 @@ impl World {
             Some((at, dist_sq)) => self.engage(index, at, dist_sq, dt),
             None => self.wander(index, dt),
         }
+        self.leash_to_keep(index, dt);
         self.integrate_creature(index, dt);
 
         if self.creatures.health[index] <= 0.0 {
@@ -574,6 +605,63 @@ impl World {
         );
     }
 
+    /// Runs directly away from a threat, which for a villager is the whole of
+    /// their combat repertoire.
+    fn flee_from(&mut self, index: usize, threat: usize, dt: f32) {
+        let away = [
+            self.creatures.pos_x[index] - self.creatures.pos_x[threat],
+            self.creatures.pos_z[index] - self.creatures.pos_z[threat],
+        ];
+        let distance = sqrt(length_sq2(away[0], away[1])) + 0.01;
+        let speed = self.creatures.kind[index].move_speed();
+        self.creatures.facing[index] = atan2(away[0], away[1]);
+        self.creatures.vel_x[index] = approach(
+            self.creatures.vel_x[index],
+            away[0] / distance * speed,
+            TURN_RESPONSE,
+            dt,
+        );
+        self.creatures.vel_z[index] = approach(
+            self.creatures.vel_z[index],
+            away[1] / distance * speed,
+            TURN_RESPONSE,
+            dt,
+        );
+    }
+
+    /// Pulls a keep's own villagers and soldiers back toward it once they
+    /// stray past the leash. Anything else is left alone.
+    fn leash_to_keep(&mut self, index: usize, dt: f32) {
+        if !self.creatures.kind[index].is_garrison() {
+            return;
+        }
+        let Some(wizard) = self.creatures.faction[index].wizard() else {
+            return;
+        };
+        let home_x = self.castles.pos_x[wizard];
+        let home_z = self.castles.pos_z[wizard];
+        let offset_x = home_x - self.creatures.pos_x[index];
+        let offset_z = home_z - self.creatures.pos_z[index];
+        let distance_sq = length_sq2(offset_x, offset_z);
+        if distance_sq < GARRISON_LEASH * GARRISON_LEASH {
+            return;
+        }
+        let distance = sqrt(distance_sq) + 0.01;
+        let speed = self.creatures.kind[index].move_speed();
+        self.creatures.vel_x[index] = approach(
+            self.creatures.vel_x[index],
+            offset_x / distance * speed,
+            GARRISON_RECALL,
+            dt,
+        );
+        self.creatures.vel_z[index] = approach(
+            self.creatures.vel_z[index],
+            offset_z / distance * speed,
+            GARRISON_RECALL,
+            dt,
+        );
+    }
+
     fn wander(&mut self, index: usize, dt: f32) {
         self.creatures.timer[index] -= dt;
         if self.creatures.timer[index] <= 0.0 {
@@ -604,6 +692,14 @@ impl World {
     }
 
     fn integrate_creature(&mut self, index: usize, dt: f32) {
+        // A dragon slides sideways across its own heading as it goes, which is
+        // what turns a straight approach into a serpentine one.
+        if self.creatures.kind[index] == CreatureKind::Dragon {
+            let heading = self.creatures.facing[index];
+            let sway = cos(self.creatures.phase[index] * SERPENTINE_SWAY_RATE) * SERPENTINE_SWAY;
+            self.creatures.vel_x[index] += cos(heading) * sway * dt;
+            self.creatures.vel_z[index] -= sin(heading) * sway * dt;
+        }
         self.creatures.pos_x[index] =
             clamp_to_world(self.creatures.pos_x[index] + self.creatures.vel_x[index] * dt);
         self.creatures.pos_z[index] =
@@ -612,10 +708,29 @@ impl World {
             self.height_at(self.creatures.pos_x[index], self.creatures.pos_z[index]),
             SEA_LEVEL - 2.0,
         );
-        if self.creatures.kind[index].flies() {
+        let kind = self.creatures.kind[index];
+        if kind.flies() {
+            // Fliers are pulled back toward their cruising altitude, and the
+            // big serpents weave around it, so they hold the sky instead of
+            // sinking onto the hills.
+            let cruise = kind.cruise_height();
+            if cruise > 0.0 {
+                let phase = self.creatures.phase[index];
+                let weave = if kind == CreatureKind::Dragon {
+                    sin(phase * SERPENTINE_RISE_RATE) * SERPENTINE_RISE
+                } else {
+                    0.0
+                };
+                let wanted = ground + cruise + weave;
+                self.creatures.vel_y[index] = approach(
+                    self.creatures.vel_y[index],
+                    (wanted - self.creatures.pos_y[index]) * CRUISE_PULL,
+                    CRUISE_PULL,
+                    dt,
+                );
+            }
             self.creatures.pos_y[index] += self.creatures.vel_y[index] * dt;
-            let floor =
-                ground + self.creatures.kind[index].hover_height() * FLIER_FLOOR_FRACTION;
+            let floor = ground + kind.hover_height() * FLIER_FLOOR_FRACTION;
             if self.creatures.pos_y[index] < floor {
                 self.creatures.pos_y[index] = floor;
                 self.creatures.vel_y[index] = max(self.creatures.vel_y[index], 0.0);
@@ -658,7 +773,12 @@ impl World {
         let kind = self.projectiles.kind[index];
         let colour = kind.trail_colour();
         let is_meteor = kind == ProjectileKind::Meteor;
-        let puffs = if is_meteor { 4 } else { 1 };
+        // fire leaves a thick wake; a plain bolt only needs a wisp
+        let puffs = match kind {
+            ProjectileKind::Meteor => 5,
+            ProjectileKind::Firebolt | ProjectileKind::DragonFire => 3,
+            ProjectileKind::CreatureBolt => 1,
+        };
         let at = [
             self.projectiles.pos_x[index],
             self.projectiles.pos_y[index],
@@ -764,12 +884,15 @@ impl World {
             ProjectileKind::Meteor => {
                 self.deform(at[0], at[2], 74.0, 30.0, DeformKind::Crater);
                 self.spawn_burst(at, 80, 40.0, 9.0, [1.0, 0.6, 0.2], 1.6);
+                self.ignite_scenery(at, 110.0);
                 self.session.screen_shake = 1.6;
                 self.emit_sound(SoundCue::MeteorImpact, at);
             }
             ProjectileKind::Firebolt => {
                 self.deform(at[0], at[2], 16.0, 2.2, DeformKind::Crater);
                 self.spawn_burst(at, 22, 20.0, 4.4, [1.0, 0.6, 0.22], 0.7);
+                // a firebolt is fire: whatever it lands in catches
+                self.ignite_scenery(at, 34.0);
                 self.emit_sound(SoundCue::Pop, at);
             }
             other => {

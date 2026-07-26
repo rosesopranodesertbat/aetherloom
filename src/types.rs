@@ -46,6 +46,10 @@ pub enum CreatureKind {
     Wraith,
     Balloon,
     Dragon,
+    /// Lives around a keep. Harmless, and flees anything hostile.
+    Villager,
+    /// Garrisons a keep and fights whatever comes for it.
+    Soldier,
 }
 
 impl CreatureKind {
@@ -59,8 +63,21 @@ impl CreatureKind {
             4 => CreatureKind::Nest,
             5 => CreatureKind::Wraith,
             6 => CreatureKind::Balloon,
-            _ => CreatureKind::Dragon,
+            7 => CreatureKind::Dragon,
+            8 => CreatureKind::Villager,
+            9 => CreatureKind::Soldier,
+            _ => CreatureKind::SandWorm,
         }
+    }
+
+    /// Villagers run rather than fight, and are never chosen as a target by
+    /// their own side.
+    pub fn is_civilian(self) -> bool {
+        matches!(self, CreatureKind::Villager)
+    }
+    /// Anything that belongs to a keep rather than the wild.
+    pub fn is_garrison(self) -> bool {
+        matches!(self, CreatureKind::Villager | CreatureKind::Soldier)
     }
 
     /// Starting and maximum health. Big things are meant to be a fight, not a
@@ -75,6 +92,8 @@ impl CreatureKind {
             CreatureKind::Wraith => 110.0,
             CreatureKind::Balloon => 30.0,
             CreatureKind::Dragon => 1500.0,
+            CreatureKind::Villager => 40.0,
+            CreatureKind::Soldier => 150.0,
         }
     }
 
@@ -85,8 +104,21 @@ impl CreatureKind {
             CreatureKind::Griffin => 34.0,
             CreatureKind::Wraith => 20.0,
             CreatureKind::Balloon => 46.0,
-            CreatureKind::Dragon => 52.0,
+            CreatureKind::Dragon => 96.0,
             _ => 3.0,
+        }
+    }
+
+    /// How high above the ground this kind prefers to cruise once airborne.
+    /// Dragons ride far higher than anything else, which is what makes them
+    /// read as circling rather than trudging.
+    pub fn cruise_height(self) -> f32 {
+        match self {
+            CreatureKind::Dragon => 150.0,
+            CreatureKind::Griffin => 62.0,
+            CreatureKind::Wasp => 34.0,
+            CreatureKind::Wraith => 26.0,
+            _ => 0.0,
         }
     }
 
@@ -105,7 +137,9 @@ impl CreatureKind {
             CreatureKind::Troll => 20.0,
             CreatureKind::Griffin => 82.0,
             CreatureKind::Wraith => 58.0,
-            CreatureKind::Dragon => 66.0,
+            CreatureKind::Dragon => 78.0,
+            CreatureKind::Villager => 17.0,
+            CreatureKind::Soldier => 30.0,
             _ => 26.0,
         }
     }
@@ -137,6 +171,8 @@ impl CreatureKind {
             CreatureKind::Griffin => 7.0,
             CreatureKind::Wraith => 20.0,
             CreatureKind::Dragon => 17.0,
+            CreatureKind::Soldier => 9.0,
+            CreatureKind::Villager => 0.0,
             _ => 6.0,
         }
     }
@@ -150,7 +186,10 @@ impl CreatureKind {
             CreatureKind::Griffin => 20.0,
             CreatureKind::Nest => 60.0,
             CreatureKind::Dragon => 110.0,
-            CreatureKind::Wraith | CreatureKind::Balloon => 0.0,
+            CreatureKind::Wraith
+            | CreatureKind::Balloon
+            | CreatureKind::Villager
+            | CreatureKind::Soldier => 0.0,
         }
     }
 
@@ -274,14 +313,6 @@ pub enum ProjectileKind {
 }
 
 impl ProjectileKind {
-    pub fn as_f32(self) -> f32 {
-        match self {
-            ProjectileKind::Firebolt => 0.0,
-            ProjectileKind::CreatureBolt => 1.0,
-            ProjectileKind::Meteor => 2.0,
-            ProjectileKind::DragonFire => 3.0,
-        }
-    }
     /// Downward acceleration. Firebolts fly flat.
     pub fn gravity(self) -> f32 {
         match self {
@@ -316,16 +347,20 @@ pub enum Shape {
     Cuboid,
     Sphere,
     Cone,
+    /// A flat ground disc, drawn by its own darkening pass. Only the red
+    /// channel is read, as the shadow's strength.
+    Shadow,
 }
 
 impl Shape {
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 4;
     #[inline]
     pub fn as_f32(self) -> f32 {
         match self {
             Shape::Cuboid => 0.0,
             Shape::Sphere => 1.0,
             Shape::Cone => 2.0,
+            Shape::Shadow => 3.0,
         }
     }
 }

@@ -21,6 +21,21 @@ const NESTS_BASE: i32 = 9;
 const NESTS_PER_REALM: i32 = 2;
 const WILDLIFE_BASE: i32 = 24;
 const WILDLIFE_PER_REALM: i32 = 6;
+/// Nothing hostile is placed within this radius of the player's keep, so the
+/// opening minute is exploration rather than a dogfight on the doorstep.
+const SAFE_RADIUS: f32 = 900.0;
+/// Nests are pushed out further still — they are what refills the realm.
+const NEST_SAFE_RADIUS: f32 = 1350.0;
+/// Attempts to find a site outside the safe radius before giving up and
+/// accepting whatever the last draw was.
+const DISPERSAL_ATTEMPTS: i32 = 24;
+
+/// Each keep keeps a small standing population: mostly villagers, with a
+/// handful of soldiers to defend them.
+const GARRISON_VILLAGERS: i32 = 7;
+const GARRISON_SOLDIERS: i32 = 4;
+const GARRISON_RING: (f32, f32) = (46.0, 130.0);
+
 /// Loose mana seeded at the start so the realm is immediately playable.
 const SEEDED_ORBS: i32 = 96;
 const SEEDED_ORB_VALUE: (f32, f32) = (5.0, 10.0);
@@ -67,6 +82,7 @@ impl World {
         };
         self.place_castles(realm);
         self.populate(realm);
+        self.garrison_castles();
         self.terrain.dirty_first_row = 0;
         self.terrain.dirty_last_row = GRID_MAX_INDEX;
         self.build_frame();
@@ -163,20 +179,53 @@ impl World {
         site
     }
 
+    /// Like `find_land`, but rejects sites within `keep_clear` of the player's
+    /// keep. Falls back to an unfiltered draw so a cramped realm still fills.
+    fn find_land_away_from_home(&mut self, min_height: f32, keep_clear: f32) -> i32 {
+        let home_x = self.castles.pos_x[PLAYER];
+        let home_z = self.castles.pos_z[PLAYER];
+        for _ in 0..DISPERSAL_ATTEMPTS {
+            let site = self.find_land(min_height);
+            let (x, z) = World::cell_to_world(site);
+            if length_sq2(x - home_x, z - home_z) > keep_clear * keep_clear {
+                return site;
+            }
+        }
+        self.find_land(min_height)
+    }
+
+    /// Villagers and a few soldiers live around every keep. They are noncombat
+    /// scenery with a pulse: worth mana to a raider, and a reason to defend.
+    fn garrison_castles(&mut self) {
+        for wizard in 0..=self.session.rival_count {
+            let centre_x = self.castles.pos_x[wizard];
+            let centre_z = self.castles.pos_z[wizard];
+            let faction = Faction::of_wizard(wizard);
+            for slot in 0..(GARRISON_VILLAGERS + GARRISON_SOLDIERS) {
+                let angle = self.rng.range(0.0, core::f32::consts::TAU);
+                let radius = self.rng.range(GARRISON_RING.0, GARRISON_RING.1);
+                let x = clamp(centre_x + cos(angle) * radius, 0.0, WORLD_SIZE);
+                let z = clamp(centre_z + sin(angle) * radius, 0.0, WORLD_SIZE);
+                let kind = if slot < GARRISON_VILLAGERS {
+                    CreatureKind::Villager
+                } else {
+                    CreatureKind::Soldier
+                };
+                self.spawn_creature(kind, x, z, faction);
+            }
+        }
+    }
+
     fn populate(&mut self, realm: i32) {
         for _ in 0..(NESTS_BASE + realm * NESTS_PER_REALM) {
-            let site = self.find_land(NEST_MIN_GROUND);
+            let site = self.find_land_away_from_home(NEST_MIN_GROUND, NEST_SAFE_RADIUS);
             let (x, z) = World::cell_to_world(site);
             self.spawn_creature(CreatureKind::Nest, x, z, Faction::WILD);
         }
         for _ in 0..(WILDLIFE_BASE + realm * WILDLIFE_PER_REALM) {
-            let site = self.find_land(CREATURE_MIN_GROUND);
+            let site = self.find_land_away_from_home(CREATURE_MIN_GROUND, SAFE_RADIUS);
             let (x, z) = World::cell_to_world(site);
-            let mut roll = self.rng.below(4);
-            if roll == 4 {
-                roll = 0;
-            }
-            let mut kind = CreatureKind::from_index(roll);
+            let mut kind = CreatureKind::from_index(self.rng.below(4));
             if realm >= DRAGON_FROM_REALM && self.rng.below(DRAGON_ODDS) == 0 {
                 kind = CreatureKind::Dragon;
             }
@@ -209,6 +258,7 @@ impl World {
             self.update_creatures(dt);
             self.update_projectiles(dt);
             self.update_orbs(dt);
+            self.update_fires(dt);
             self.restock_wildlife(dt);
             self.settle_outcome();
         }
@@ -247,7 +297,7 @@ impl World {
         if wild >= RESTOCK_FLOOR_BASE + self.session.realm {
             return;
         }
-        let site = self.find_land(CREATURE_MIN_GROUND);
+        let site = self.find_land_away_from_home(CREATURE_MIN_GROUND, SAFE_RADIUS);
         let (x, z) = World::cell_to_world(site);
         // an occasional griffin among the ground types
         let kind = if self.rng.below(4) == 3 {
