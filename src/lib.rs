@@ -3679,9 +3679,333 @@ fn build_render() {
 }
 
 // ============================================================================
+// Renderer support — the parts of the draw path that are pure arithmetic and
+// so have no business being in JavaScript. Camera matrices, the three mesh
+// prototypes and the minimap raster all live here; what stays in engine.js is
+// the WebGPU API surface itself, which wasm cannot reach without imports.
+// ============================================================================
+
+static mut CAMM: [f32; 32] = [0.0; 32]; // view-projection, then its inverse
+
+// column-major, o[i + j*4]
+fn mat_mul(a: &[f32; 16], b: &[f32; 16], o: &mut [f32; 16]) {
+    for j in 0..4 {
+        for i in 0..4 {
+            let mut s = 0.0f32;
+            for k in 0..4 {
+                s += a[i + k * 4] * b[k + j * 4];
+            }
+            o[i + j * 4] = s;
+        }
+    }
+}
+fn mat_invert(m: &[f32; 16], o: &mut [f32; 16]) {
+    let (a00, a01, a02, a03) = (m[0], m[1], m[2], m[3]);
+    let (a10, a11, a12, a13) = (m[4], m[5], m[6], m[7]);
+    let (a20, a21, a22, a23) = (m[8], m[9], m[10], m[11]);
+    let (a30, a31, a32, a33) = (m[12], m[13], m[14], m[15]);
+    let b00 = a00 * a11 - a01 * a10;
+    let b01 = a00 * a12 - a02 * a10;
+    let b02 = a00 * a13 - a03 * a10;
+    let b03 = a01 * a12 - a02 * a11;
+    let b04 = a01 * a13 - a03 * a11;
+    let b05 = a02 * a13 - a03 * a12;
+    let b06 = a20 * a31 - a21 * a30;
+    let b07 = a20 * a32 - a22 * a30;
+    let b08 = a20 * a33 - a23 * a30;
+    let b09 = a21 * a32 - a22 * a31;
+    let b10 = a21 * a33 - a23 * a31;
+    let b11 = a22 * a33 - a23 * a32;
+    let mut det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    if det == 0.0 {
+        for v in o.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+    det = 1.0 / det;
+    o[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+    o[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+    o[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+    o[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+    o[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+    o[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+    o[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+    o[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+    o[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+    o[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+    o[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+    o[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+    o[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+    o[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+    o[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+    o[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+}
+
+// ---- mesh prototypes -------------------------------------------------------
+// All three live in a -1..1 box; the vertex shader scales by iscl*0.5, so an
+// instance scale of s spans exactly s world units. Interleaved pos+normal.
+const MESHV_CAP: usize = 1024 * 6;
+const MESHI_CAP: usize = 1024;
+static mut MESHV: [[f32; MESHV_CAP]; 3] = [[0.0; MESHV_CAP]; 3];
+static mut MESHI: [[u16; MESHI_CAP]; 3] = [[0; MESHI_CAP]; 3];
+static mut MESHVN: [usize; 3] = [0; 3]; // floats written
+static mut MESHIN: [usize; 3] = [0; 3]; // indices written
+
+struct MeshBuf {
+    shape: usize,
+    nv: usize, // vertices pushed (not floats)
+}
+impl MeshBuf {
+    fn vert(&mut self, p: [f32; 3], n: [f32; 3]) {
+        unsafe {
+            let o = self.nv * 6;
+            if o + 6 > MESHV_CAP {
+                return;
+            }
+            MESHV[self.shape][o] = p[0];
+            MESHV[self.shape][o + 1] = p[1];
+            MESHV[self.shape][o + 2] = p[2];
+            MESHV[self.shape][o + 3] = n[0];
+            MESHV[self.shape][o + 4] = n[1];
+            MESHV[self.shape][o + 5] = n[2];
+            self.nv += 1;
+            MESHVN[self.shape] = self.nv * 6;
+        }
+    }
+    fn idx(&mut self, a: usize, b: usize, c: usize) {
+        unsafe {
+            let n = MESHIN[self.shape];
+            if n + 3 > MESHI_CAP {
+                return;
+            }
+            MESHI[self.shape][n] = a as u16;
+            MESHI[self.shape][n + 1] = b as u16;
+            MESHI[self.shape][n + 2] = c as u16;
+            MESHIN[self.shape] = n + 3;
+        }
+    }
+}
+
+fn build_meshes() {
+    unsafe {
+        for s in 0..3 {
+            MESHVN[s] = 0;
+            MESHIN[s] = 0;
+        }
+    }
+    // --- box
+    {
+        let mut m = MeshBuf { shape: 0, nv: 0 };
+        const FACES: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            ([1.0, 0.0, 0.0], [[1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [1.0, -1.0, 1.0]]),
+            ([-1.0, 0.0, 0.0], [[-1.0, -1.0, 1.0], [-1.0, 1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, -1.0, -1.0]]),
+            ([0.0, 1.0, 0.0], [[-1.0, 1.0, -1.0], [-1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, -1.0]]),
+            ([0.0, -1.0, 0.0], [[-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, -1.0, 1.0]]),
+            ([0.0, 0.0, 1.0], [[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]]),
+            ([0.0, 0.0, -1.0], [[-1.0, 1.0, -1.0], [1.0, 1.0, -1.0], [1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]]),
+        ];
+        for (nv, quad) in FACES.iter() {
+            let base = m.nv;
+            for v in quad.iter() {
+                m.vert(*v, *nv);
+            }
+            m.idx(base, base + 1, base + 2);
+            m.idx(base, base + 2, base + 3);
+        }
+    }
+    // --- sphere. Wound so the outward face is front-facing under cullMode
+    // 'back', same as the box; getting this backwards renders it inside out.
+    {
+        let mut m = MeshBuf { shape: 1, nv: 0 };
+        let seg = 14usize;
+        let ring = 9usize;
+        for j in 0..=ring {
+            let phi = j as f32 / ring as f32 * 3.14159265;
+            for i in 0..=seg {
+                let th = i as f32 / seg as f32 * 6.28318531;
+                let x = sin(phi) * cos(th);
+                let y = cos(phi);
+                let z = sin(phi) * sin(th);
+                m.vert([x, y, z], [x, y, z]);
+            }
+        }
+        for j in 0..ring {
+            for i in 0..seg {
+                let a = j * (seg + 1) + i;
+                let b = a + seg + 1;
+                m.idx(a, a + 1, b);
+                m.idx(a + 1, b + 1, b);
+            }
+        }
+    }
+    // --- cone
+    {
+        let mut m = MeshBuf { shape: 2, nv: 0 };
+        let seg = 14usize;
+        for i in 0..seg {
+            let a0 = i as f32 / seg as f32 * 6.28318531;
+            let a1 = (i + 1) as f32 / seg as f32 * 6.28318531;
+            let (x0, z0) = (cos(a0), sin(a0));
+            let (x1, z1) = (cos(a1), sin(a1));
+            let mx = cos((a0 + a1) * 0.5);
+            let mz = sin((a0 + a1) * 0.5);
+            let ny = 0.45f32;
+            let s = sqrt(mx * mx + ny * ny + mz * mz);
+            let side = [mx / s, ny / s, mz / s];
+            let base = m.nv;
+            m.vert([x0, -1.0, z0], side);
+            m.vert([x1, -1.0, z1], side);
+            m.vert([0.0, 1.0, 0.0], side);
+            m.idx(base, base + 2, base + 1);
+            let b2 = m.nv;
+            let down = [0.0, -1.0, 0.0];
+            m.vert([0.0, -1.0, 0.0], down);
+            m.vert([x1, -1.0, z1], down);
+            m.vert([x0, -1.0, z0], down);
+            m.idx(b2, b2 + 2, b2 + 1);
+        }
+    }
+}
+
+// ---- minimap raster --------------------------------------------------------
+const MINIMAP_MAX: usize = 160;
+static mut MINIMAP: [u8; MINIMAP_MAX * MINIMAP_MAX * 4] = [0; MINIMAP_MAX * MINIMAP_MAX * 4];
+
+// ============================================================================
 // ABI — flat and C-like on purpose. game.js calls these by name and reads the
 // buffers straight out of linear memory; nothing is marshalled.
 // ============================================================================
+
+/// Builds the view-projection matrix and its inverse. Returns a pointer to 32
+/// f32: vp in 0..16, ivp in 16..32.
+#[no_mangle]
+pub extern "C" fn camera(
+    fovy: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    ex: f32,
+    ey: f32,
+    ez: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    ux: f32,
+    uy: f32,
+    uz: f32,
+) -> usize {
+    unsafe {
+        // perspective with a 0..1 depth range (WebGPU/D3D convention)
+        let f = 1.0 / libm::tanf(fovy * 0.5);
+        let nf = 1.0 / (near - far);
+        let proj: [f32; 16] = [
+            f / aspect, 0.0, 0.0, 0.0,
+            0.0, f, 0.0, 0.0,
+            0.0, 0.0, far * nf, -1.0,
+            0.0, 0.0, far * near * nf, 0.0,
+        ];
+        // look-at
+        let (mut zx, mut zy, mut zz) = (ex - cx, ey - cy, ez - cz);
+        let mut l = sqrt(zx * zx + zy * zy + zz * zz);
+        if l == 0.0 {
+            l = 1.0;
+        }
+        zx /= l;
+        zy /= l;
+        zz /= l;
+        let (mut xx, mut xy, mut xz) = (uy * zz - uz * zy, uz * zx - ux * zz, ux * zy - uy * zx);
+        l = sqrt(xx * xx + xy * xy + xz * xz);
+        if l == 0.0 {
+            l = 1.0;
+        }
+        xx /= l;
+        xy /= l;
+        xz /= l;
+        let yx = zy * xz - zz * xy;
+        let yy = zz * xx - zx * xz;
+        let yz = zx * xy - zy * xx;
+        let view: [f32; 16] = [
+            xx, yx, zx, 0.0,
+            xy, yy, zy, 0.0,
+            xz, yz, zz, 0.0,
+            -(xx * ex + xy * ey + xz * ez),
+            -(yx * ex + yy * ey + yz * ez),
+            -(zx * ex + zy * ey + zz * ez),
+            1.0,
+        ];
+        let mut vp = [0.0f32; 16];
+        mat_mul(&proj, &view, &mut vp);
+        let mut ivp = [0.0f32; 16];
+        mat_invert(&vp, &mut ivp);
+        CAMM[..16].copy_from_slice(&vp);
+        CAMM[16..].copy_from_slice(&ivp);
+        CAMM.as_ptr() as usize
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn buildMeshes() {
+    build_meshes();
+}
+#[no_mangle]
+pub extern "C" fn meshVertPtr(s: i32) -> usize {
+    unsafe { MESHV[s as usize].as_ptr() as usize }
+}
+#[no_mangle]
+pub extern "C" fn meshVertFloats(s: i32) -> i32 {
+    unsafe { MESHVN[s as usize] as i32 }
+}
+#[no_mangle]
+pub extern "C" fn meshIdxPtr(s: i32) -> usize {
+    unsafe { MESHI[s as usize].as_ptr() as usize }
+}
+#[no_mangle]
+pub extern "C" fn meshIdxCount(s: i32) -> i32 {
+    unsafe { MESHIN[s as usize] as i32 }
+}
+
+/// Rasterises the heightmap into an n x n RGBA image for the minimap.
+/// Returns a pointer JS wraps in a Uint8ClampedArray for putImageData.
+#[no_mangle]
+pub extern "C" fn minimapRaster(n: i32) -> usize {
+    unsafe {
+        let n = if n < 1 {
+            1
+        } else if n as usize > MINIMAP_MAX {
+            MINIMAP_MAX as i32
+        } else {
+            n
+        };
+        let nu = n as usize;
+        let step = TW as f32 / n as f32;
+        for j in 0..nu {
+            for i in 0..nu {
+                let si = (i as f32 * step) as i32;
+                let sj = (j as f32 * step) as i32;
+                let h = h_get(si, sj);
+                let (r, g, b): (f32, f32, f32) = if h < -1.0 {
+                    let t = fmin(1.0, -h / 30.0);
+                    (14.0 + (1.0 - t) * 26.0, 34.0 + (1.0 - t) * 50.0, 62.0 + (1.0 - t) * 44.0)
+                } else if h < 8.0 {
+                    (178.0, 152.0, 98.0)
+                } else if h < 52.0 {
+                    (74.0 + h * 0.7, 96.0 + h * 0.5, 50.0)
+                } else if h < 118.0 {
+                    (106.0, 96.0, 84.0)
+                } else {
+                    (210.0, 205.0, 193.0)
+                };
+                let o = (j * nu + i) * 4;
+                MINIMAP[o] = r as u8;
+                MINIMAP[o + 1] = g as u8;
+                MINIMAP[o + 2] = b as u8;
+                MINIMAP[o + 3] = 255;
+            }
+        }
+        MINIMAP.as_ptr() as usize
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn init(seed: u32, lv: i32) {

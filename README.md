@@ -45,13 +45,28 @@ Mana is the whole game, and you never carry it home yourself — your balloons d
 Two halves that barely talk to each other, which is the point.
 
 ```
-src/lib.rs  ──cargo──►  sim.wasm     the entire simulation
-                          │           (no imports, no JS calls, no GC)
+src/lib.rs  ──cargo──►  sim.wasm     simulation, camera matrices,
+                          │          mesh prototypes, minimap raster
+                          │          (no imports, no JS calls, no GC)
                           │  linear memory, read directly as typed arrays
                           ▼
-site/engine.js         WebGPU renderer + WGSL  ─────►  screen
-site/game.js           input, HUD, audio, level flow
+site/engine.js         WebGPU calls + WGSL  ───────►  screen
+site/game.js           DOM, input, Web Audio, level flow
 ```
+
+### Why the other two files are still JavaScript
+
+Everything in this project that is *arithmetic* is in Rust. What is left in JS is almost entirely calls into browser APIs, and that is a hard boundary rather than a preference:
+
+| | lines |
+|---|---|
+| `engine.js` — WGSL shader source (not JavaScript at all) | 410 |
+| `engine.js` — WebGPU API calls and pipeline descriptors | ~180 |
+| `game.js` — DOM, events, Web Audio, canvas, pointer lock | ~200 |
+
+WebAssembly cannot touch the DOM, WebGPU or Web Audio directly. Reaching them from Rust means `wasm-bindgen`/`web-sys`, which does not remove the JavaScript — it *generates* it, as a glue module that is usually larger than the code it replaces, and it gives the wasm module a few hundred imports. That would invert the property this core is built around: `game.js` instantiates with `WebAssembly.instantiate(bytes, {})`, and `build.mjs` fails the build if a single import appears. It would also make `standalone.html` considerably harder to produce.
+
+So the split is drawn where it actually pays: arithmetic in Rust, the browser surface in the language that talks to browsers. Camera matrices, the three mesh prototypes and the minimap rasteriser all moved into `src/lib.rs` for exactly this reason — they were pure functions sitting on the wrong side of the line.
 
 **The simulation is `#![no_std]` Rust compiled to a freestanding WASM module with zero imports.** Terrain, creatures, AI, projectiles, particles, spells, the mana economy and the win condition all live in linear memory as flat `f32` arrays. JS never marshals anything: it maps `memory.buffer` once and reads through `Float32Array` views.
 

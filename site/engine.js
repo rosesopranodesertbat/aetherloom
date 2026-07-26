@@ -413,132 +413,18 @@ fn tone(scene: vec3<f32>, bloom: vec3<f32>) -> vec3<f32> {
 }
 `;
 
-// ============================ matrix math ===================================
-export const M4 = {
-  persp(fovy, aspect, near, far) {
-    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
-    return new Float32Array([
-      f / aspect, 0, 0, 0,
-      0, f, 0, 0,
-      0, 0, far * nf, -1,
-      0, 0, far * near * nf, 0]);
-  },
-  lookAt(ex, ey, ez, cx, cy, cz, ux, uy, uz) {
-    let zx = ex - cx, zy = ey - cy, zz = ez - cz;
-    let l = Math.hypot(zx, zy, zz) || 1; zx /= l; zy /= l; zz /= l;
-    let xx = uy * zz - uz * zy, xy = uz * zx - ux * zz, xz = ux * zy - uy * zx;
-    l = Math.hypot(xx, xy, xz) || 1; xx /= l; xy /= l; xz /= l;
-    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
-    return new Float32Array([
-      xx, yx, zx, 0,
-      xy, yy, zy, 0,
-      xz, yz, zz, 0,
-      -(xx * ex + xy * ey + xz * ez),
-      -(yx * ex + yy * ey + yz * ez),
-      -(zx * ex + zy * ey + zz * ez), 1]);
-  },
-  mul(a, b) {
-    const o = new Float32Array(16);
-    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
-      let s = 0;
-      for (let k = 0; k < 4; k++) s += a[i + k * 4] * b[k + j * 4];
-      o[i + j * 4] = s;
-    }
-    return o;
-  },
-  invert(m) {
-    const o = new Float32Array(16);
-    const a00=m[0],a01=m[1],a02=m[2],a03=m[3], a10=m[4],a11=m[5],a12=m[6],a13=m[7],
-          a20=m[8],a21=m[9],a22=m[10],a23=m[11], a30=m[12],a31=m[13],a32=m[14],a33=m[15];
-    const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10,
-          b03=a01*a12-a02*a11, b04=a01*a13-a03*a11, b05=a02*a13-a03*a12,
-          b06=a20*a31-a21*a30, b07=a20*a32-a22*a30, b08=a20*a33-a23*a30,
-          b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
-    let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
-    if (!det) return o;
-    det = 1 / det;
-    o[0]=(a11*b11-a12*b10+a13*b09)*det; o[1]=(a02*b10-a01*b11-a03*b09)*det;
-    o[2]=(a31*b05-a32*b04+a33*b03)*det; o[3]=(a22*b04-a21*b05-a23*b03)*det;
-    o[4]=(a12*b08-a10*b11-a13*b07)*det; o[5]=(a00*b11-a02*b08+a03*b07)*det;
-    o[6]=(a32*b02-a30*b05-a33*b01)*det; o[7]=(a20*b05-a22*b02+a23*b01)*det;
-    o[8]=(a10*b10-a11*b08+a13*b06)*det; o[9]=(a01*b08-a00*b10-a03*b06)*det;
-    o[10]=(a30*b04-a31*b02+a33*b00)*det; o[11]=(a21*b02-a20*b04-a23*b00)*det;
-    o[12]=(a11*b07-a10*b09-a12*b06)*det; o[13]=(a00*b09-a01*b07+a02*b06)*det;
-    o[14]=(a31*b01-a30*b03-a32*b00)*det; o[15]=(a20*b03-a21*b01+a22*b00)*det;
-    return o;
-  }
-};
+// Matrix math and the mesh prototypes now live in the Rust core (src/lib.rs).
+// They are pure arithmetic with no browser surface, so there was no reason for
+// them to be here. What remains in this file is the WebGPU API itself, which
+// wasm cannot reach without an import bridge.
 
-// ============================ procedural meshes =============================
-// All prototypes live in a -1..1 box; the vertex shader scales by iscl*0.5,
-// so an instance scale of s spans exactly s world units.
-function meshBox() {
-  const p = [], n = [], idx = [];
-  const faces = [
-    [[1,0,0],[[1,-1,-1],[1,1,-1],[1,1,1],[1,-1,1]]],
-    [[-1,0,0],[[-1,-1,1],[-1,1,1],[-1,1,-1],[-1,-1,-1]]],
-    [[0,1,0],[[-1,1,-1],[-1,1,1],[1,1,1],[1,1,-1]]],
-    [[0,-1,0],[[-1,-1,1],[-1,-1,-1],[1,-1,-1],[1,-1,1]]],
-    [[0,0,1],[[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]],
-    [[0,0,-1],[[-1,1,-1],[1,1,-1],[1,-1,-1],[-1,-1,-1]]],
-  ];
-  for (const [nv, quad] of faces) {
-    const base = p.length / 3;
-    for (const v of quad) { p.push(v[0], v[1], v[2]); n.push(nv[0], nv[1], nv[2]); }
-    idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  }
-  return pack(p, n, idx);
-}
-function meshSphere(seg = 14, ring = 9) {
-  const p = [], n = [], idx = [];
-  for (let j = 0; j <= ring; j++) {
-    const v = j / ring, phi = v * Math.PI;
-    for (let i = 0; i <= seg; i++) {
-      const u = i / seg, th = u * Math.PI * 2;
-      const x = Math.sin(phi) * Math.cos(th), y = Math.cos(phi), z = Math.sin(phi) * Math.sin(th);
-      p.push(x, y, z); n.push(x, y, z);
-    }
-  }
-  for (let j = 0; j < ring; j++) for (let i = 0; i < seg; i++) {
-    const a = j * (seg + 1) + i, b = a + seg + 1;
-    idx.push(a, a + 1, b, a + 1, b + 1, b);
-  }
-  return pack(p, n, idx);
-}
-function meshCone(seg = 14) {
-  const p = [], n = [], idx = [];
-  for (let i = 0; i < seg; i++) {
-    const a0 = i / seg * Math.PI * 2, a1 = (i + 1) / seg * Math.PI * 2;
-    const x0 = Math.cos(a0), z0 = Math.sin(a0), x1 = Math.cos(a1), z1 = Math.sin(a1);
-    const mx = Math.cos((a0 + a1) / 2), mz = Math.sin((a0 + a1) / 2);
-    const ny = 0.45, s = Math.hypot(mx, ny, mz);
-    const base = p.length / 3;
-    p.push(x0, -1, z0, x1, -1, z1, 0, 1, 0);
-    for (let k = 0; k < 3; k++) n.push(mx / s, ny / s, mz / s);
-    idx.push(base, base + 2, base + 1);
-    const b2 = p.length / 3;
-    p.push(0, -1, 0, x1, -1, z1, x0, -1, z0);
-    for (let k = 0; k < 3; k++) n.push(0, -1, 0);
-    idx.push(b2, b2 + 2, b2 + 1);
-  }
-  return pack(p, n, idx);
-}
-function pack(p, n, idx) {
-  if (idx.length % 2) idx.push(idx[idx.length - 1]);   // keep byteLength a multiple of 4
-  const v = new Float32Array(p.length * 2);
-  for (let i = 0; i < p.length / 3; i++) {
-    v[i * 6] = p[i * 3]; v[i * 6 + 1] = p[i * 3 + 1]; v[i * 6 + 2] = p[i * 3 + 2];
-    v[i * 6 + 3] = n[i * 3]; v[i * 6 + 4] = n[i * 3 + 1]; v[i * 6 + 5] = n[i * 3 + 2];
-  }
-  return { verts: v, idx: new Uint16Array(idx), count: idx.length };
-}
 
 // ============================ renderer ======================================
 const MAXI = 12288, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
 
 export class Renderer {
-  constructor(canvas) {
-    this.canvas = canvas; this.ok = false; this.bloom = true;
+  constructor(canvas, sim) {
+    this.canvas = canvas; this.sim = sim; this.ok = false; this.bloom = true;
     this.block = 4;        // edge pixel size in CSS px — part of the look, fixed
     this.levels = 20;      // palette steps per channel, at edges only
     this.grain = 0.05;     // animated static, at edges only
@@ -567,15 +453,23 @@ export class Renderer {
     this.uniBuf = d.createBuffer({ size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     // ---- meshes
-    const mk = (m) => {
-      const vb = d.createBuffer({ size: m.verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-      d.queue.writeBuffer(vb, 0, m.verts);
-      const ibSize = Math.ceil(m.idx.byteLength / 4) * 4;
+    // Prototypes are generated in the core and read straight out of its
+    // linear memory — nothing is built or copied on the JS side.
+    this.sim.buildMeshes();
+    const mem = this.sim.memory.buffer;
+    const mk = (s) => {
+      const verts = new Float32Array(mem, this.sim.meshVertPtr(s), this.sim.meshVertFloats(s));
+      const idx = new Uint16Array(mem, this.sim.meshIdxPtr(s), this.sim.meshIdxCount(s));
+      const vb = d.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+      d.queue.writeBuffer(vb, 0, verts);
+      const ibSize = Math.ceil(idx.byteLength / 4) * 4;
       const ib = d.createBuffer({ size: ibSize, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-      d.queue.writeBuffer(ib, 0, m.idx);
-      return { vb, ib, count: m.count };
+      d.queue.writeBuffer(ib, 0, idx);
+      return { vb, ib, count: idx.length };
     };
-    this.shapes = [mk(meshBox()), mk(meshSphere()), mk(meshCone())];
+    this.shapes = [mk(0), mk(1), mk(2)];
+    // 32 floats: view-projection, then its inverse
+    this.camM = new Float32Array(mem, this.sim.camera(1.0, 1.0, 1, 2, 0, 0, 0, 0, 0, 1, 0, 1, 0), 32);
 
     // ---- terrain grid
     const W = terrainW;
@@ -762,12 +656,10 @@ export class Renderer {
     if (!this.ok || this.lost) return;
     const d = this.device;
     const aspect = this.cw / this.ch;
-    const proj = M4.persp(opts.fov, aspect, 1.2, this.far);
-    const view = M4.lookAt(cam.ex, cam.ey, cam.ez, cam.cx, cam.cy, cam.cz, cam.ux, cam.uy, cam.uz);
-    const vp = M4.mul(proj, view);
-    const ivp = M4.invert(vp);
+    this.sim.camera(opts.fov, aspect, 1.2, this.far,
+      cam.ex, cam.ey, cam.ez, cam.cx, cam.cy, cam.cz, cam.ux, cam.uy, cam.uz);
     const u = this.uni;
-    u.set(vp, 0); u.set(ivp, 16);
+    u.set(this.camM, 0);
     u[32] = cam.ex; u[33] = cam.ey; u[34] = cam.ez; u[35] = opts.time;
     u[36] = opts.sun[0]; u[37] = opts.sun[1]; u[38] = opts.sun[2]; u[39] = opts.sunI;
     u[40] = opts.fog[0]; u[41] = opts.fog[1]; u[42] = opts.fog[2]; u[43] = opts.fogD;

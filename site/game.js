@@ -200,7 +200,7 @@ class Game {
     this.world = this.sim.worldSize();
 
     // ---- renderer
-    this.r = new Renderer(this.canvas);
+    this.r = new Renderer(this.canvas, this.sim);
     await this.r.init(this.TW, this.cell, 0);
 
     this.buildSpellBar();
@@ -381,18 +381,9 @@ Game.prototype.drawMinimap = function () {
     this.mapImg = this.mapOffCtx.createImageData(N, N);
   }
   if (this.mapDirty) {
-    const d = this.mapImg.data, step = this.TW / N;
-    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-      const h = this.H[((j * step) | 0) * this.TW + ((i * step) | 0)];
-      let r, g, b;
-      if (h < -1) { const t = Math.min(1, -h / 30); r = 14 + (1 - t) * 26; g = 34 + (1 - t) * 50; b = 62 + (1 - t) * 44; }
-      else if (h < 8) { r = 178; g = 152; b = 98; }
-      else if (h < 52) { r = 74 + h * 0.7; g = 96 + h * 0.5; b = 50; }
-      else if (h < 118) { r = 106; g = 96; b = 84; }
-      else { r = 210; g = 205; b = 193; }
-      const o = (j * N + i) * 4;
-      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
-    }
+    // the core rasterises straight from its own heightmap
+    const ptr = this.sim.minimapRaster(N);
+    this.mapImg.data.set(new Uint8ClampedArray(this.sim.memory.buffer, ptr, N * N * 4));
     this.mapOffCtx.putImageData(this.mapImg, 0, 0);
     this.mapDirty = false;
   }
