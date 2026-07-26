@@ -9,7 +9,7 @@ execSync([
   'npx asc src/sim.ts --outFile site/sim.wasm',
   '-O3 --shrinkLevel 0 --noAssert --runtime stub',
   '--use abort= --use Math=NativeMath --use Mathf=NativeMathf',
-  '--initialMemory 48 --maximumMemory 256'
+  '--initialMemory 64 --maximumMemory 256'
 ].join(' '), { stdio: 'inherit' });
 
 const strip = (f) => fs.readFileSync(f, 'utf8')

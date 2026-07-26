@@ -5,20 +5,20 @@
 // ============================================================================
 
 // ---- world constants -------------------------------------------------------
-export const TW: i32 = 256;             // terrain grid width (256*4B = 1024B rows, GPU-aligned)
+export const TW: i32 = 320;             // terrain grid width (320*4B = 1280B rows, GPU-aligned)
 const TWM: i32 = TW - 1;
-export const CELL: f32 = 4.0;           // world units per cell
-const WORLD: f32 = <f32>TW * CELL;      // 1024 units
+export const CELL: f32 = 8.0;           // world units per cell
+const WORLD: f32 = <f32>TW * CELL;      // 2560 units — 6x the area of the old map
 const SEA: f32 = 0.0;
 
-const MAXE: i32 = 320;                  // creatures
-const MAXP: i32 = 96;                   // projectiles
-const MAXO: i32 = 512;                  // mana orbs
+const MAXE: i32 = 460;                  // creatures
+const MAXP: i32 = 128;                  // projectiles
+const MAXO: i32 = 768;                  // mana orbs
 const MAXPT: i32 = 4096;                // particles
-const MAXI: i32 = 8192;                 // render instances
-const MAXDEC: i32 = 2600;               // scenery
+const MAXI: i32 = 12288;                // render instances
+const MAXDEC: i32 = 5200;               // scenery
 const NWIZ: i32 = 3;                    // 1 player + up to 2 rivals
-const NSPELL: i32 = 12;
+const NSPELL: i32 = 13;
 
 // ---- terrain ---------------------------------------------------------------
 const HEIGHT = new StaticArray<f32>(TW * TW);
@@ -42,6 +42,11 @@ const ptype = new StaticArray<i32>(MAXP), pown = new StaticArray<i32>(MAXP), pal
 const ox = new StaticArray<f32>(MAXO), oy = new StaticArray<f32>(MAXO), oz = new StaticArray<f32>(MAXO);
 const oamt = new StaticArray<f32>(MAXO), oalive = new StaticArray<i32>(MAXO), ophase = new StaticArray<f32>(MAXO);
 const oheld = new StaticArray<i32>(MAXO); // -1 free, else balloon entity index
+// 0 = unclaimed (gold), 1 = claimed by the player, 2 = claimed by a rival.
+// Only orbs matching a balloon's faction get ferried home.
+const oown = new StaticArray<i32>(MAXO);
+// personal mana pool bonus earned by possessing orbs
+const wcap = new StaticArray<f32>(NWIZ);
 
 // ---- particles -------------------------------------------------------------
 const qx = new StaticArray<f32>(MAXPT), qy = new StaticArray<f32>(MAXPT), qz = new StaticArray<f32>(MAXPT);
@@ -80,7 +85,8 @@ let carpetLo: i32 = 0, carpetHi: i32 = 0;
 const PART = new StaticArray<f32>(MAXPT * 8);
 let partN: i32 = 0;
 // minimap blip stride 4: x,z,kind,scale
-const MAP = new StaticArray<f32>(1024 * 4);
+const MAXMAP: i32 = 2048;
+const MAP = new StaticArray<f32>(MAXMAP * 4);
 let mapN: i32 = 0;
 // audio/vfx events stride 4: kind,x,y,z
 const EVT = new StaticArray<f32>(128 * 4);
@@ -201,15 +207,17 @@ function addCreature(t: i32, x: f32, z: f32, own: i32): i32 {
     ex[i] = x; ez[i] = z; ey[i] = heightAt(x, z) + creatureFloat(t);
     evx[i] = 0; evy[i] = 0; evz[i] = 0; eyaw[i] = rr(0, 6.2832);
     etim[i] = rr(0, 3); ecd[i] = 0; ephase[i] = rr(0, 6.2832); ehurt[i] = 0;
+    // Big things are meant to be a fight, not a speed bump. Swarm types stay
+    // thin so they still read as chaff.
     let hp: f32 = 30;
-    if (t == 0) hp = 40;        // worm
-    else if (t == 1) hp = 18;   // wasp
-    else if (t == 2) hp = 90;   // troll
-    else if (t == 3) hp = 55;   // griffin
-    else if (t == 4) hp = 220;  // nest
-    else if (t == 5) hp = 70;   // wraith (ally)
-    else if (t == 6) hp = 24;   // balloon
-    else if (t == 7) hp = 400;  // dragon
+    if (t == 0) hp = 165;       // worm
+    else if (t == 1) hp = 22;   // wasp
+    else if (t == 2) hp = 340;  // troll
+    else if (t == 3) hp = 200;  // griffin
+    else if (t == 4) hp = 430;  // nest
+    else if (t == 5) hp = 110;  // wraith (ally)
+    else if (t == 6) hp = 30;   // balloon
+    else if (t == 7) hp = 1500; // dragon
     ehp[i] = hp; ehpm[i] = hp;
     return i;
   }
@@ -222,7 +230,7 @@ function addCreature(t: i32, x: f32, z: f32, own: i32): i32 {
 function addOrb(x: f32, y: f32, z: f32, amt: f32): void {
   for (let i = 0; i < MAXO; i++) {
     if (oalive[i] != 0) continue;
-    oalive[i] = 1; ox[i] = x; oy[i] = y; oz[i] = z; oamt[i] = amt;
+    oalive[i] = 1; ox[i] = x; oy[i] = y; oz[i] = z; oamt[i] = amt; oown[i] = 0;
     ophase[i] = rr(0, 6.2832); oheld[i] = -1; return;
   }
 }
@@ -230,6 +238,8 @@ function addOrb(x: f32, y: f32, z: f32, amt: f32): void {
 // ---- spell table -----------------------------------------------------------
 // cost, cooldown seconds
 const SCOST = new StaticArray<f32>(NSPELL);
+// each tier costs more than the last
+@inline function fortressCost(w: i32): f32 { return 34.0 + <f32>clev[w] * 26.0; }
 const SCD = new StaticArray<f32>(NSPELL);
 function initSpellTable(): void {
   SCOST[0] = 4;  SCD[0] = 0.28;   // Firebolt
@@ -241,13 +251,14 @@ function initSpellTable(): void {
   SCOST[6] = 16; SCD[6] = 9.00;   // Shield
   SCOST[7] = 18; SCD[7] = 7.00;   // Mend
   SCOST[8] = 12; SCD[8] = 8.00;   // Haste
-  SCOST[9] = 5;  SCD[9] = 0.50;   // Siphon
+  SCOST[9] = 4;  SCD[9] = 0.55;   // Claim
   SCOST[10] = 22; SCD[10] = 6.0;  // Wraith
   SCOST[11] = 60; SCD[11] = 22.0; // Sunburst
+  SCOST[12] = 34; SCD[12] = 1.60;  // Fortress (real cost is fortressCost)
 }
 function unlockFor(lv: i32): void {
   for (let i = 0; i < NSPELL; i++) UNL[i] = 0;
-  UNL[0] = 1; UNL[9] = 1; UNL[7] = 1;   // firebolt, siphon and mend from the first realm
+  UNL[0] = 1; UNL[9] = 1; UNL[7] = 1; UNL[12] = 1;   // firebolt, claim, mend, fortress
   if (lv >= 2) UNL[1] = 1;
   if (lv >= 3) UNL[2] = 1;
   if (lv >= 3) UNL[6] = 1;
@@ -339,7 +350,7 @@ export function init(seed: u32, lv: i32): void {
       let ok = true;
       for (let u = 0; u < w; u++) {
         const dd = (tx - cx[u]) * (tx - cx[u]) + (tz - cz[u]) * (tz - cz[u]);
-        if (dd < 330.0 * 330.0) { ok = false; break; }
+        if (dd < 820.0 * 820.0) { ok = false; break; }
       }
       if (ok) break;
     }
@@ -370,17 +381,18 @@ export function init(seed: u32, lv: i32): void {
     walive[w] = 1;
     wx[w] = bx; wz[w] = bz + 40.0; wy[w] = cy[w] + 40.0;
     wvx[w] = 0; wvy[w] = 0; wvz[w] = 0; wyaw[w] = 0; wpit[w] = 0; wrol[w] = 0;
-    whp[w] = 100.0; wcar[w] = 0; wstore[w] = 0; wmana[w] = w == 0 ? 45.0 : 60.0;
+    whp[w] = 100.0; wcar[w] = 0; wstore[w] = 0; wmana[w] = w == 0 ? 45.0 : 60.0; wcap[w] = 0;
     wcd[w] = 0; wresp[w] = 0; wshield[w] = 0; whaste[w] = 0; wai[w] = 0; waitim[w] = 0; wnohit[w] = 0;
   }
 
-  // creature nests + starting wildlife
-  const nNests = 3 + lv;
+  // Creature nests + starting wildlife. Counts scale with the map, which is
+  // now 6x the area — the old numbers left everything piled in one corner.
+  const nNests = 9 + lv * 2;
   for (let k = 0; k < nNests; k++) {
     const idx = findLand(14.0);
     addCreature(4, <f32>(idx % TW) * CELL, <f32>(idx / TW) * CELL, 0);
   }
-  const nWild = 6 + lv * 2;
+  const nWild = 24 + lv * 6;
   for (let k = 0; k < nWild; k++) {
     const idx = findLand(6.0);
     let t = ri(4); if (t == 4) t = 0;
@@ -388,7 +400,7 @@ export function init(seed: u32, lv: i32): void {
     addCreature(t, <f32>(idx % TW) * CELL, <f32>(idx / TW) * CELL, 0);
   }
   // seed some free mana so the map is immediately playable
-  for (let k = 0; k < 18; k++) {
+  for (let k = 0; k < 96; k++) {
     const idx = findLand(4.0);
     const axx = <f32>(idx % TW) * CELL, azz = <f32>(idx / TW) * CELL;
     addOrb(axx, heightAt(axx, azz) + 4.0, azz, rr(5, 10));
@@ -505,8 +517,16 @@ function castSpell(w: i32, s: i32): i32 {
   if (s < 0 || s >= NSPELL) return 0;
   if (w == 0 && UNL[s] == 0) return 0;
   if (w == 0 && CD[s] > 0) return 0;
-  if (wmana[w] < SCOST[s]) return 0;
-  wmana[w] -= SCOST[s];
+  // Fortress only works standing over your own keep, and only while there is
+  // a tier left to buy. Checked before any mana is spent.
+  if (s == 12) {
+    const dxc = cx[w] - wx[w], dyc = cy[w] - wy[w], dzc = cz[w] - wz[w];
+    if (chp[w] <= 0 || clev[w] >= 6) return 0;
+    if (dxc * dxc + dyc * dyc + dzc * dzc > 210.0 * 210.0) return 0;
+  }
+  const need: f32 = s == 12 ? fortressCost(w) : SCOST[s];
+  if (wmana[w] < need) return 0;
+  wmana[w] -= need;
   if (w == 0) CD[s] = SCD[s];
   const fac = w + 1;
   fwdVec(w, tmpv);
@@ -588,37 +608,37 @@ function castSpell(w: i32, s: i32): i32 {
     for (let k = 0; k < 30; k++) spawnPart(wx[w] + rr(-8, 8), wy[w] + rr(-6, 6), wz[w] + rr(-8, 8), 0, rr(6, 20), 0, 1.0, 3.0, 0.4, 1.0, 0.6, 4.0, 1.0);
     pushEvent(10, wx[w], wy[w], wz[w]);
   } else if (s == 8) { whaste[w] = 12.0; pushEvent(9, wx[w], wy[w], wz[w]); }
-  else if (s == 9) {                  // Siphon — drain rival mana
-    let got: f32 = 0;
-    for (let u = 0; u <= nRival; u++) {
-      if (u == w || walive[u] == 0) continue;
-      const dx = wx[u] - wx[w], dy = wy[u] - wy[w], dz = wz[u] - wz[w];
-      if (dx * dx + dy * dy + dz * dz > 330.0 * 330.0) continue;
-      const take: f32 = wmana[u] > 16.0 ? 16.0 : wmana[u];
-      wmana[u] -= take; got += take;
-      for (let k = 0; k < 18; k++) {
-        const t2 = rr(0, 1);
-        spawnPart(wx[u] + (wx[w] - wx[u]) * t2, wy[u] + (wy[w] - wy[u]) * t2, wz[u] + (wz[w] - wz[u]) * t2,
-          rr(-6, 6), rr(-6, 6), rr(-6, 6), 0.5, 2.2, 0.55, 0.35, 1.0, 0, 1.0);
-      }
-    }
-    // also pulls loose orbs toward the caster
+  else if (s == 9) {                  // Claim — possess loose mana
+    // Turns unclaimed gold orbs white and marks them for your balloons.
+    // Possessing mana also permanently widens your own pool, which is the
+    // only way to afford the expensive spells later on.
+    let n2 = 0; let gain: f32 = 0;
     for (let i = 0; i < MAXO; i++) {
-      if (oalive[i] == 0) continue;
-      const dx = wx[w] - ox[i], dy = wy[w] - oy[i], dz = wz[w] - oz[i];
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 > 150.0 * 150.0) continue;
-      const inv: f32 = 1.0 / (Mathf.sqrt(d2) + 0.01);
-      ox[i] += dx * inv * 40.0 * 0.05; oy[i] += dy * inv * 40.0 * 0.05; oz[i] += dz * inv * 40.0 * 0.05;
+      if (oalive[i] == 0 || oheld[i] >= 0 || oown[i] == fac) continue;
+      const dx = ox[i] - wx[w], dy = oy[i] - wy[w], dz = oz[i] - wz[w];
+      if (dx * dx + dy * dy + dz * dz > 200.0 * 200.0) continue;
+      oown[i] = fac; n2++; gain += oamt[i];
+      for (let k = 0; k < 7; k++)
+        spawnPart(ox[i], oy[i], oz[i], rr(-9, 9), rr(2, 12), rr(-9, 9), 0.55, 2.0, 0.75, 0.9, 1.0, 0, 1.2);
     }
-    wmana[w] += got;
-    pushEvent(11, wx[w], wy[w], wz[w]);
+    if (n2 > 0) {
+      wcap[w] += gain * 0.28;
+      wmana[w] += gain * 0.42;
+      const cp = manaCap(w); if (wmana[w] > cp) wmana[w] = cp;
+      if (w == 0) pushEvent(3, wx[w], wy[w], wz[w]);
+    }
   } else if (s == 10) {               // Wraith ally
     const d = rayGround(wx[w], wy[w], wz[w], fx, fy, fz, 260.0);
     const tx = clampWorld(wx[w] + fx * d), tz = clampWorld(wz[w] + fz * d);
     const id = addCreature(5, tx, tz, fac);
     if (id >= 0) { etim[id] = 45.0; burst(tx, heightAt(tx, tz) + 12.0, tz, 30, 14.0, 4.0, 0.55, 0.35, 1.0, 1.2); }
     pushEvent(12, tx, heightAt(tx, tz), tz);
+  } else if (s == 12) {               // Fortress — raise your keep a tier
+    clev[w] += 1;
+    chpm[w] += 220.0; chp[w] = chpm[w];
+    burst(cx[w], cy[w] + 26.0, cz[w], 70, 30.0, 12.0, 0.55, 0.85, 1.0, 2.2);
+    shake = w == 0 ? 0.7 : shake;
+    if (w == 0) pushEvent(16, cx[w], cy[w], cz[w]);
   } else if (s == 11) {               // Sunburst — smites every hostile creature
     for (let i = 0; i < MAXE; i++) {
       if (ealive[i] == 0 || eown[i] == fac) continue;
@@ -651,8 +671,15 @@ export function cycleSpell(dir: i32): void {
 }
 
 // ---- wizards ---------------------------------------------------------------
-const BANK_FLOOR: f32 = 45.0;   // regen fills to here; deposits keep exactly this much
-@inline function manaCap(w: i32): f32 { return 120.0 + <f32>clev[w] * 50.0; }
+// Regen ceiling. Nothing can be laundered into progress through it any more
+// (the fortress is filled by balloons), so it can afford to be generous —
+// it has to at least reach the price of the first Fortress tier.
+const BANK_FLOOR: f32 = 72.0;
+@inline function manaCap(w: i32): f32 { return 120.0 + <f32>clev[w] * 50.0 + wcap[w]; }
+// A fortress can only hold so much; raising a tier is what buys headroom.
+@inline function castleCap(w: i32): f32 { return 240.0 * <f32>clev[w]; }
+// mana that must sit inside your fortress to take the realm
+@inline function levelTarget(): f32 { return 180.0 + <f32>level * 160.0; }
 
 function updatePlayer(dt: f32): void {
   const w = 0;
@@ -688,7 +715,7 @@ function updatePlayer(dt: f32): void {
     if (wvy[w] < -60.0) { whp[w] -= (-wvy[w] - 60.0) * dt * 1.2; shake = 0.4; }
     if (wvy[w] < 0) wvy[w] *= 0.25;
   }
-  if (wy[w] > 300.0) { wy[w] = 300.0; if (wvy[w] > 0) wvy[w] = 0; }
+  if (wy[w] > 430.0) { wy[w] = 430.0; if (wvy[w] > 0) wvy[w] = 0; }
   if (wshield[w] > 0) wshield[w] -= dt;
   if (whaste[w] > 0) whaste[w] -= dt;
   // carpet trail
@@ -702,50 +729,23 @@ function wizardCommon(w: i32, dt: f32): void {
   // spell fuel regenerates only up to the bankable floor, so it can never be
   // laundered into claim progress by parking on your own castle
   if (chp[w] > 0 && wmana[w] < BANK_FLOOR) {
-    wmana[w] += (3.4 + <f32>clev[w] * 1.4) * dt;
+    wmana[w] += (5.0 + <f32>clev[w] * 2.2) * dt;
     if (wmana[w] > BANK_FLOOR) wmana[w] = BANK_FLOOR;
   }
-  // mana is drawn to a passing carpet, then absorbed at close range
-  for (let i = 0; i < MAXO; i++) {
-    if (oalive[i] == 0 || oheld[i] >= 0) continue;
-    let dx = wx[w] - ox[i], dy = wy[w] - oy[i], dz = wz[w] - oz[i];
-    const d2m = dx * dx + dy * dy + dz * dz;
-    if (d2m < 110.0 * 110.0 && d2m > 1.0) {
-      const dm = Mathf.sqrt(d2m);
-      const pull: f32 = 150.0 * (1.0 - dm / 110.0) * dt;
-      ox[i] += dx / dm * pull; oy[i] += dy / dm * pull; oz[i] += dz / dm * pull;
-    }
-  }
-  for (let i = 0; i < MAXO; i++) {
-    if (oalive[i] == 0 || oheld[i] >= 0) continue;
-    const dx = ox[i] - wx[w], dy = oy[i] - wy[w], dz = oz[i] - wz[w];
-    if (dx * dx + dy * dy + dz * dz > 42.0 * 42.0) continue;
-    wmana[w] += oamt[i];
-    const cap = manaCap(w);
-    if (wmana[w] > cap) wmana[w] = cap;
-    oalive[i] = 0;
-    if (w == 0) pushEvent(14, ox[i], oy[i], oz[i]);
-    for (let k = 0; k < 8; k++) spawnPart(ox[i], oy[i], oz[i], rr(-14, 14), rr(-6, 18), rr(-14, 14), 0.5, 2.4, 0.5, 0.75, 1.0, 0, 1.6);
-  }
+  // Orbs are not vacuumed up by flying over them any more: you possess them
+  // with Claim and your balloons carry them to the fortress.
   // deposit at own castle
   if (chp[w] > 0) {
     const dx = cx[w] - wx[w], dz = cz[w] - wz[w], dy = cy[w] + 16.0 - wy[w];
     if (dx * dx + dz * dz + dy * dy < 62.0 * 62.0) {
       whp[w] += 7.0 * dt; if (whp[w] > 100.0) whp[w] = 100.0;
-      const keep: f32 = BANK_FLOOR;
-      if (wmana[w] > keep) {
-        const eff: f32 = w == 0 ? 1.0 : (0.30 + <f32>level * 0.09);
-        const mv = Mathf.min((wmana[w] - keep), 90.0 * eff * dt);
-        wmana[w] -= mv; wstore[w] += mv;
-        if (w == 0 && rnd() < 0.4) pushEvent(15, cx[w], cy[w] + 16.0, cz[w]);
-      }
     }
   }
-  // castle tier
-  const step0 = totalMana * 0.115;
-  let lv = 1 + <i32>(wstore[w] / step0);
-  if (lv > 6) lv = 6;
-  if (lv != clev[w]) { clev[w] = lv; if (w == 0) pushEvent(16, cx[w], cy[w], cz[w]); }
+  // Tier is bought with the Fortress spell now, never derived from the store.
+  // Rivals buy their own once their keep is nearly full.
+  if (w != 0 && chp[w] > 0 && clev[w] < 6 && wstore[w] > castleCap(w) * 0.82 && wmana[w] > 44.0) {
+    clev[w] += 1; wmana[w] -= 44.0; chpm[w] += 220.0; chp[w] = chpm[w];
+  }
   // balloons ferry mana home
   if (chp[w] > 0) {
     cbt[w] -= dt;
@@ -753,7 +753,7 @@ function wizardCommon(w: i32, dt: f32): void {
       cbt[w] = 7.0;
       let n = 0;
       for (let i = 0; i < MAXE; i++) if (ealive[i] != 0 && etype[i] == 6 && eown[i] == w + 1) n++;
-      const cap = w == 0 ? clev[w] : (1 + level / 2 < clev[w] ? 1 + level / 2 : clev[w]);
+      const cap = w == 0 ? clev[w] + 1 : (1 + level / 2 < clev[w] ? 1 + level / 2 : clev[w]);
       if (n < cap) addCreature(6, cx[w] + rr(-20, 20), cz[w] + rr(-20, 20), w + 1);
     }
   }
@@ -777,7 +777,7 @@ function updateRival(w: i32, dt: f32): void {
     waitim[w] = rr(1.6, 3.4);
     const dpx = wx[0] - wx[w], dpz = wz[0] - wz[w], dpy = wy[0] - wy[w];
     const dp2 = dpx * dpx + dpz * dpz + dpy * dpy;
-    if (walive[0] != 0 && dp2 < 300.0 * 300.0 && wmana[w] > 26.0 && rnd() < 0.24 + <f32>level * 0.06) wai[w] = 2;
+    if (walive[0] != 0 && dp2 < 640.0 * 640.0 && wmana[w] > 26.0 && rnd() < 0.24 + <f32>level * 0.06) wai[w] = 2;
     else if (wmana[w] > manaCap(w) * 0.8) wai[w] = 1;
     else wai[w] = 0;
   }
@@ -790,7 +790,13 @@ function updateRival(w: i32, dt: f32): void {
       const d2 = dx * dx + dz * dz;
       if (d2 < bd) { bd = d2; best = i; }
     }
-    if (best >= 0) { tx = ox[best]; ty = oy[best] + 6.0; tz = oz[best]; }
+    if (best >= 0) {
+      tx = ox[best]; ty = oy[best] + 6.0; tz = oz[best];
+      // Possess what it is flying to, so its balloons have something to carry.
+      // Rate-limited: AI casts skip the player's cooldown table, so an
+      // ungated call here fires 60x a second and hoovers the map instantly.
+      if (bd < 190.0 * 190.0 && rnd() < 0.015) castSpell(w, 9);
+    }
     else {
       // hunt creatures for fresh mana
       let bc = -1; bd = 1e18;
@@ -802,16 +808,16 @@ function updateRival(w: i32, dt: f32): void {
       }
       if (bc >= 0) {
         tx = ex[bc]; ty = ey[bc] + 26.0; tz = ez[bc];
-        if (bd < 260.0 * 260.0 && wcd[w] <= 0) {
+        if (bd < 540.0 * 540.0 && wcd[w] <= 0) {
           aimAndFire(w, ex[bc], ey[bc], ez[bc], 0); wcd[w] = rr(0.5, 1.1);
         }
       }
     }
   } else if (wai[w] == 2 && walive[0] != 0) {
-    tx = wx[0] - Mathf.sin(wyaw[0]) * 90.0; ty = wy[0] + 16.0; tz = wz[0] - Mathf.cos(wyaw[0]) * 90.0;
+    tx = wx[0] - Mathf.sin(wyaw[0]) * 130.0; ty = wy[0] + 16.0; tz = wz[0] - Mathf.cos(wyaw[0]) * 130.0;
     const dx = wx[0] - wx[w], dy = wy[0] - wy[w], dz = wz[0] - wz[w];
     const d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 < 340.0 * 340.0 && wcd[w] <= 0) {
+    if (d2 < 620.0 * 620.0 && wcd[w] <= 0) {
       const r = rnd();
       if (r < 0.16 && wmana[w] > 26.0 && level >= 3) { aimAt(w, wx[0], wy[0], wz[0]); castSpell(w, 2); wcd[w] = rr(2.4, 4.0); }
       else if (r < 0.36 && wmana[w] > 12.0 && level >= 2) { aimAt(w, wx[0], wy[0], wz[0]); castSpell(w, 1); wcd[w] = rr(1.4, 2.6); }
@@ -903,38 +909,45 @@ function updateCreatures(dt: f32): void {
     }
     if (t == 6) {                          // mana balloon
       const ow = own - 1;
+      // Balloons cruise high, but orbs hover at ground + 5. Without stooping,
+      // the grab sphere can never close and nothing is ever delivered.
+      let floorLift: f32 = 34.0;
       let tx = cx[ow], ty = cy[ow] + 46.0, tz = cz[ow];
       let carrying = -1;
       for (let k = 0; k < MAXO; k++) if (oalive[k] != 0 && oheld[k] == i) { carrying = k; break; }
       if (carrying < 0) {
-        let best = -1; let bd: f32 = 420.0 * 420.0;
+        let best = -1; let bd: f32 = 980.0 * 980.0;
         for (let k = 0; k < MAXO; k++) {
-          if (oalive[k] == 0 || oheld[k] >= 0) continue;
+          if (oalive[k] == 0 || oheld[k] >= 0 || oown[k] != own) continue;
           const dx = ox[k] - ex[i], dz = oz[k] - ez[i];
           const d2 = dx * dx + dz * dz;
           if (d2 < bd) { bd = d2; best = k; }
         }
         if (best >= 0) {
-          tx = ox[best]; ty = oy[best] + 12.0; tz = oz[best];
+          tx = ox[best]; ty = oy[best] + 3.0; tz = oz[best];
+          floorLift = 5.0;
           const dx = ox[best] - ex[i], dy = oy[best] - ey[i], dz = oz[best] - ez[i];
-          if (dx * dx + dy * dy + dz * dz < 22.0 * 22.0) oheld[best] = i;
+          if (dx * dx + dy * dy + dz * dz < 30.0 * 30.0) oheld[best] = i;
         }
       } else {
         ox[carrying] = ex[i]; oy[carrying] = ey[i] - 10.0; oz[carrying] = ez[i];
         const dx = cx[ow] - ex[i], dz = cz[ow] - ez[i], dy = cy[ow] + 30.0 - ey[i];
         if (dx * dx + dz * dz + dy * dy < 52.0 * 52.0) {
-          wstore[ow] += oamt[carrying]; oalive[carrying] = 0;
+          // Rivals ferry at a handicap that closes as the realms get harder —
+          // the old economy had the same ramp on their banking rate.
+          const eff: f32 = ow == 0 ? 1.0 : (0.34 + <f32>level * 0.08);
+          wstore[ow] = Mathf.min(wstore[ow] + oamt[carrying] * eff, castleCap(ow)); oalive[carrying] = 0;
           for (let k = 0; k < 10; k++) spawnPart(cx[ow], cy[ow] + 22.0, cz[ow], rr(-10, 10), rr(4, 20), rr(-10, 10), 0.7, 2.4, 0.5, 0.8, 1.0, 0, 1.5);
         }
       }
       const dx = tx - ex[i], dy = ty - ey[i], dz = tz - ez[i];
       const d = Mathf.sqrt(dx * dx + dy * dy + dz * dz) + 0.01;
-      const sp: f32 = 42.0;
+      const sp: f32 = 66.0;   // the map is 2.5x wider than it was
       evx[i] += (dx / d * sp - evx[i]) * Mathf.min(1.0, dt * 1.5);
       evy[i] += (dy / d * sp * 0.6 - evy[i]) * Mathf.min(1.0, dt * 1.5);
       evz[i] += (dz / d * sp - evz[i]) * Mathf.min(1.0, dt * 1.5);
       ex[i] = clampWorld(ex[i] + evx[i] * dt); ey[i] += evy[i] * dt; ez[i] = clampWorld(ez[i] + evz[i] * dt);
-      const fy = heightAt(ex[i], ez[i]) + 34.0; if (ey[i] < fy) ey[i] = fy;
+      const fy = Mathf.max(heightAt(ex[i], ez[i]), SEA) + floorLift; if (ey[i] < fy) ey[i] = fy;
       eyaw[i] = Mathf.atan2(dx, dz);
       if (ehp[i] <= 0) { if (carrying >= 0) oheld[carrying] = -1; ealive[i] = 0; }
       continue;
@@ -1130,7 +1143,7 @@ function updateOrbs(dt: f32): void {
   instN++;
 }
 @inline function pushMap(x: f32, z: f32, kind: f32, sc: f32): void {
-  if (mapN >= 1024) return;
+  if (mapN >= MAXMAP) return;
   const o = mapN * 4; MAP[o] = x; MAP[o + 1] = z; MAP[o + 2] = kind; MAP[o + 3] = sc; mapN++;
 }
 // Lowest ground under a footprint of radius r. A castle placed at the height
@@ -1299,7 +1312,7 @@ function drawCreature(i: i32): void {
 function buildRender(): void {
   instN = 0; partN = 0; mapN = 0;
   // scenery (distance culled around the player)
-  const cull: f32 = 620.0;
+  const cull: f32 = 1050.0;
   for (let i = 0; i < decCount; i++) {
     const dx = dx_[i] - wx[0], dz = dz_[i] - wz[0];
     if (dx * dx + dz * dz > cull * cull) continue;
@@ -1343,8 +1356,13 @@ function buildRender(): void {
     orbN++;
     const s: f32 = 2.0 + oamt[i] * 0.18;
     const pl: f32 = 0.75 + Mathf.sin(ophase[i] * 2.0) * 0.25;
-    pushInst(ox[i], oy[i], oz[i], s, s, s, 0.45 * pl, 0.85 * pl, 1.0, 0, 1.0, 1);
-    pushMap(ox[i], oz[i], 4.0, 0.7);
+    // gold = nobody's yet, white = yours and inbound on a balloon, red = theirs
+    let orr: f32 = 1.00, org: f32 = 0.78, orb2: f32 = 0.16;
+    let mk: f32 = 10.0;
+    if (oown[i] == 1) { orr = 0.72; org = 0.92; orb2 = 1.00; mk = 4.0; }
+    else if (oown[i] == 2) { orr = 1.00; org = 0.36; orb2 = 0.30; mk = 8.0; }
+    pushInst(ox[i], oy[i], oz[i], s, s, s, orr * pl, org * pl, orb2 * pl, 0, 1.0, 1);
+    pushMap(ox[i], oz[i], mk, 0.7);
     if (rnd() < 0.10) spawnPart(ox[i], oy[i], oz[i], rr(-3, 3), rr(3, 9), rr(-3, 3), 0.8, 1.8, 0.45, 0.8, 1.0, 0, 1.2);
   }
   // projectiles
@@ -1378,10 +1396,15 @@ function buildRender(): void {
   ST[7] = whp[0]; ST[8] = 100.0;
   ST[9] = wmana[0]; ST[10] = manaCap(0);
   ST[11] = <f32>sel; ST[12] = <f32>NSPELL;
-  ST[13] = wstore[0] / totalMana;
+  const tgt = levelTarget();
+  ST[13] = wstore[0] / tgt;
   let rb: f32 = 0;
   for (let w = 1; w <= nRival; w++) if (wstore[w] > rb) rb = wstore[w];
-  ST[14] = rb / totalMana; ST[15] = targetFrac;
+  ST[14] = rb / tgt; ST[15] = 1.0;
+  // how much of the target your current fortress tier can physically hold
+  // 53..56: the gap between the cooldown block (40..52) and the unlock block
+  ST[53] = castleCap(0) / tgt;                 // how much of the target this tier holds
+  ST[54] = wstore[0]; ST[55] = castleCap(0); ST[56] = tgt; ST[57] = BANK_FLOOR;
   ST[16] = <f32>clev[0]; ST[17] = <f32>level; ST[18] = <f32>status; ST[19] = shake;
   ST[20] = wshield[0]; ST[21] = whaste[0]; ST[22] = g; ST[23] = wy[0] - Mathf.max(g, SEA);
   ST[24] = kills; ST[25] = wstore[0]; ST[26] = totalMana;
@@ -1397,8 +1420,9 @@ function buildRender(): void {
   for (let i = 0; i < NSPELL; i++) {
     ST[40 + i] = SCD[i] > 0 ? CD[i] / SCD[i] : 0;
     ST[60 + i] = <f32>UNL[i];
-    ST[80 + i] = wmana[0] >= SCOST[i] ? 1.0 : 0.0;
-    ST[100 + i] = SCOST[i];
+    const price: f32 = i == 12 ? fortressCost(0) : SCOST[i];
+    ST[80 + i] = wmana[0] >= price ? 1.0 : 0.0;
+    ST[100 + i] = price;
   }
 }
 
@@ -1427,8 +1451,8 @@ export function step(dt: f32): void {
       }
     }
     // win / lose
-    if (wstore[0] >= totalMana * targetFrac) status = 1;
-    for (let w = 1; w <= nRival; w++) if (wstore[w] >= totalMana * targetFrac) status = 3;
+    if (wstore[0] >= levelTarget()) status = 1;
+    for (let w = 1; w <= nRival; w++) if (wstore[w] >= levelTarget()) status = 3;
     if (whp[0] <= 0) status = 2;
   }
   updateParticles(d);

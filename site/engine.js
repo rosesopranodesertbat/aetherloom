@@ -534,7 +534,7 @@ function pack(p, n, idx) {
 }
 
 // ============================ renderer ======================================
-const MAXI = 8192, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
+const MAXI = 12288, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
 
 export class Renderer {
   constructor(canvas) {
@@ -542,7 +542,7 @@ export class Renderer {
     this.block = 4;        // edge pixel size in CSS px — part of the look, fixed
     this.levels = 20;      // palette steps per channel, at edges only
     this.grain = 0.05;     // animated static, at edges only
-    this.far = 1300;       // draw range; fog closes off completely by here
+    this.far = 1600;       // draw range; fog closes off completely by here
   }
 
   async init(terrainW, cellSize, seaLevel) {

@@ -6,7 +6,7 @@ No original assets are used. Every texture, shape, sound and level is generated 
 
 ## Play it
 
-**Fastest:** open `standalone.html` directly. One file, ~180 KB, WASM embedded as base64, no server needed.
+**Fastest:** open `standalone.html` directly. One file, ~215 KB, WASM embedded as base64, no server needed.
 
 **As a site:**
 ```bash
@@ -25,21 +25,20 @@ Requires **WebGPU**: Chrome/Edge 113+, Firefox 141+, Safari 18.2+.
 | `Space` / `Shift` | climb, dive |
 | `X` | hold to slow down |
 | Left click | cast the held spell |
-| `1`–`9` `0` `-` `=` | pick a spell · `Q`/`E` or wheel to cycle |
+| `1`–`9` `0` `-` `=` `[` | pick a spell · `Q`/`E` or wheel to cycle |
 | `C` | first-person ↔ chase view (first person hides your own carpet) |
 | `P` pause · `M` mute · `B` bloom · `Shift+R` restart realm |
 
 ## How it plays
 
-Mana is the whole game. It doesn't come out of thin air — it comes out of things you kill.
+Mana is the whole game, and you never carry it home yourself — your balloons do.
 
-1. **Break things.** Wildlife and their nests drop mana when they die. Nests are worth the most and keep spawning until you flatten them.
-2. **Fly low to collect.** Loose mana is drawn to a passing carpet within ~110 units, absorbed at ~42. Cruise high and you'll fly straight over it.
-3. **Carry it home.** Only mana you're *carrying* counts. Fly over your keep and everything above your reserve is banked — banked mana is what wins the realm, raises your castle tier, and makes your spell fuel regenerate faster.
-4. **Spend or bank.** Your castle only tops you back up to the reserve floor, so every big spell is paid for out of the mana you were going to bank. That's the tension.
-5. **Fight the rival.** They run the same loop, and they're a fair bit faster at it as realms get harder. Their balloons ferry mana home for them. Kill the balloons. Crack the keep and it spills three quarters of everything they've banked.
-
-Claim half the realm before they do. Twelve spells unlock across the realms; from realm 5 there are two rivals.
+1. **Break things.** Wildlife and their nests drop **gold** mana orbs when they die. Nests are worth the most and keep spawning until you flatten them.
+2. **Claim what drops.** Gold orbs belong to nobody. Cast **Claim** (`0`) near them and they turn **white** — yours. Possessing mana also permanently widens your own mana pool, which is the only way to afford the expensive spells later.
+3. **Let the balloons work.** The hot-air balloons circling your keep are automated collectors. They only fetch orbs *you* have claimed, and they carry them back to the fortress. This is what fills it.
+4. **Fill the fortress.** The realm is won when your fortress holds the target amount of mana. Your rival is filling theirs the same way.
+5. **Upgrade to hold more.** A fortress can only store `240 x tier`. When the fill bar hits the pale tick, you are capped — fly home and cast **Fortress** (`[`) over your own keep to add a tier, new walls and towers included. Each tier costs more than the last.
+6. **Fight the rival.** They run the same loop. Kill their balloons and their claimed mana never arrives. Crack the keep and it spills what it holds.
 
 ## Architecture
 
@@ -67,7 +66,7 @@ init(seed: u32, level: i32)          step(dt: f32)
 setInput(fwd, strafe, up, dyaw, dpitch, fire, brake)
 cast(spell) / fireSelected() / selectSpell(i) / cycleSpell(dir)
 
-heightPtr()  → f32[256*256]     dirtyLoRow()/dirtyHiRow()/clearDirty()
+heightPtr()  → f32[320*320]     dirtyLoRow()/dirtyHiRow()/clearDirty()
 instPtr()    → f32[n*12]        instCount()
 partPtr()    → f32[n*8]         partCount()
 mapPtr()     → f32[n*4]         mapCount()
@@ -77,25 +76,25 @@ statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 
 ### Rendering
 
-- **Terrain** is a static 256×256 grid mesh displaced in the vertex shader from an `r32float` height texture, with normals from neighbour taps. Deforming the world means writing one dirty row-band per frame — the mesh never changes. `bytesPerRow` is 1024, so the 256-byte alignment rule is satisfied for free.
+- **Terrain** is a static 320×320 grid mesh displaced in the vertex shader from an `r32float` height texture, with normals from neighbour taps. Deforming the world means writing one dirty row-band per frame — the mesh never changes. `bytesPerRow` is 1280, so the 256-byte alignment rule is satisfied for free.
 - **Pixels live on the edges, not on everything.** The scene renders at full resolution and stays smooth across open sky, water and grass. In the composite pass each screen-space block compares itself against its four neighbours; where that contrast is high — a silhouette, a shoreline, the line between grass and rock, the rim of a cloud — the block collapses to a single flat colour and the animated static, 4×4 Bayer dither and 20-level quantise fade in with it. Everywhere else keeps full precision. Blanket low-res pixelation puts the same chunk size on a blank sky as on a tree, which reads as a broken display rather than an art style. The 4px block is fixed — it is the art direction, not a setting.
 - HDR `rgba16float` target, threshold → separable blur bloom at quarter res, ACES tonemap, vignette.
-- **Draw range is deliberately short** (1300 units, on a 1024-unit map). Haze is exponential up close and then closed off hard by a `smoothstep` on `dist / far`, so the world always reaches full sky before the far plane and the clipped edge of the sea is never visible. The haze colour is `skyColor()` evaluated with the ray clamped to the horizon — a downward ray through thick air ends in bright air, not in the dark band the sky puts below the horizon — and the sky holds that same colour flat at and below the horizon, so the join is seamless wherever the world runs out.
+- **Draw range is deliberately short** (1600 units, on a 2560-unit map). Haze is exponential up close and then closed off hard by a `smoothstep` on `dist / far`, so the world always reaches full sky before the far plane and the clipped edge of the sea is never visible. The haze colour is `skyColor()` evaluated with the ray clamped to the horizon — a downward ray through thick air ends in bright air, not in the dark band the sky puts below the horizon — and the sky holds that same colour flat at and below the horizon, so the join is seamless wherever the world runs out.
 - Everything solid is instanced from three procedural prototypes (box, sphere, cone) partitioned by shape each frame; creatures are assembled from a few parts each.
 - Particles are additive camera-facing billboards with a radial falloff computed in the fragment shader — no textures anywhere in the project.
 - Water samples the height texture for depth-based colour, shoreline foam and specular.
 - Audio is synthesised from oscillators and one noise buffer; the sim emits positioned event codes and JS turns them into sound.
-- **The HUD is icons, not words.** Every symbol — life, mana, the two keeps on the claim bar, all twelve spells — is an 8×8 pixel grid in `game.js`, one character per pixel, expanded to inline SVG with `shape-rendering="crispEdges"` and runs of equal pixels merged into single rects. Spell names live in the tooltip. There is no screen border and no permanent text readout.
+- **The HUD is icons, not words.** Every symbol — life, mana, the two keeps on the claim bar, all thirteen spells — is an 8×8 pixel grid in `game.js`, one character per pixel, expanded to inline SVG with `shape-rendering="crispEdges"` and runs of equal pixels merged into single rects. Spell names live in the tooltip. There is no screen border and no permanent text readout.
 - Castles level their own pad at placement: flat right out past the plinth, then a smoothstep skirt down to the hill. Anything that just samples the ground at its centre point lifts off the downhill side of a slope, so scenery and nests are sunk below their sample instead.
 
 ## A note on Rust
 
-The brief asked for Rust. I built this in a sandbox where `static.rust-lang.org` and `sh.rustup.rs` both return HTTP 403, and Ubuntu's packaged `rustc` ships no `wasm32-unknown-unknown` standard library — so no Rust toolchain could be obtained or built. Rather than hand you untested Rust that I could never compile, I wrote the core in **AssemblyScript**, which compiles through Binaryen to real WebAssembly. The output is genuine `wasm32`: zero imports, native math, `-O3`, 84 KB.
+The brief asked for Rust. I built this in a sandbox where `static.rust-lang.org` and `sh.rustup.rs` both return HTTP 403, and Ubuntu's packaged `rustc` ships no `wasm32-unknown-unknown` standard library — so no Rust toolchain could be obtained or built. Rather than hand you untested Rust that I could never compile, I wrote the core in **AssemblyScript**, which compiles through Binaryen to real WebAssembly. The output is genuine `wasm32`: zero imports, native math, `-O3`, 106 KB.
 
 The ABI above is deliberately Rust-shaped. Porting is mechanical rather than a rewrite:
 
 ```rust
-static mut HEIGHT: [f32; 256 * 256] = [0.0; 256 * 256];
+static mut HEIGHT: [f32; 320 * 320] = [0.0; 320 * 320];
 
 #[no_mangle] pub extern "C" fn height_ptr() -> *const f32 { unsafe { HEIGHT.as_ptr() } }
 #[no_mangle] pub extern "C" fn step(dt: f32) { /* ... */ }
@@ -138,7 +137,7 @@ WASM is fetched with `fetch` + `arrayBuffer`, not `instantiateStreaming`, so hos
 
 ## What's simulated
 
-Deformable heightmap terrain (craters, raised volcanoes, travelling quake ripples) · procedural archipelago generation per realm · carpet flight with banking and terrain following · 12 spells unlocking across realms · 8 creature types with state-machine AI including burrowers, swarms, ranged throwers, flyers and dragons · spawning nests · rival wizard AI with gather/bank/duel/flee behaviours · mana-ferrying balloons · castles with tiers, HP and destruction that spills their stored mana · out-of-combat and at-castle regeneration · positioned audio events.
+A 2560-unit archipelago on a 320x320 heightmap · deformable terrain (craters, raised volcanoes, travelling quake ripples) · procedural archipelago generation per realm · carpet flight with banking and terrain following · 12 spells unlocking across realms · 8 creature types with state-machine AI including burrowers, swarms, ranged throwers, flyers and dragons · spawning nests · rival wizard AI with gather/bank/duel/flee behaviours · mana-ferrying balloons · castles with tiers, HP and destruction that spills their stored mana · out-of-combat and at-castle regeneration · positioned audio events.
 
 ## Licence
 

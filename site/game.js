@@ -31,7 +31,9 @@ const ICONS = {
   haste:    ['........', '.c..c...', '..c..c..', '...c..c.', '...c..c.', '..c..c..', '.c..c...', '........'],
   siphon:   ['..pppp..', '.pppppp.', 'pppppp..', 'ppppp...', 'ppppp...', 'pppppp..', '.pppppp.', '..pppp..'],
   wraith:   ['..pppp..', '.pppppp.', '.pkppkp.', '.pppppp.', '.pppppp.', '.pppppp.', '.pppppp.', '.p.pp.p.'],
-  sunburst: ['.g..g..g', '..ooooo.', '.ooooooo', 'goooooog', '.ooooooo', '..ooooo.', '.g..g..g', '........']
+  sunburst: ['.g..g..g', '..ooooo.', '.ooooooo', 'goooooog', '.ooooooo', '..ooooo.', '.g..g..g', '........'],
+  claim:    ['...ww...', '...ww...', '..wwww..', 'wwwwwwww', 'wwwwwwww', '..wwww..', '...ww...', '...ww...'],
+  fortress: ['...g....', '..ggg...', '.g.g.g..', 'o.o.o.o.', 'oooooooo', '.oooooo.', '.ookkoo.', '.ookkoo.']
 };
 // merges runs of equal pixels into one rect each, so a whole bar of icons is
 // still only a few hundred nodes
@@ -62,9 +64,10 @@ const SPELLS = [
   { n: 'Ward',      k: '7', i: 'ward',     d: 'Blunts incoming magic for a while.' },
   { n: 'Mend',      k: '8', i: 'mend',     d: 'Knits your wounds closed.' },
   { n: 'Haste',     k: '9', i: 'haste',    d: 'The carpet flies faster.' },
-  { n: 'Siphon',    k: '0', i: 'siphon',   d: 'Pulls loose mana in. Drains rivals.' },
+  { n: 'Claim',     k: '0', i: 'claim',    d: 'Possesses loose mana — gold turns white, and your balloons fetch it home.' },
   { n: 'Wraith',    k: '-', i: 'wraith',   d: 'Binds a servant to fight for you.' },
   { n: 'Sunburst',  k: '=', i: 'sunburst', d: 'Smites every wild thing at once.' },
+  { n: 'Fortress',  k: '[', i: 'fortress', d: 'Raises your keep a tier so it can hold more mana. Cast it over your own fortress.' },
 ];
 const EVT = {
   0:'cast',1:'zap',2:'boom',3:'release',4:'bigboom',5:'collapse',6:'rumble',7:'rumble',
@@ -175,6 +178,7 @@ class Game {
     this.el = {
       hud: el('hud'), hp: el('hp'), mana: el('mana'), manaMark: el('manaMark'),
       claimMe: el('claimMe'), claimRival: el('claimRival'), claimTarget: el('claimTarget'),
+      claimCap: el('claimCap'),
       bar: el('spellbar'), map: el('map'), title: el('title'), overlay: el('overlay'),
       otitle: el('otitle'), obody: el('obody'), obtn: el('obtn'), stat: el('stat'),
       err: el('err'), lvl: el('lvl'), boot: el('boot')
@@ -216,9 +220,9 @@ class Game {
       this._buf = m;
       this.H = new Float32Array(m, this.sim.heightPtr(), this.TW * this.TW);
       this.ST = new Float32Array(m, this.sim.statePtr(), 128);
-      this.INST = new Float32Array(m, this.sim.instPtr(), 8192 * 12);
+      this.INST = new Float32Array(m, this.sim.instPtr(), 12288 * 12);
       this.PART = new Float32Array(m, this.sim.partPtr(), 4096 * 8);
-      this.MAP = new Float32Array(m, this.sim.mapPtr(), 1024 * 4);
+      this.MAP = new Float32Array(m, this.sim.mapPtr(), 2048 * 4);
       this.EVTB = new Float32Array(m, this.sim.evtPtr(), 128 * 4);
     }
   }
@@ -423,10 +427,12 @@ Game.prototype.updateHUD = function () {
   e.hp.style.width = Math.max(0, Math.min(100, st[7] / st[8] * 100)) + '%';
   const mf = Math.max(0, Math.min(1, st[9] / st[10]));
   e.mana.style.width = mf * 100 + '%';
-  e.manaMark.style.left = Math.min(100, 45 / st[10] * 100) + '%';
+  e.manaMark.style.left = Math.min(100, st[57] / st[10] * 100) + '%';
   e.claimMe.style.width = Math.min(100, st[13] * 100) + '%';
   e.claimRival.style.width = Math.min(100, st[14] * 100) + '%';
   e.claimTarget.style.left = Math.min(100, st[15] * 100) + '%';
+  // where this fortress tier caps out — past it you must cast Fortress
+  e.claimCap.style.left = Math.min(100, st[53] * 100) + '%';
   const sel = st[11] | 0;
   for (let i = 0; i < this.slots.length; i++) {
     const s = this.slots[i], unl = st[60 + i] > 0, aff = st[80 + i] > 0, cd = st[40 + i];
@@ -488,7 +494,7 @@ Game.prototype.loop = function (t) {
   this.r.frame(this.camera(), this.PART, this.sim.partCount(), this.INST, this.sim.instCount(), {
     fov: 1.16, time: st[32],
     sun: [Math.cos(sunT) * 0.55, 0.70, Math.sin(sunT) * 0.45], sunI: 1.0,
-    fog: [0.70, 0.82, 0.95], fogD: 0.0009,
+    fog: [0.70, 0.82, 0.95], fogD: 0.00072,
     skipLo: fp ? this.sim.carpetInstLo() : -1,
     skipHi: fp ? this.sim.carpetInstHi() : -1,
     exposure: 1.12, bloomStrength: 0.42, waterAlpha: 1.0,

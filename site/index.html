@@ -62,6 +62,7 @@ body.locked #view{cursor:none}
 #claimRival{background-color:var(--cinnabar);opacity:.72;top:auto;height:4px;bottom:0}
 #claimTarget{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--gold);
   box-shadow:0 0 7px rgba(242,213,128,.9)}
+#claimCap{position:absolute;top:0;bottom:0;width:2px;background:rgba(240,230,206,.55)}
 
 /* vitals */
 .vitals{grid-column:1;grid-row:3;align-self:end;justify-self:start;padding:11px 13px;width:min(38vw,300px)}
@@ -179,6 +180,7 @@ h3{margin:0 0 10px;font:700 22px/1.2 var(--display);letter-spacing:.1em;text-tra
     <div class="track">
       <div class="fill weave" id="claimMe"></div>
       <div class="fill" id="claimRival"></div>
+      <div id="claimCap"></div>
       <div id="claimTarget"></div>
     </div>
     <i class="ico" id="icRival" title="Rival's claim"></i>
