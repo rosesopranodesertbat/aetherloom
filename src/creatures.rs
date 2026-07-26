@@ -150,6 +150,13 @@ impl World {
             self.castles.pos_y[owner] + 46.0,
             self.castles.pos_z[owner],
         ];
+        if self.castles.health[owner] <= 0.0 {
+            // A ruined keep cannot receive mana. Drop any cargo and loiter over
+            // the ruins without searching for another orb.
+            self.release_balloon_cargo(index);
+            self.steer_balloon(index, destination, BALLOON_CRUISE_HEIGHT, dt);
+            return;
+        }
         let mut floor_height = BALLOON_CRUISE_HEIGHT;
         let carrying = self.orb_carried_by(index);
 
@@ -174,13 +181,6 @@ impl World {
         }
 
         self.steer_balloon(index, destination, floor_height, dt);
-
-        if self.creatures.health[index] <= 0.0 {
-            if let Some(orb) = self.orb_carried_by(index) {
-                self.orbs.carried_by[orb] = None;
-            }
-            self.creatures.alive[index] = false;
-        }
     }
 
     fn orb_carried_by(&self, balloon: usize) -> Option<usize> {
@@ -235,6 +235,10 @@ impl World {
     }
 
     fn try_deliver(&mut self, balloon: usize, orb: usize, owner: usize) -> bool {
+        if self.castles.health[owner] <= 0.0 {
+            self.release_balloon_cargo(balloon);
+            return false;
+        }
         let to_keep = [
             self.castles.pos_x[owner] - self.creatures.pos_x[balloon],
             self.castles.pos_y[owner] + 30.0 - self.creatures.pos_y[balloon],

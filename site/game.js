@@ -147,10 +147,21 @@ class Audio {
 const Store = {
   async get(k, dflt) {
     try { if (window.storage) { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : dflt; } } catch (e) {}
+    try {
+      const storage = window.localStorage;
+      if (storage) {
+        const raw = storage.getItem(k);
+        if (raw !== null) return JSON.parse(raw);
+      }
+    } catch (e) {}
     return (this._m && k in this._m) ? this._m[k] : dflt;
   },
   async set(k, v) {
     try { if (window.storage) { await window.storage.set(k, JSON.stringify(v)); return; } } catch (e) {}
+    try {
+      const storage = window.localStorage;
+      if (storage) { storage.setItem(k, JSON.stringify(v)); return; }
+    } catch (e) {}
     this._m = this._m || {}; this._m[k] = v;
   }
 };
@@ -161,6 +172,9 @@ class Game {
     this.canvas = document.getElementById('view');
     this.audio = new Audio();
     this.keys = new Set();
+    this.firing = false;
+    this.touchFiring = false;
+    this.touchForward = false;
     this.mdx = 0; this.mdy = 0;
     this.sens = 0.0022;
     this.chase = false;
@@ -263,6 +277,16 @@ class Game {
 
   bindInput() {
     const c = this.canvas;
+    let tId = null, tx0 = 0, ty0 = 0;
+    const fireTouchIds = new Set();
+    const clearTransientInput = () => {
+      this.keys.clear();
+      this.firing = false;
+      this.touchFiring = false;
+      this.touchForward = false;
+      tId = null;
+      fireTouchIds.clear();
+    };
     addEventListener('keydown', (e) => {
       if (e.repeat) return;
       const k = e.key.toLowerCase();
@@ -279,7 +303,7 @@ class Game {
       if (k === ' ') e.preventDefault();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.key.toLowerCase()));
-    addEventListener('blur', () => this.keys.clear());
+    addEventListener('blur', clearTransientInput);
 
     const wantLock = () => {
       if (this.paused || this.ended) return;
@@ -311,14 +335,18 @@ class Game {
     });
     addEventListener('resize', () => { this.r.resize(); this.mapDirty = true; });
 
-    // touch: left half steers, right half casts
-    let tId = null, tx0 = 0, ty0 = 0;
+    // touch: holding the left half steers and thrusts; holding the right casts
     c.addEventListener('touchstart', (e) => {
       this.audio.boot();
       for (const t of e.changedTouches) {
-        if (t.clientX > innerWidth * 0.55) { this.firing = true; }
-        else if (tId === null) { tId = t.identifier; tx0 = t.clientX; ty0 = t.clientY; }
+        if (t.clientX > innerWidth * 0.55) {
+          fireTouchIds.add(t.identifier);
+        } else if (tId === null) {
+          tId = t.identifier; tx0 = t.clientX; ty0 = t.clientY;
+          this.touchForward = true;
+        }
       }
+      this.touchFiring = fireTouchIds.size > 0;
       e.preventDefault();
     }, { passive: false });
     c.addEventListener('touchmove', (e) => {
@@ -328,9 +356,16 @@ class Game {
       }
       e.preventDefault();
     }, { passive: false });
-    c.addEventListener('touchend', (e) => {
-      for (const t of e.changedTouches) { if (t.identifier === tId) tId = null; else this.firing = false; }
-    });
+    const finishTouches = (e) => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === tId) { tId = null; this.touchForward = false; }
+        fireTouchIds.delete(t.identifier);
+      }
+      this.touchFiring = fireTouchIds.size > 0;
+      e.preventDefault();
+    };
+    c.addEventListener('touchend', finishTouches, { passive: false });
+    c.addEventListener('touchcancel', finishTouches, { passive: false });
   }
 
   setPaused(p) {
@@ -346,7 +381,8 @@ class Game {
 // ------------------------------------------------------------------ loop
 Game.prototype.readInputs = function (first) {
   const k = this.keys;
-  const fwd = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
+  const keyFwd = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
+  const fwd = Math.max(-1, Math.min(1, keyFwd + (this.touchForward ? 1 : 0)));
   const str = (k.has('d') || k.has('arrowright') ? 1 : 0) - (k.has('a') || k.has('arrowleft') ? 1 : 0);
   const up = (k.has(' ') ? 1 : 0) - (k.has('shift') || k.has('control') ? 1 : 0);
   const brake = k.has('x') ? 1 : 0;
@@ -453,7 +489,7 @@ Game.prototype.loop = function (t) {
     let steps = 0;
     while (this.acc >= 1 / 60 && steps < 4) {
       this.readInputs(steps === 0);
-      if (this.firing) this.sim.fireSelected();
+      if (this.firing || this.touchFiring) this.sim.fireSelected();
       this.sim.step(1 / 60);
       this.acc -= 1 / 60; steps++;
     }
@@ -468,6 +504,7 @@ Game.prototype.loop = function (t) {
       this.audio.play(k, Math.hypot(dx, dy, dz));
       if (k === 17) this.hurt = 1;
     }
+    this.sim.clearEvents();
   }
   this.hurt = Math.max(0, this.hurt - dt * 2.6);
 

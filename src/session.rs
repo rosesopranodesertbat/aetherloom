@@ -58,6 +58,7 @@ const SHAKE_DECAY_RATE: f32 = 1.8;
 impl World {
     pub fn begin_realm(&mut self, seed: u32, realm: i32) {
         self.rng.reseed(seed);
+        self.render.sound_cue_count = 0;
         self.session = Session {
             realm,
             outcome: Outcome::InProgress,
@@ -242,7 +243,6 @@ impl World {
 
     // ---- per frame ---------------------------------------------------------
     pub fn advance(&mut self, dt: f32) {
-        self.render.sound_cue_count = 0;
         if self.session.outcome == Outcome::InProgress {
             self.session.elapsed += dt;
             self.tick_spell_cooldowns(dt);
@@ -355,11 +355,15 @@ impl World {
 
     fn settle_outcome(&mut self) {
         let target = self.realm_target();
-        if self.castles.stored_mana[PLAYER] >= target {
+        if self.castles.health[PLAYER] > 0.0
+            && self.castles.stored_mana[PLAYER] >= target
+        {
             self.session.outcome = Outcome::Won;
         }
         for wizard in 1..=self.session.rival_count {
-            if self.castles.stored_mana[wizard] >= target {
+            if self.castles.health[wizard] > 0.0
+                && self.castles.stored_mana[wizard] >= target
+            {
                 self.session.outcome = Outcome::RivalWon;
             }
         }

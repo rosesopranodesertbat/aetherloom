@@ -14,6 +14,11 @@ node serve.mjs        # → http://localhost:8080
 ```
 (ES modules and `fetch` need a real origin, so `site/index.html` won't work over `file://` — that's what `standalone.html` is for.)
 
+The same server exposes a deterministic [model gallery](http://localhost:8080/models.html)
+covering every creature, keep tier, scenery model, carpet, orb and projectile in
+eight stable variants. A specific view can be linked as
+`models.html?scene=dragon&variant=3`.
+
 Requires **WebGPU**: Chrome/Edge 113+, Firefox 141+, Safari 18.2+.
 
 ## Controls
@@ -82,12 +87,16 @@ setInput(fwd, strafe, up, dyaw, dpitch, fire, brake)
 cast(spell) / fireSelected() / selectSpell(i) / cycleSpell(dir)
 
 heightPtr()  → f32[320*320]     dirtyLoRow()/dirtyHiRow()/clearDirty()
-instPtr()    → f32[n*12]        instCount()
+instPtr()    → f32[n*14]        instCount()
 partPtr()    → f32[n*8]         partCount()
 mapPtr()     → f32[n*4]         mapCount()
-evtPtr()     → f32[n*4]         evtCount()
+evtPtr()     → f32[n*4]         evtCount() / clearEvents()
 statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 ```
+
+Sound events remain queued across `step()` calls so catch-up simulation cannot
+erase a cue before JavaScript reads it. The consumer calls `clearEvents()` only
+after processing the current `evtPtr()` / `evtCount()` contents.
 
 ### Models
 
@@ -119,7 +128,7 @@ a trunk — that taper *and* curve *and* twist rather than stepping in a line.
 - **Everything solid is instanced from ten procedural prototypes**, partitioned by shape each frame: box, sphere, cone, cylinder, frustum (a box tapering to 45%), wedge, **frond** (a leaf with its droop, taper, central rib and cut leaflets in the mesh), **boulder** (an irregular flat-shaded lump), **crenels** (a whole parapet ring — merlons, embrasures and walkway in one instance), and a flat disc used only for shadows. The last four exist because a palm frond drawn as five cuboids costs five instances and still reads as five cuboids; drawn as one `Frond` it costs one and reads as a leaf. Cost is per instance, not per triangle, so an intricate mesh is always cheaper than the boxes that approximate it.
 - **Instances carry pitch and roll, not just yaw.** Yaw alone leaves every piece of every model square to the world axes, which is most of why parts assembled from prototypes read as a stack of blocks rather than as a creature. Drooping fronds, splayed limbs, canted roofs and banked wings all need the other two angles. Local +Z is forward, +X is the model's own right; positive pitch tips the nose down, positive roll raises the right side; applied roll, then pitch, then yaw.
 - **Nothing is allowed to come out the same twice.** Every creature hashes its slot index, every scenery item hashes its own, and every proportion, count, angle, tint and optional feature comes off that hash. A grove where each tree carries the same seven fronds at the same seven bearings reads as wallpaper however well one tree is built — and the same is true of a keep's garrison. The hash is an integer mixer, not the usual `fract(sin(x) * 43758.5)`: at f32 precision that lands on a couple of hundred distinct values and correlates strongly between neighbouring slots, and neighbouring slots are exactly what a clump is made of.
-- **Models thin out with distance.** Creatures, scenery and keeps each resolve a detail tier from range and drop trim first, then limbs, then everything but the silhouette. A troll is sixty pieces close up and five across the bay. The ceilings are 55 instances per creature at full detail (90 for the dragon), 18 reduced, 5 distant; 26/10/2 for a palm, 6/3/1 for a boulder, 183 for a max-tier keep. Several models now sit *exactly* on their limit, so adding a piece means taking one away. Scenery is submitted last and to its own cap, so when a frame does run out it is distant trees that stop rather than the creature about to eat you.
+- **Models thin out with distance.** Creatures, scenery and keeps each resolve a detail tier from range and drop trim first, then limbs, then everything but the silhouette. A troll is sixty pieces close up and five across the bay. The ceilings are 55 instances per creature at full detail (90 for the dragon), 18 reduced, 5 distant; 26/10/2 for a palm, 6/3/1 for a boulder, 183 for a max-visual-tier keep. Economic fortress tiers can keep rising, while model complexity stops growing after visual tier six. Several models now sit *exactly* on their limit, so adding a piece means taking one away. Scenery is submitted last and to its own cap, so when a frame does run out it is distant trees that stop rather than the creature about to eat you.
 - **Shading is stepped, which is what gives shadows a pixel edge.** A smooth lambert ramp has no contrast boundary anywhere along it, so the edge pass never finds one and shadows stay airbrushed. The diffuse term is snapped to eight levels and pulled 58% of the way toward them, so shaded faces and hillsides get hard terminators the pixel pass can bite on; the steps ease back to smooth past 260 units so distant slopes don't band into stripes.
 - **Ground shadows** are flat discs laid under every caster, depth-tested but never depth-written, multiplied into the scene rather than painted over it. Their falloff is snapped to a grid in the disc's own space, so the rim breaks into steps instead of fading out. A blob broadens and fades with the caster's altitude — flying over a flat sea of terrain, it is the only read you get on your own height, which is why the player's shadow is pushed *outside* the instance range that first-person view drops.
 - **Scenery is drawn last, to a budget, nearest tier first.** Palms and boulders outnumber everything else by two orders of magnitude, and a hillside of trees must never crowd the creature about to eat you out of the instance buffer. Each item is built from up to twenty pieces close up and two at range; when the budget runs out it is the far tier that stops, which is the one place it isn't noticed.
@@ -171,21 +180,26 @@ pub extern "C" fn step(dt: f32) { WORLD.lock().advance(dt); }
 ```bash
 rustup target add wasm32-unknown-unknown
 npm run build      # cargo → site/sim.wasm, then inlines site/ into standalone.html
-npm test           # headless sim balance sweep + validating render harness
+npm test           # fresh cargo build, core regressions, balance sweep, renderer validation
 ```
 
-`npm run build --no-wasm` skips cargo and rebuilds `standalone.html` from the existing `site/sim.wasm`. There are no npm dependencies — node is only used for the bundler, the static server and the test harnesses.
+`npm run build -- --no-wasm` skips cargo and rebuilds `standalone.html` from the existing `site/sim.wasm`. The extra `--` is required so npm forwards the flag to `build.mjs`. There are no npm dependencies — node is only used for the bundler, the static server and the test harnesses.
 
-`npm test` runs two things worth knowing about:
+`npm test` first rebuilds `site/sim.wasm` from the current Rust sources, then runs:
 
-- **`balance-sim-test.mjs`** drives the WASM core with a scripted bot for thousands of simulated seconds across several seeds and difficulty levels, and reports who won. This is how the economy was tuned — it caught a faction-ID bug where player spells couldn't damage wild creatures at all, and an exploit where parking on your own castle won the level.
-- **`headless-render-test.mjs`** runs the real game loop against a WebGPU stub that *validates arguments* the way the driver would — buffer overflows, non-4-aligned writes, `bytesPerRow` alignment, reads past the end of source arrays. Useful because it catches renderer bugs without a GPU. It also checks every prototype mesh fits its arrays and that no index dangles: the mesh builders drop vertices silently when a shape outgrows its capacity, so an overflowing prototype renders with holes and nothing says why.
+- **`model-preview-test.mjs`** renders all 29 gallery scenes in all eight variants directly through the WASM preview ABI. It rejects non-finite or out-of-bounds transforms, illegal shapes, invalid sizes and colours, instance-capacity exhaustion, nondeterministic output, and changes to the reviewed byte-level signature baseline.
+- **`balance-sim-test.mjs`** checks event-queue lifetime, the realm-eight capacity boundary, and the park-on-castle exploit before driving the WASM core with a scripted bot for thousands of simulated seconds across several seeds and difficulty levels. Win rates remain diagnostic, while invalid outcomes, non-finite state, and broken fortress-capacity invariants fail the test.
+- **`headless-render-test.mjs`** runs the real game loop against a WebGPU stub that *validates arguments* the way the driver would — buffer overflows, non-4-aligned writes, `bytesPerRow` alignment, reads past the end of source arrays. Any validation error fails the process. It also checks every prototype mesh fits its arrays and that no index dangles: the mesh builders drop vertices silently when a shape outgrows its capacity, so an overflowing prototype renders with holes and nothing says why.
 
 ## Deploy
 
-Static files, no build step on the server, no special headers.
+The deployed result is static files with no runtime server build or special
+headers. Deployment CI still compiles and tests the source before publishing.
 
-**GitHub Pages** — `.github/workflows/pages.yml` publishes `site/` on every push to `main`. Set Settings → Pages → Source to **GitHub Actions** once, then:
+**GitHub Pages** — `.github/workflows/pages.yml` installs the Rust WASM target,
+runs the fresh-build test suite, and publishes the resulting `site/` on every
+push to `main`, including `models.html` and `models.js`. Set Settings → Pages →
+Source to **GitHub Actions** once, then:
 ```bash
 git push
 ```

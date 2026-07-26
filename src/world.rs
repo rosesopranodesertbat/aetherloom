@@ -41,7 +41,6 @@ pub const STATE_WORDS: usize = 128;
 // ---- economy ---------------------------------------------------------------
 /// Mana a fortress can hold per tier.
 pub const CASTLE_CAPACITY_PER_TIER: f32 = 240.0;
-pub const MAX_CASTLE_TIER: i32 = 6;
 /// Passive regeneration ceiling. Nothing can be laundered into realm progress
 /// through it (the fortress is filled by balloons), so it can afford to be
 /// generous — it has to at least reach the price of the first Fortress tier.
@@ -276,6 +275,8 @@ pub struct RenderBuffers {
     pub particle_count: usize,
     pub map_blips: [f32; MAX_MAP_BLIPS * MAP_BLIP_STRIDE],
     pub map_blip_count: usize,
+    /// Events accumulate across simulation catch-up steps until the host calls
+    /// `clearEvents`, so no intermediate step silently discards its sounds.
     pub sound_cues: [f32; MAX_SOUND_CUES * SOUND_CUE_STRIDE],
     pub sound_cue_count: usize,
     pub state: [f32; STATE_WORDS],
@@ -325,6 +326,8 @@ pub struct World {
     pub input: Input,
     pub spells: SpellState,
     pub session: Session,
+    /// Centre (xyz) and framing radius of the last isolated model preview.
+    pub preview_focus: [f32; 4],
     /// View-projection then its inverse, handed to the renderer each frame.
     pub camera_matrices: [f32; 32],
     pub meshes: crate::render::MeshLibrary,
@@ -480,6 +483,7 @@ impl World {
                 rival_count: 0,
                 restock_timer: 0.0,
             },
+            preview_focus: [0.0; 4],
             camera_matrices: [0.0; 32],
             meshes: crate::render::MeshLibrary::new(),
             minimap: crate::render::Minimap::new(),
@@ -848,6 +852,14 @@ impl World {
         None
     }
 
+    pub(crate) fn release_balloon_cargo(&mut self, balloon: usize) {
+        for orb in 0..MAX_ORBS {
+            if self.orbs.carried_by[orb] == Some(balloon) {
+                self.orbs.carried_by[orb] = None;
+            }
+        }
+    }
+
     pub fn kill_creature(&mut self, index: usize) {
         let kind = self.creatures.kind[index];
         let position = [
@@ -855,6 +867,10 @@ impl World {
             self.creatures.pos_y[index],
             self.creatures.pos_z[index],
         ];
+        // Cargo ownership is indexed by creature slot. Clear every matching
+        // reference before the slot can be reused, or a later balloon can
+        // inherit an orb from the dead one.
+        self.release_balloon_cargo(index);
         self.creatures.alive[index] = false;
         if self.creatures.faction[index].is_wild() {
             self.session.kills += 1.0;

@@ -16,6 +16,9 @@
 
 use super::*;
 
+/// Models stop gaining pieces here, but economic tiers remain uncapped so
+/// fortress capacity can keep pace with indefinitely growing realm targets.
+const MAX_CASTLE_VISUAL_TIER: i32 = 6;
 /// Beyond these a keep loses its fittings, then everything but its skyline.
 const CASTLE_FULL_RANGE: f32 = 430.0;
 const CASTLE_REDUCED_RANGE: f32 = 900.0;
@@ -174,6 +177,69 @@ impl Keep {
 }
 
 impl World {
+    /// Draw one castle without consulting or changing the active realm.
+    ///
+    /// The existing castle assembler resolves its `Keep` from the player
+    /// slot. Preview supplies a complete temporary pose, resolves the model,
+    /// then restores every touched gameplay word before returning.
+    pub(super) fn draw_preview_castle(
+        &mut self,
+        tier: i32,
+        variant: i32,
+        origin: [f32; 3],
+        ruined: bool,
+    ) {
+        let old_castle = (
+            self.castles.pos_x[PLAYER],
+            self.castles.pos_y[PLAYER],
+            self.castles.pos_z[PLAYER],
+            self.castles.health[PLAYER],
+            self.castles.max_health[PLAYER],
+            self.castles.tier[PLAYER],
+        );
+        let old_wizard = (
+            self.wizards.pos_x[PLAYER],
+            self.wizards.pos_y[PLAYER],
+            self.wizards.pos_z[PLAYER],
+        );
+        let old_elapsed = self.session.elapsed;
+
+        let x = origin[0] + variant as f32 * 5.0;
+        let z = origin[2] - variant as f32 * 7.0;
+        self.castles.pos_x[PLAYER] = x;
+        self.castles.pos_y[PLAYER] = origin[1];
+        self.castles.pos_z[PLAYER] = z;
+        self.castles.health[PLAYER] = if ruined { 0.0 } else { 100.0 };
+        self.castles.max_health[PLAYER] = 100.0;
+        self.castles.tier[PLAYER] = tier;
+        self.wizards.pos_x[PLAYER] = x;
+        self.wizards.pos_y[PLAYER] = origin[1] + 30.0;
+        self.wizards.pos_z[PLAYER] = z;
+        self.session.elapsed = variant as f32 * 0.11 + 0.25;
+
+        let keep = self.keep_of(PLAYER, origin[1]);
+        if ruined {
+            self.draw_castle_ruin(PLAYER, origin[1]);
+        } else {
+            self.draw_castle_motte(&keep);
+            self.draw_castle_enceinte(&keep);
+            self.draw_castle_donjon(&keep);
+            self.draw_castle_ward(&keep);
+        }
+
+        self.castles.pos_x[PLAYER] = old_castle.0;
+        self.castles.pos_y[PLAYER] = old_castle.1;
+        self.castles.pos_z[PLAYER] = old_castle.2;
+        self.castles.health[PLAYER] = old_castle.3;
+        self.castles.max_health[PLAYER] = old_castle.4;
+        self.castles.tier[PLAYER] = old_castle.5;
+        self.wizards.pos_x[PLAYER] = old_wizard.0;
+        self.wizards.pos_y[PLAYER] = old_wizard.1;
+        self.wizards.pos_z[PLAYER] = old_wizard.2;
+        self.session.elapsed = old_elapsed;
+
+    }
+
     /// Lowest ground under the castle footprint. A keep placed at the height of
     /// its own centre hangs in the air on the downhill side of any slope.
     fn lowest_ground_under_castle(&self, x: f32, z: f32) -> f32 {
@@ -198,8 +264,8 @@ impl World {
         if tier < 1 {
             tier = 1;
         }
-        if tier > MAX_CASTLE_TIER {
-            tier = MAX_CASTLE_TIER;
+        if tier > MAX_CASTLE_VISUAL_TIER {
+            tier = MAX_CASTLE_VISUAL_TIER;
         }
         let damage = clamp(
             1.0 - self.castles.health[wizard] / max(self.castles.max_health[wizard], 1.0),

@@ -131,6 +131,8 @@ h3{margin:0 0 10px;font:700 22px/1.2 var(--display);letter-spacing:.1em;text-tra
 .keys kbd{flex:0 0 auto;min-width:2.1em;text-align:center;padding:3px 6px;font:500 10.5px/1 var(--mono);
   color:var(--gold);background:rgba(5,7,16,.8);border:1px solid rgba(229,167,60,.36);border-radius:2px}
 .fine{margin-top:6px;font:300 11.5px/1.5 var(--body);color:rgba(240,230,206,.42)}
+.fine a{color:rgba(242,213,128,.72);text-underline-offset:3px}
+.fine a:hover,.fine a:focus-visible{color:var(--gold)}
 
 #err{position:fixed;inset:auto 0 0 0;z-index:20;display:none;margin:0;padding:20px 24px;
   background:rgba(120,26,20,.95);border-top:2px solid var(--cinnabar);
@@ -139,7 +141,7 @@ h3{margin:0 0 10px;font:700 22px/1.2 var(--display);letter-spacing:.1em;text-tra
 #boot{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:var(--ink);
   font:500 11px/1 var(--display);letter-spacing:.3em;text-transform:uppercase;color:rgba(240,230,206,.5)}
 
-/* twelve slots plus the medallion is a lot of width; shrink both together so
+/* thirteen slots plus the medallion is a lot of width; shrink both together so
    the map never gets pushed off the edge */
 @media (max-width:1100px){
   #hud{gap:10px;padding:12px 14px}
@@ -211,15 +213,16 @@ h3{margin:0 0 10px;font:700 22px/1.2 var(--display);letter-spacing:.1em;text-tra
       <div><kbd>Shift</kbd><span>Dive</span></div>
       <div><kbd>X</kbd><span>Hold to slow down</span></div>
       <div><kbd>Click</kbd><span>Cast the held spell</span></div>
-      <div><kbd>1–9</kbd><span>Choose a spell</span></div>
+      <div><kbd>1–9 0 - = [</kbd><span>Choose a spell</span></div>
       <div><kbd>Q E</kbd><span>Cycle spells</span></div>
+      <div><kbd>Touch</kbd><span>Left: steer and thrust · right: cast</span></div>
       <div><kbd>C</kbd><span>Swap to chase view</span></div>
       <div><kbd>P</kbd><span>Pause</span></div>
       <div><kbd>M</kbd><span>Mute</span></div>
     </div>
-    <p>Kill the wildlife and their nests to shake mana loose, fly low to draw it in, then carry it home to your keep. Banked mana raises your castle, and a taller castle feeds you spells faster. Crack your rival's keep and it spills everything it holds.</p>
+    <p>Break wildlife and nests to spill gold mana. Cast Claim (<kbd>0</kbd>) nearby to turn it white, then your balloons haul it home. When your keep reaches the pale capacity tick, cast Fortress (<kbd>[</kbd>) over it to raise the cap. Bank the target before your rival.</p>
     <button class="btn" id="begin" type="button">Unroll the carpet</button>
-    <p class="fine">Needs WebGPU · click the sky to capture the mouse, Esc to release</p>
+    <p class="fine">Needs WebGPU · click the sky to capture the mouse, Esc to release · <a href="./models.html">model gallery</a></p>
   </div>
 </div>
 

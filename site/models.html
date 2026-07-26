@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aetherloom Model Gallery</title>
+<meta name="description" content="A deterministic WebGPU gallery for inspecting Aetherloom's procedural models.">
+<meta name="theme-color" content="#090c1b">
+<style>
+:root{
+  --night:#090c1b;--ink:#050710;--lapis:#17255a;--lapis-deep:#101a44;
+  --saffron:#e5a73c;--gold:#f2d580;--ivory:#f0e6ce;--cinnabar:#c0392b;
+  --verdigris:#55b49c;--muted:#9ca4bd;
+  --display:"Palatino Linotype",Palatino,Georgia,serif;
+  --body:"Iowan Old Style",Georgia,"Times New Roman",serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--ink);color:var(--ivory)}
+body{display:grid;grid-template-columns:minmax(292px,350px) minmax(0,1fr);
+  overflow:hidden;font-family:var(--body)}
+button,select,input{font:inherit}
+
+.panel{position:relative;z-index:2;overflow:auto;padding:clamp(22px,3vw,38px);
+  background:
+    linear-gradient(150deg,rgba(23,37,90,.95),rgba(9,12,27,.985) 62%),
+    repeating-linear-gradient(45deg,transparent 0 12px,rgba(242,213,128,.025) 12px 13px);
+  border-right:1px solid rgba(229,167,60,.34);
+  box-shadow:14px 0 45px rgba(0,0,0,.38)}
+.back{display:inline-flex;align-items:center;gap:7px;color:rgba(240,230,206,.66);
+  font:700 10px/1 var(--mono);letter-spacing:.14em;text-decoration:none;text-transform:uppercase}
+.back::before{content:"←";color:var(--saffron);font-size:15px}
+.back:hover,.back:focus-visible{color:var(--gold)}
+.eyebrow{margin:34px 0 8px;color:var(--saffron);font:700 10px/1 var(--mono);
+  letter-spacing:.24em;text-transform:uppercase}
+h1{margin:0;color:var(--gold);font:700 clamp(27px,3.2vw,42px)/.98 var(--display);
+  letter-spacing:.07em;text-transform:uppercase;text-shadow:0 0 30px rgba(242,213,128,.18)}
+.lede{margin:14px 0 26px;color:rgba(240,230,206,.7);font-size:13.5px;line-height:1.55}
+.rule{height:3px;margin:0 0 25px;background:linear-gradient(90deg,var(--saffron),rgba(229,167,60,0))}
+
+.field{display:grid;gap:7px;margin:0 0 18px}
+.field>span,.field-label{color:rgba(240,230,206,.52);font:700 9px/1 var(--mono);
+  letter-spacing:.18em;text-transform:uppercase}
+select,input,.small-button,.primary-button{min-height:42px;border:1px solid rgba(229,167,60,.32);
+  border-radius:2px;color:var(--ivory);background:rgba(5,7,16,.68)}
+select{width:100%;padding:0 35px 0 12px;color-scheme:dark;cursor:pointer}
+select:focus-visible,input:focus-visible,button:focus-visible,.back:focus-visible{
+  outline:2px solid var(--gold);outline-offset:2px}
+.variant-row{display:grid;grid-template-columns:42px minmax(0,1fr) 42px;gap:7px}
+input{width:100%;padding:0 10px;text-align:center;font-family:var(--mono);font-variant-numeric:tabular-nums}
+input::-webkit-inner-spin-button{display:none}
+.small-button,.primary-button{cursor:pointer;transition:border-color .14s,background .14s,transform .14s}
+.small-button{padding:0;font:700 19px/1 var(--display)}
+.small-button:hover,.primary-button:hover{border-color:rgba(242,213,128,.72);background:rgba(23,37,90,.92)}
+.primary-button{width:100%;margin-top:2px;padding:0 14px;color:var(--gold);
+  font:700 10px/1 var(--mono);letter-spacing:.15em;text-transform:uppercase}
+.primary-button:active,.small-button:active{transform:translateY(1px)}
+
+.scene-copy{min-height:52px;margin:17px 0 19px;padding-left:12px;
+  border-left:2px solid rgba(229,167,60,.38);color:rgba(240,230,206,.65);
+  font-size:12.5px;line-height:1.5}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;
+  margin:0;background:rgba(229,167,60,.18);border:1px solid rgba(229,167,60,.18)}
+.stats div{min-width:0;padding:10px;background:rgba(5,7,16,.78)}
+.stats dt{color:rgba(240,230,206,.42);font:700 8px/1 var(--mono);
+  letter-spacing:.13em;text-transform:uppercase}
+.stats dd{overflow:hidden;margin:6px 0 0;color:var(--ivory);font:500 11px/1.2 var(--mono);
+  text-overflow:ellipsis;white-space:nowrap}
+
+.stage{position:relative;min-width:0;min-height:0;overflow:hidden;
+  background:radial-gradient(circle at 50% 45%,#1c326b,#08101f 68%,#03050b)}
+#view{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+#view.dragging{cursor:grabbing}
+.status{position:absolute;z-index:1;top:18px;right:18px;max-width:min(76%,520px);
+  display:flex;align-items:flex-start;gap:9px;padding:9px 12px;
+  border:1px solid rgba(229,167,60,.28);border-radius:2px;
+  background:rgba(5,7,16,.76);box-shadow:0 8px 28px rgba(0,0,0,.35);
+  color:rgba(240,230,206,.72);font:700 10px/1.35 var(--mono);
+  letter-spacing:.05em}
+.status::before{content:"";width:8px;height:8px;margin-top:2px;flex:0 0 auto;border-radius:50%;
+  background:var(--saffron);box-shadow:0 0 9px rgba(229,167,60,.7)}
+.status[data-state="pass"]{border-color:rgba(85,180,156,.42);color:#c9f2e7}
+.status[data-state="pass"]::before{background:var(--verdigris);box-shadow:0 0 9px rgba(85,180,156,.75)}
+.status[data-state="fail"]{border-color:rgba(192,57,43,.62);color:#ffd7cf}
+.status[data-state="fail"]::before{background:#e85a48;box-shadow:0 0 10px rgba(232,90,72,.78)}
+.help{position:absolute;z-index:1;left:50%;bottom:17px;transform:translateX(-50%);
+  padding:8px 12px;border:1px solid rgba(229,167,60,.2);border-radius:2px;
+  background:rgba(5,7,16,.64);color:rgba(240,230,206,.6);
+  font:600 9px/1.3 var(--mono);letter-spacing:.08em;text-align:center;white-space:nowrap}
+.error{position:absolute;z-index:3;inset:auto 18px 58px;display:none;max-height:45%;overflow:auto;
+  padding:16px;border:1px solid rgba(232,90,72,.65);background:rgba(88,17,18,.94);
+  color:#ffe7e1;font:12px/1.5 var(--mono);white-space:pre-wrap}
+.error.show{display:block}
+
+@media(max-width:720px){
+  body{grid-template-columns:1fr;grid-template-rows:minmax(218px,42vh) minmax(0,1fr)}
+  .panel{padding:15px 18px 17px;border-right:0;border-bottom:1px solid rgba(229,167,60,.34);
+    box-shadow:0 12px 35px rgba(0,0,0,.34)}
+  .back{position:absolute;right:18px;top:18px}
+  .eyebrow{margin:2px 0 5px}
+  h1{font-size:25px}
+  .lede,.rule{display:none}
+  .controls-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(145px,1fr);gap:10px}
+  .field{margin-bottom:8px}
+  .scene-copy{min-height:0;margin:5px 0 10px;font-size:11.5px}
+  .stats{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .stats div{padding:7px}
+  .stats dt{font-size:7px}.stats dd{font-size:9px}
+  select,input,.small-button,.primary-button{min-height:38px}
+  .primary-button{margin:0}
+  .status{top:10px;right:10px;max-width:calc(100% - 20px);font-size:9px}
+  .help{bottom:10px;font-size:8px}
+}
+@media(max-width:420px){
+  body{grid-template-rows:minmax(242px,46vh) minmax(0,1fr)}
+  .controls-grid{grid-template-columns:1fr 138px}
+  .scene-copy{display:none}
+  .stats div:nth-child(3){display:none}
+  .stats{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .help{white-space:normal;width:max-content;max-width:calc(100% - 20px)}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<aside class="panel">
+  <a class="back" href="./index.html">Return to realm</a>
+  <p class="eyebrow">Deterministic inspection</p>
+  <h1>Model Gallery</h1>
+  <p class="lede">The game’s production geometry, lighting, and shader path—isolated one scene at a time for close inspection.</p>
+  <div class="rule"></div>
+
+  <div class="controls-grid">
+    <label class="field">
+      <span>Scene</span>
+      <select id="scene" aria-label="Model scene"></select>
+    </label>
+    <div class="field">
+      <span class="field-label">Variant</span>
+      <div class="variant-row">
+        <button class="small-button" id="variantPrev" type="button" aria-label="Previous variant">−</button>
+        <input id="variant" type="number" min="0" step="1" value="0" inputmode="numeric" aria-label="Variant number">
+        <button class="small-button" id="variantNext" type="button" aria-label="Next variant">+</button>
+      </div>
+    </div>
+  </div>
+  <button class="primary-button" id="resetView" type="button">Reset orbit</button>
+
+  <p class="scene-copy" id="sceneCopy">Loading the preview catalogue…</p>
+  <dl class="stats">
+    <div><dt>Scene ID</dt><dd id="sceneId">—</dd></div>
+    <div><dt>Variant</dt><dd id="variantStat">—</dd></div>
+    <div><dt>Instances</dt><dd id="instanceCount">—</dd></div>
+    <div><dt>Radius</dt><dd id="radius">—</dd></div>
+  </dl>
+</aside>
+
+<main class="stage">
+  <canvas id="view" aria-label="Interactive three-dimensional model preview"></canvas>
+  <div class="status" id="status" data-state="loading" role="status" aria-live="polite">LOADING — initializing WebGPU</div>
+  <div class="help">Drag to orbit · wheel or pinch to zoom · double-click to reset</div>
+  <pre class="error" id="error"></pre>
+</main>
+
+<script type="module" src="./models.js"></script>
+</body>
+</html>

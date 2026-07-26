@@ -189,10 +189,7 @@ impl World {
     /// The player buys tiers with the Fortress spell; rivals do it themselves
     /// once their keep is nearly full.
     fn rival_buys_tier(&mut self, wizard: usize) {
-        if wizard == PLAYER
-            || self.castles.health[wizard] <= 0.0
-            || self.castles.tier[wizard] >= MAX_CASTLE_TIER
-        {
+        if wizard == PLAYER || self.castles.health[wizard] <= 0.0 {
             return;
         }
         let nearly_full =
@@ -334,7 +331,7 @@ impl World {
     }
 
     fn gather_mana(&mut self, wizard: usize) -> Option<[f32; 3]> {
-        if let Some((orb, dist_sq)) = self.nearest_free_orb(wizard) {
+        if let Some((orb, dist_sq)) = self.nearest_unclaimed_orb(wizard) {
             let destination = [
                 self.orbs.pos_x[orb],
                 self.orbs.pos_y[orb] + 6.0,
@@ -368,11 +365,14 @@ impl World {
         Some(destination)
     }
 
-    fn nearest_free_orb(&self, wizard: usize) -> Option<(usize, f32)> {
+    fn nearest_unclaimed_orb(&self, wizard: usize) -> Option<(usize, f32)> {
         let mut best = None;
         let mut best_dist_sq = f32::MAX;
         for i in 0..MAX_ORBS {
-            if !self.orbs.alive[i] || self.orbs.carried_by[i].is_some() {
+            if !self.orbs.alive[i]
+                || self.orbs.carried_by[i].is_some()
+                || !self.orbs.claimed_by[i].is_wild()
+            {
                 continue;
             }
             let dist_sq = length_sq2(

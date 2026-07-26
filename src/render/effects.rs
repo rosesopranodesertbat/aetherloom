@@ -20,6 +20,100 @@ const ORB_DETAIL_RANGE: f32 = 320.0;
 const ORB_MOTES: i32 = 3;
 
 impl World {
+    /// Isolated visual-QA models for carpets, orbs, and projectiles.
+    ///
+    /// `kind` is local to the preview ABI: player/rival carpet, the three orb
+    /// allegiances, then firebolt, meteor, creature bolt, and dragon fire.
+    pub(super) fn draw_preview_effect(
+        &mut self,
+        kind: i32,
+        variant: i32,
+        origin: [f32; 3],
+    ) {
+        let angle = variant as f32 * core::f32::consts::TAU / PREVIEW_VARIANT_COUNT as f32;
+        match kind {
+            0 | 1 => {
+                let wizard = if kind == 0 { PLAYER } else { 1 };
+                let old_pose = (
+                    self.wizards.yaw[wizard],
+                    self.wizards.pitch[wizard],
+                    self.wizards.roll[wizard],
+                    self.session.elapsed,
+                );
+                self.wizards.yaw[wizard] = angle;
+                self.wizards.pitch[wizard] = sin(angle) * 0.18;
+                self.wizards.roll[wizard] = cos(angle) * 0.16;
+                self.session.elapsed = variant as f32 * 0.12 + 0.3;
+                if kind == 0 {
+                    self.draw_carpet(
+                        wizard,
+                        origin,
+                        [0.15, 0.21, 0.54],
+                        [0.86, 0.63, 0.22],
+                        [0.70, 0.19, 0.16],
+                    );
+                    self.draw_rider(
+                        wizard,
+                        origin,
+                        [0.20, 0.26, 0.58],
+                        [0.90, 0.78, 0.34],
+                    );
+                } else {
+                    self.draw_carpet(
+                        wizard,
+                        origin,
+                        [0.62, 0.13, 0.12],
+                        [0.20, 0.05, 0.06],
+                        [0.86, 0.66, 0.22],
+                    );
+                    self.draw_rider(
+                        wizard,
+                        origin,
+                        [0.48, 0.09, 0.10],
+                        [0.86, 0.72, 0.30],
+                    );
+                }
+                self.wizards.yaw[wizard] = old_pose.0;
+                self.wizards.pitch[wizard] = old_pose.1;
+                self.wizards.roll[wizard] = old_pose.2;
+                self.session.elapsed = old_pose.3;
+            }
+            2..=4 => {
+                let tint = match kind {
+                    2 => [1.00, 0.78, 0.16],
+                    3 => [0.72, 0.92, 1.00],
+                    _ => [1.00, 0.36, 0.30],
+                };
+                self.draw_orb_model(
+                    origin,
+                    4.8 + variant as f32 * 0.16,
+                    variant as f32 * 0.67 + 0.2,
+                    tint,
+                    true,
+                );
+            }
+            5..=8 => {
+                let projectile = match kind {
+                    5 => ProjectileKind::Firebolt,
+                    6 => ProjectileKind::Meteor,
+                    7 => ProjectileKind::CreatureBolt,
+                    _ => ProjectileKind::DragonFire,
+                };
+                let old_elapsed = self.session.elapsed;
+                self.session.elapsed = variant as f32 * 0.04 + 0.1;
+                let velocity = [sin(angle) * 70.0, 12.0, cos(angle) * 70.0];
+                let (colour, size) = projectile.head_style();
+                if projectile == ProjectileKind::CreatureBolt {
+                    self.draw_bolt(origin, velocity, size, colour, variant as usize);
+                } else {
+                    self.draw_fireball(origin, velocity, size, colour, variant as usize);
+                }
+                self.session.elapsed = old_elapsed;
+            }
+            _ => {}
+        }
+    }
+
     // ---- carpets, orbs, projectiles ----------------------------------------
     pub(super) fn draw_rival_carpets(&mut self) {
         for wizard in 1..=self.session.rival_count {
@@ -309,7 +403,6 @@ impl World {
             count += 1;
             let size = 2.0 + self.orbs.amount[index] * 0.18;
             let phase = self.orbs.bob_phase[index];
-            let pulse = 0.75 + sin(phase * 2.0) * 0.25;
             // gold is nobody's yet, white is yours and inbound, red is theirs
             let (tint, blip) = if self.orbs.claimed_by[index].is_player() {
                 ([0.72, 0.92, 1.00], MapBlip::ClaimedOrb)
@@ -327,56 +420,68 @@ impl World {
 
             let near = length_sq3(at[0] - eye_x, at[1] - eye_y, at[2] - eye_z)
                 < ORB_DETAIL_RANGE * ORB_DETAIL_RANGE;
-            if !near {
-                self.push_instance(
-                    at,
-                    [size, size, size],
-                    [tint[0] * pulse, tint[1] * pulse, tint[2] * pulse],
-                    0.0,
-                    1.0,
-                    Shape::Sphere,
-                );
-                continue;
-            }
-
-            // A faceted core inside a soft shell reads as a crystal; one
-            // smooth emissive ball reads as a bulb, which is what it was.
-            let spin = phase * 0.6;
-            self.push_oriented(
-                at,
-                [size * 0.8, size * 0.9, size * 0.8],
-                [tint[0], tint[1], tint[2]],
-                Rotation::new(spin, spin * 0.7, spin * 0.4),
-                1.0,
-                Shape::Boulder,
-            );
-            self.push_instance(
-                at,
-                [size * 1.5 * pulse, size * 1.5 * pulse, size * 1.5 * pulse],
-                [tint[0] * 0.5, tint[1] * 0.5, tint[2] * 0.5],
-                0.0,
-                0.5,
-                Shape::Sphere,
-            );
-            for mote in 0..ORB_MOTES {
-                let angle = phase * 1.4 + mote as f32 * core::f32::consts::TAU / ORB_MOTES as f32;
-                let orbit = size * 1.5;
-                let mote_size = size * 0.22;
-                self.push_instance(
-                    [
-                        at[0] + cos(angle) * orbit,
-                        at[1] + sin(angle * 1.7) * size * 0.5,
-                        at[2] + sin(angle) * orbit,
-                    ],
-                    [mote_size, mote_size, mote_size],
-                    tint,
-                    0.0,
-                    1.0,
-                    Shape::Sphere,
-                );
-            }
+            self.draw_orb_model(at, size, phase, tint, near);
         }
         count
+    }
+
+    fn draw_orb_model(
+        &mut self,
+        at: [f32; 3],
+        size: f32,
+        phase: f32,
+        tint: [f32; 3],
+        near: bool,
+    ) {
+        let pulse = 0.75 + sin(phase * 2.0) * 0.25;
+        if !near {
+            self.push_instance(
+                at,
+                [size, size, size],
+                [tint[0] * pulse, tint[1] * pulse, tint[2] * pulse],
+                0.0,
+                1.0,
+                Shape::Sphere,
+            );
+            return;
+        }
+
+        // A faceted core inside a soft shell reads as a crystal; one smooth
+        // emissive ball reads as a bulb, which is what it was.
+        let spin = phase * 0.6;
+        self.push_oriented(
+            at,
+            [size * 0.8, size * 0.9, size * 0.8],
+            [tint[0], tint[1], tint[2]],
+            Rotation::new(spin, spin * 0.7, spin * 0.4),
+            1.0,
+            Shape::Boulder,
+        );
+        self.push_instance(
+            at,
+            [size * 1.5 * pulse, size * 1.5 * pulse, size * 1.5 * pulse],
+            [tint[0] * 0.5, tint[1] * 0.5, tint[2] * 0.5],
+            0.0,
+            0.5,
+            Shape::Sphere,
+        );
+        for mote in 0..ORB_MOTES {
+            let angle = phase * 1.4 + mote as f32 * core::f32::consts::TAU / ORB_MOTES as f32;
+            let orbit = size * 1.5;
+            let mote_size = size * 0.22;
+            self.push_instance(
+                [
+                    at[0] + cos(angle) * orbit,
+                    at[1] + sin(angle * 1.7) * size * 0.5,
+                    at[2] + sin(angle) * orbit,
+                ],
+                [mote_size, mote_size, mote_size],
+                tint,
+                0.0,
+                1.0,
+                Shape::Sphere,
+            );
+        }
     }
 
     pub(super) fn draw_projectiles(&mut self) {

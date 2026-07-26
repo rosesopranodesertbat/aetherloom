@@ -100,6 +100,18 @@ global.document = {
 global.devicePixelRatio = 1;
 global.AudioContext = null;
 global.window = global;
+const localStorageValues = new Map();
+Object.defineProperty(global, 'localStorage', {
+  configurable: true,
+  value: {
+    getItem(key) {
+      return localStorageValues.has(key) ? localStorageValues.get(key) : null;
+    },
+    setItem(key, value) {
+      localStorageValues.set(key, String(value));
+    },
+  },
+});
 global.addEventListener = () => {};
 global.innerWidth = 1440;
 let rafCbs = [];
@@ -162,4 +174,10 @@ for (const sp of [2,3,4,5]) { g.sim.selectSpell(sp); g.firing = true; step(30); 
 console.log(`after terrain spells: inst=${g.sim.instCount()} part=${g.sim.partCount()}`);
 g.chase = true; step(20);
 g.setPaused(true); step(5); g.setPaused(false); step(5);
-console.log('\nvalidation errors:', errs.length ? '\n  - ' + [...new Set(errs)].join('\n  - ') : 'NONE');
+const uniqueErrs = [...new Set(errs)];
+if (uniqueErrs.length) {
+  console.error('\nvalidation errors:\n  - ' + uniqueErrs.join('\n  - '));
+  process.exitCode = 1;
+} else {
+  console.log('\nvalidation errors: NONE');
+}

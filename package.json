@@ -6,6 +6,8 @@
   "scripts": {
     "build": "node build.mjs",
     "serve": "node serve.mjs",
-    "test": "node test/balance-sim-test.mjs && node test/headless-render-test.mjs"
+    "test": "npm run build && npm run test:run",
+    "test:run": "npm run test:models && node test/balance-sim-test.mjs && node test/headless-render-test.mjs",
+    "test:models": "node test/model-preview-test.mjs"
   }
 }

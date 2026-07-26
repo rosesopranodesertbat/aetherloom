@@ -64,10 +64,12 @@ mod flyer;
 mod ground;
 mod mesh;
 mod minimap;
+mod preview;
 mod scenery;
 
 pub use mesh::MeshLibrary;
 pub use minimap::Minimap;
+pub(crate) use preview::{PREVIEW_SCENE_COUNT, PREVIEW_VARIANT_COUNT};
 
 impl World {
     // ---- buffer writers ----------------------------------------------------
@@ -563,4 +565,3 @@ impl CreatureBody {
         ]
     }
 }
-

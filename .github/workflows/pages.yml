@@ -25,6 +25,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # `npm test` builds the Rust core first, then exercises that exact wasm.
+      - run: npm test
+      - name: Verify model gallery assets
+        run: |
+          test -f site/models.html
+          test -f site/models.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -82,6 +82,33 @@ impl SceneryItem {
 }
 
 impl World {
+    /// Isolated full-detail scenery model used by the visual-QA catalogue.
+    ///
+    /// `kind` is local to the preview ABI: 0 palm, 1 boulder, 2 burnt stump.
+    pub(super) fn draw_preview_scenery(
+        &mut self,
+        kind: i32,
+        variant: i32,
+        origin: [f32; 3],
+    ) {
+        let item = SceneryItem {
+            slot: 20_000 + variant as usize,
+            x: origin[0],
+            ground: origin[1],
+            z: origin[2],
+            scale: 0.88 + variant as f32 * 0.035,
+            spin: variant as f32 * core::f32::consts::TAU / PREVIEW_VARIANT_COUNT as f32,
+            burn: 0.0,
+            detail: SceneryDetail::Full,
+        };
+        match kind {
+            0 => self.draw_palm(&item),
+            1 => self.draw_boulder(&item),
+            2 => self.draw_burnt_stump(&item),
+            _ => {}
+        }
+    }
+
     /// Three passes, nearest tier first, each stopping at the budget. Far
     /// scenery is what disappears when the frame is full, which is the one
     /// place it will not be noticed.

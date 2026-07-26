@@ -100,10 +100,10 @@ impl World {
                 return false;
             }
         }
-        // Fortress only works standing over your own intact keep, and only
-        // while there is a tier left to buy.
+        // Fortress only works standing over your own intact keep. Economic
+        // tiers are uncapped; the renderer caps only the model complexity.
         if spell == Spell::Fortress {
-            if self.castles.health[wizard] <= 0.0 || self.castles.tier[wizard] >= MAX_CASTLE_TIER {
+            if self.castles.health[wizard] <= 0.0 {
                 return false;
             }
             let to_keep = [
@@ -231,11 +231,16 @@ impl World {
         best
     }
 
-    fn lightning_next_hop(&self, from: [f32; 3], current: usize, attacker: Faction) -> Option<usize> {
+    fn lightning_next_hop(
+        &self,
+        from: [f32; 3],
+        visited: &[bool; MAX_CREATURES],
+        attacker: Faction,
+    ) -> Option<usize> {
         let mut best = None;
         let mut best_dist_sq = LIGHTNING_CHAIN_RANGE * LIGHTNING_CHAIN_RANGE;
         for i in 0..MAX_CREATURES {
-            if !self.creatures.alive[i] || i == current || self.creatures.faction[i] == attacker {
+            if !self.creatures.alive[i] || visited[i] || self.creatures.faction[i] == attacker {
                 continue;
             }
             let dist_sq = length_sq3(
@@ -258,9 +263,11 @@ impl World {
         let mut from = origin;
         match self.lightning_first_target(wizard, facing) {
             Some(first) => {
+                let mut visited = [false; MAX_CREATURES];
                 let mut current = Some(first);
                 for _ in 0..LIGHTNING_MAX_HOPS {
                     let Some(index) = current else { break };
+                    visited[index] = true;
                     let at = [
                         self.creatures.pos_x[index],
                         self.creatures.pos_y[index],
@@ -269,7 +276,7 @@ impl World {
                     self.spawn_arc(from, at);
                     self.apply_blast(at, LIGHTNING_BLAST_RADIUS, LIGHTNING_DAMAGE, attacker);
                     from = at;
-                    current = self.lightning_next_hop(at, index, attacker);
+                    current = self.lightning_next_hop(at, &visited, attacker);
                 }
             }
             None => {
@@ -420,10 +427,10 @@ impl World {
         let mut claimed = 0;
         let mut total = 0.0f32;
         for i in 0..MAX_ORBS {
-            if !self.orbs.alive[i] || self.orbs.carried_by[i].is_some() {
-                continue;
-            }
-            if self.orbs.claimed_by[i] == owner {
+            if !self.orbs.alive[i]
+                || self.orbs.carried_by[i].is_some()
+                || !self.orbs.claimed_by[i].is_wild()
+            {
                 continue;
             }
             let offset = [

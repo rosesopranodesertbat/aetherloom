@@ -182,6 +182,41 @@ pub extern "C" fn statePtr() -> usize {
 pub extern "C" fn instCount() -> i32 {
     WORLD.lock().render.instance_count as i32
 }
+/// Number of stable, isolated model scenes available to the visual-QA page.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn previewSceneCount() -> i32 {
+    render::PREVIEW_SCENE_COUNT
+}
+/// Every valid scene currently exposes the same eight deterministic variants.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn previewVariantCount(scene: i32) -> i32 {
+    if (0..render::PREVIEW_SCENE_COUNT).contains(&scene) {
+        render::PREVIEW_VARIANT_COUNT
+    } else {
+        0
+    }
+}
+/// Replaces only the render-output buffers with one deterministic model scene.
+///
+/// Returns the resulting instance count. Invalid inputs clear the preview
+/// output and return zero.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn previewScene(scene: i32, variant: i32) -> i32 {
+    WORLD.lock().preview_scene(scene, variant)
+}
+/// Pointer to four f32 values: focus centre xyz, then camera-framing radius.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn previewFocusPtr() -> usize {
+    WORLD.lock().preview_focus.as_ptr() as usize
+}
 #[allow(unsafe_code)]
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -211,6 +246,13 @@ pub extern "C" fn mapCount() -> i32 {
 #[allow(non_snake_case)]
 pub extern "C" fn evtCount() -> i32 {
     WORLD.lock().render.sound_cue_count as i32
+}
+/// Acknowledges every queued sound event after the host has consumed it.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn clearEvents() {
+    WORLD.lock().render.sound_cue_count = 0;
 }
 
 // ---- buffer layout ---------------------------------------------------------

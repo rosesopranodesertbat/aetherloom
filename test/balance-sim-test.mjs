@@ -1,10 +1,79 @@
-import fs from 'fs';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
 const x=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync('site/sim.wasm')),{}).exports;
 const S=()=>new Float32Array(x.memory.buffer,x.statePtr(),128);
-// exploit check: park on your own castle and do nothing
-x.init(101,1);
-for(let f=0;f<60*240;f++){ x.setInput(0,0,0,0,0,0,0); x.step(1/60); if(S()[18]!==0)break; }
-let s=S(); console.log(`park-on-castle 240s -> claimed ${(s[13]*100).toFixed(0)}% mana ${s[9].toFixed(0)} status ${s[18]} (exploit is closed if claimed stays ~0%)`);
+
+const outcomeName={0:'in progress',1:'WIN',2:'died',3:'rival won'};
+const close=(actual,expected,tolerance=0.001)=>Math.abs(actual-expected)<=tolerance;
+
+// A cast cue is part of the consumer-owned event queue. Simulation catch-up
+// steps may append to that queue, but must not erase an event before JS reads it.
+function checkEventContract(){
+  x.init(0x5eed,1);
+  assert.equal(x.evtCount(),0,'init must start with an empty event queue');
+  x.fireSelected();
+  const beforeCount=x.evtCount();
+  assert.ok(beforeCount>0,'fireSelected must emit a cast cue');
+  const before=Array.from(new Float32Array(x.memory.buffer,x.evtPtr(),4));
+  x.setInput(0,0,0,0,0,0,0);
+  x.step(1/60);
+  assert.ok(x.evtCount()>=beforeCount,'step must preserve queued cast cues');
+  assert.deepEqual(Array.from(new Float32Array(x.memory.buffer,x.evtPtr(),4)),before,
+    'step must not overwrite the queued cast cue');
+  x.clearEvents();
+  assert.equal(x.evtCount(),0,'clearEvents must empty the event queue');
+  console.log('event queue: cast cue survives step and clearEvents empties it');
+}
+
+// Realm 8 is the first target that needs an economic tier beyond the renderer's
+// six-tier visual model. Keep this arithmetic visible and guarded.
+function checkRealmCapacity(){
+  x.init(4242,8);
+  const s=S(), tier=s[16], capacity=s[55], target=s[56];
+  const capacityPerTier=capacity/tier;
+  const requiredTier=Math.ceil(target/capacityPerTier);
+  const spellSource=fs.readFileSync('src/spells.rs','utf8');
+  assert.ok(close(capacityPerTier,240),'fortress capacity must remain 240 mana per tier');
+  assert.equal(requiredTier,7,'realm 8 must exercise an economic tier above the visual tier cap');
+  assert.ok(requiredTier*capacityPerTier>=target,'realm 8 must have a reachable capacity');
+  assert.doesNotMatch(spellSource,/tier\s*\[\s*wizard\s*\]\s*>=/,
+    'Fortress casting must not impose an economic tier ceiling');
+  assert.match(spellSource,/tier\s*\[\s*wizard\s*\]\s*\+=\s*1/,
+    'Fortress casting must continue incrementing the economic tier');
+  console.log(`realm 8 capacity: tier ${requiredTier} holds ${requiredTier*capacityPerTier} for target ${target}`);
+}
+
+// Exploit regression: remain horizontally parked above the own keep without
+// claiming or attacking. Holding lift keeps this deterministic scenario alive
+// for the full window instead of letting enemies end the check after 16 seconds.
+function checkParkingExploit(){
+  const seconds=240,totalFrames=60*seconds;
+  x.init(101,1);
+  const initial=S(), startX=initial[0], startZ=initial[2];
+  let frames=0,maxDrift=0;
+  while(frames<totalFrames&&S()[18]===0){
+    x.setInput(0,0,1,0,0,0,1);
+    x.step(1/60);
+    frames++;
+    const now=S();
+    maxDrift=Math.max(maxDrift,Math.hypot(now[0]-startX,now[2]-startZ));
+  }
+  const s=S(), simulated=frames/60;
+  console.log(`hover-over-castle ${simulated.toFixed(1)}s -> stored ${s[54].toFixed(1)} `+
+    `progress ${(s[13]*100).toFixed(1)}% outcome ${outcomeName[s[18]]??s[18]}`);
+  assert.equal(frames,totalFrames,
+    `parking regression ended after ${simulated.toFixed(1)}s with outcome ${outcomeName[s[18]]??s[18]}`);
+  assert.equal(s[18],0,'parking without claiming must not end the realm');
+  assert.ok(maxDrift<0.01,`parking scenario drifted ${maxDrift.toFixed(3)} world units`);
+  assert.ok(s[54]<0.5,'parking without claiming must not fill the fortress');
+  assert.ok(s[13]<0.001,'parking without claiming must not advance realm progress');
+}
+
+checkEventContract();
+checkRealmCapacity();
+checkParkingExploit();
+
 // The bot plays the current loop: hunt gold orbs, Claim them so the balloons
 // have something to fetch, and go home to buy a Fortress tier when the keep
 // is capped or the target needs more room than it can hold.
@@ -36,13 +105,23 @@ function run(seed,lvl,secs){
     if(hp<62&&s[60+7]>0&&mana>26)x.cast(7);
     if(hp<48&&s[60+6]>0&&mana>24)x.cast(6);
     x.step(1/60);
-    if(S()[18]!==0){s=S();return{t:f/60,st:s[18],me:s[13],rv:s[14],lv:s[16],k:s[24],store:s[54],tgt:s[56]};}
+    if(S()[18]!==0){s=S();return{t:(f+1)/60,st:s[18],me:s[13],rv:s[14],tier:s[16],k:s[24],store:s[54],cap:s[55],tgt:s[56]};}
   }
-  s=S();return{t:secs,st:0,me:s[13],rv:s[14],lv:s[16],k:s[24],store:s[54],tgt:s[56]};
+  s=S();return{t:secs,st:0,me:s[13],rv:s[14],tier:s[16],k:s[24],store:s[54],cap:s[55],tgt:s[56]};
 }
 const nm={0:'timeout',1:'WIN',2:'died',3:'rival won'};
+const results=[];
 console.log('');
 for(const [sd,lv] of [[31337,1],[555,1],[777,2],[9001,3],[2024,6],[4242,8],[13,10]]){
   const r=run(sd,lv,900);
-  console.log(`lvl${String(lv).padStart(2)} seed${String(sd).padStart(5)}: t=${r.t.toFixed(0).padStart(3)}s ${nm[r.st].padEnd(9)} fortress=${r.store.toFixed(0).padStart(4)}/${r.tgt.toFixed(0)} rival=${(r.rv*100).toFixed(0).padStart(3)}% tier=${r.lv} kills=${r.k}`);
+  results.push(r);
+  for(const [name,value] of Object.entries(r)) assert.ok(Number.isFinite(value),`${name} must be finite`);
+  assert.ok(Number.isInteger(r.st)&&r.st>=0&&r.st<=3,`invalid outcome ${r.st}`);
+  assert.ok(Number.isInteger(r.tier)&&r.tier>=1,`invalid fortress tier ${r.tier}`);
+  assert.ok(close(r.cap,r.tier*240,0.01),`tier ${r.tier} capacity ${r.cap} is not 240 x tier`);
+  assert.ok(r.store>=0&&r.store<=r.cap+0.01,`fortress store ${r.store} exceeds capacity ${r.cap}`);
+  assert.ok(r.tgt>0,'realm target must be positive');
+  assert.ok(r.me>=0&&r.rv>=0,'realm progress must not be negative');
+  console.log(`lvl${String(lv).padStart(2)} seed${String(sd).padStart(5)}: t=${r.t.toFixed(0).padStart(3)}s ${nm[r.st].padEnd(9)} fortress=${r.store.toFixed(0).padStart(4)}/${r.tgt.toFixed(0)} rival=${(r.rv*100).toFixed(0).padStart(3)}% tier=${r.tier} kills=${r.k}`);
 }
+assert.ok(results.some((r)=>r.st===1),'scripted balance sweep must retain at least one player win');
