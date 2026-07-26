@@ -74,6 +74,8 @@ let decCount: i32 = 0;
 // instance stride 12: px,py,pz, sx,sy,sz, r,g,b, yaw, glow, shape
 const INST = new StaticArray<f32>(MAXI * 12);
 let instN: i32 = 0;
+// index range of the player's own carpet within INST, for first-person culling
+let carpetLo: i32 = 0, carpetHi: i32 = 0;
 // particle stride 8: x,y,z, size, r,g,b, alpha
 const PART = new StaticArray<f32>(MAXPT * 8);
 let partN: i32 = 0;
@@ -650,13 +652,18 @@ function updatePlayer(dt: f32): void {
   wrol[w] += (roll - wrol[w]) * Mathf.min(1.0, dt * 6.0);
   fwdVec(w, tmpv);
   const fx = tmpv[0], fy = tmpv[1], fz = tmpv[2];
-  const rx = Mathf.cos(wyaw[w]), rz = -Mathf.sin(wyaw[w]);
+  // Screen-right. The view matrix puts the camera's x axis at
+  // (-cos yaw, 0, sin yaw); strafing along +(cos yaw, 0, -sin yaw) sent you
+  // the opposite way, so D slid left.
+  const rx = -Mathf.cos(wyaw[w]), rz = Mathf.sin(wyaw[w]);
   let maxs: f32 = 132.0; if (whaste[w] > 0) maxs *= 1.75;
   if (iBrake != 0) maxs *= 0.28;
   const tvx = fx * iFwd * maxs + rx * iStr * maxs * 0.55;
   const tvy = fy * iFwd * maxs + iUp * 78.0;
   const tvz = fz * iFwd * maxs + rz * iStr * maxs * 0.55;
-  const k = Mathf.min(1.0, dt * 3.4);
+  // Brisk enough that turning re-aims the carpet rather than leaving it
+  // skating along its old heading.
+  const k = Mathf.min(1.0, dt * 5.2);
   wvx[w] += (tvx - wvx[w]) * k; wvy[w] += (tvy - wvy[w]) * k; wvz[w] += (tvz - wvz[w]) * k;
   wx[w] += wvx[w] * dt; wy[w] += wvy[w] * dt; wz[w] += wvz[w] * dt;
   wx[w] = clampWorld(wx[w]); wz[w] = clampWorld(wz[w]);
@@ -1231,8 +1238,9 @@ function buildRender(): void {
     if (wshield[w] > 0) pushInst(wx[w], wy[w] + 2.0, wz[w], 20, 20, 20, 1.0, 0.5, 0.4, 0, 0.9, 1);
     pushMap(wx[w], wz[w], 1.0, 1.4);
   }
-  // the player's own carpet: reads as the near edge in first person,
-  // and is the whole avatar in chase view
+  // The player's own carpet and shield. Emitted as one contiguous run so the
+  // renderer can drop it wholesale in first person — see carpetLo/carpetHi.
+  carpetLo = instN;
   {
     const ya = wyaw[0], bob = Mathf.sin(gtime * 2.3) * 0.35;
     pushInst(wx[0], wy[0] - 2.7 + bob, wz[0], 16.6, 0.5, 20.6, 0.88, 0.65, 0.24, ya, 0.05, 0);
@@ -1240,6 +1248,7 @@ function buildRender(): void {
     pushInst(wx[0], wy[0] - 1.6 + bob, wz[0], 5.2, 0.5, 6.6, 0.72, 0.20, 0.16, ya, 0.04, 0);
     if (wshield[0] > 0.0) pushInst(wx[0], wy[0], wz[0], 24, 24, 24, 0.42, 0.72, 1.0, 0, 0.8, 1);
   }
+  carpetHi = instN;
   // mana orbs
   let orbN = 0;
   for (let i = 0; i < MAXO; i++) {
@@ -1353,6 +1362,8 @@ export function mapPtr(): usize { return changetype<usize>(MAP); }
 export function evtPtr(): usize { return changetype<usize>(EVT); }
 export function statePtr(): usize { return changetype<usize>(ST); }
 export function instCount(): i32 { return instN; }
+export function carpetInstLo(): i32 { return carpetLo; }
+export function carpetInstHi(): i32 { return carpetHi; }
 export function partCount(): i32 { return partN; }
 export function mapCount(): i32 { return mapN; }
 export function evtCount(): i32 { return evtN; }

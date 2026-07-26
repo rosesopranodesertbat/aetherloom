@@ -2,7 +2,7 @@
 // AETHERLOOM — game shell: input, HUD, audio, level flow.
 // Simulation = sim.wasm (freestanding WebAssembly). Rendering = engine.js (WebGPU).
 // ============================================================================
-import { Renderer, PIXEL_MODES } from './engine.js';
+import { Renderer, BLOCK_MODES } from './engine.js';
 
 const SPELLS = [
   { n: 'Firebolt',  k: '1', g: '✦', d: 'Fast bolt. Scorches a small crater.' },
@@ -218,10 +218,9 @@ class Game {
       if (k === 'm') { this.audio.on = !this.audio.on; this.flash(this.audio.on ? 'Sound on' : 'Sound off'); }
       if (k === 'b') { this.r.bloom = !this.r.bloom; this.flash(this.r.bloom ? 'Bloom on' : 'Bloom off'); }
       if (k === 'v') {
-        const n = (PIXEL_MODES.indexOf(this.r.pixelHeight) + 1) % PIXEL_MODES.length;
-        this.r.pixelHeight = PIXEL_MODES[n];
-        this.r.resize();
-        this.flash(this.r.pixelHeight ? `${this.r.pixelHeight}-line scene` : 'Native resolution');
+        const n = (BLOCK_MODES.indexOf(this.r.block) + 1) % BLOCK_MODES.length;
+        this.r.block = BLOCK_MODES[n];
+        this.flash(this.r.block ? `Edge pixels ${this.r.block}px` : 'Edge pixels off');
       }
       if (k === 'p' || k === 'escape') this.setPaused(!this.paused);
       if (k === 'r' && e.shiftKey) this.startLevel(this.level);
@@ -436,10 +435,15 @@ Game.prototype.loop = function (t) {
     else if (kind === 7) castles.push([this.MAP[i * 4], this.MAP[i * 4 + 1], 300, 1]);
   }
   const sunT = 0.35;
+  // First person means first person: drop the player's own carpet rather than
+  // parking it across the bottom of the screen.
+  const fp = !this.chase;
   this.r.frame(this.camera(), this.PART, this.sim.partCount(), this.INST, this.sim.instCount(), {
     fov: 1.16, time: st[32],
     sun: [Math.cos(sunT) * 0.55, 0.70, Math.sin(sunT) * 0.45], sunI: 1.0,
-    fog: [0.76, 0.71, 0.62], fogD: 0.0009,
+    fog: [0.70, 0.82, 0.95], fogD: 0.0009,
+    skipLo: fp ? this.sim.carpetInstLo() : -1,
+    skipHi: fp ? this.sim.carpetInstHi() : -1,
     exposure: 1.12, bloomStrength: 0.42, waterAlpha: 1.0,
     hurt: Math.max(this.hurt, st[7] < 30 ? 0.24 + 0.10 * Math.sin(t * 0.006) : 0),
     castles

@@ -19,10 +19,14 @@ struct Uni {
 @group(0) @binding(0) var<uniform> U : Uni;
 
 // ---------------------------------------------------------------- helpers
+// Dave Hoskins' hash12. The usual fract(dot(p, vec2(127.1, 311.7)) * 43758.5)
+// form needs f64 to work: its intermediate lands around 1e8, which blows past
+// the 24-bit f32 mantissa, so on the GPU it degenerates to almost a constant
+// and every fbm2 built on it comes out flat. This variant stays under ~2e4.
 fn hash21(p: vec2<f32>) -> f32 {
-  var q = fract(p * vec2<f32>(127.1, 311.7));
-  q += dot(q, q + 34.23);
-  return fract(q.x * q.y * 43758.545);
+  var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+  p3 += dot(p3, vec3<f32>(p3.y, p3.z, p3.x) + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }
 fn vnoise(p: vec2<f32>) -> f32 {
   let i = floor(p); let f = fract(p);
@@ -40,22 +44,31 @@ fn fbm2(p0: vec2<f32>) -> f32 {
 }
 fn skyColor(dir: vec3<f32>) -> vec3<f32> {
   let up = clamp(dir.y, -1.0, 1.0);
-  let horizon = vec3<f32>(0.86, 0.72, 0.52);
-  let zenith  = vec3<f32>(0.17, 0.30, 0.62);
-  let below   = vec3<f32>(0.20, 0.21, 0.24);
-  var col = mix(horizon, zenith, pow(clamp(up, 0.0, 1.0), 0.55));
+  // Clear summer midday: strong blue overhead washing to pale blue haze.
+  let horizon = vec3<f32>(0.70, 0.84, 0.97);
+  let zenith  = vec3<f32>(0.10, 0.34, 0.86);
+  let below   = vec3<f32>(0.58, 0.73, 0.90);
+  var col = mix(horizon, zenith, pow(clamp(up, 0.0, 1.0), 0.62));
   // Held flat at and below the horizon: with a short draw range you see this
   // band wherever the world runs out, and it has to read as more haze, not a
   // void. applyFog converges on exactly this colour, so the join is invisible.
   col = mix(below, col, clamp(max(up, 0.0) * 5.0 + 0.66, 0.0, 1.0));
   let sd = max(dot(dir, normalize(U.sun.xyz)), 0.0);
-  col += vec3<f32>(1.0, 0.82, 0.55) * pow(sd, 220.0) * 6.0;      // sun disc
-  col += vec3<f32>(1.0, 0.74, 0.42) * pow(sd, 8.0) * 0.34;        // glow
-  // slow high cloud band
+  col += vec3<f32>(1.0, 0.95, 0.80) * pow(sd, 220.0) * 6.0;      // sun disc
+  col += vec3<f32>(1.0, 0.90, 0.66) * pow(sd, 8.0) * 0.24;        // glow
+  // Drifting fair-weather cloud. Kept sparse and high-contrast: broad soft
+  // coverage just milks the blue out instead of reading as cloud.
   if (dir.y > 0.02) {
-    let uv = dir.xz / max(dir.y, 0.02) * 0.22 + vec2<f32>(U.cam.w * 0.004, 0.0);
-    let c = smoothstep(0.52, 0.86, fbm2(uv));
-    col = mix(col, vec3<f32>(1.02, 0.95, 0.86), c * 0.5 * smoothstep(0.02, 0.35, dir.y));
+    // Clamped rather than the true plane projection: near the horizon that
+    // would run off to infinity and alias into fizz the edge pass would then
+    // happily chop into blocks.
+    let uv = dir.xz / max(dir.y, 0.18) * 1.7 + vec2<f32>(U.cam.w * 0.012, 0.0);
+    // Narrow band: fbm2 is dominated by its first octave, so a wide threshold
+    // gives a smooth wash rather than anything that reads as a cloud.
+    let c = smoothstep(0.58, 0.70, fbm2(uv));
+    // Gone by the time that clamp bites, or the clamped projection smears the
+    // cloud field into vertical streaks across the horizon.
+    col = mix(col, vec3<f32>(1.10, 1.08, 1.04), c * 0.95 * smoothstep(0.17, 0.46, dir.y));
   }
   return col;
 }
@@ -135,7 +148,9 @@ struct TOut {
   let n = normalize(i.nrm);
   let slope = 1.0 - clamp(n.y, 0.0, 1.0);
   let h = i.hgt;
-  let grain = fbm2(i.wp.xz * 0.055) * 0.16 + vnoise(i.wp.xz * 0.6) * 0.05;
+  // Both terms are deliberately low frequency: with a working hash, a 0.6-scale
+  // term is sub-pixel at range and aliases into fizz the edge pass would block.
+  let grain = fbm2(i.wp.xz * 0.055) * 0.15 + vnoise(i.wp.xz * 0.22) * 0.05;
 
   let seabed = vec3<f32>(0.20, 0.26, 0.24);
   let sand   = vec3<f32>(0.80, 0.68, 0.42);
@@ -175,12 +190,19 @@ struct WOut { @builtin(position) pos: vec4<f32>, @location(0) wp: vec3<f32> };
 @fragment fn waterFS(i: WOut) -> @location(0) vec4<f32> {
   let t = U.cam.w;
   let p = i.wp.xz;
-  let w1 = sin(p.x * 0.055 + t * 1.1) * cos(p.y * 0.047 - t * 0.9);
-  let w2 = sin(p.x * 0.017 - t * 0.6) * cos(p.y * 0.021 + t * 0.5);
-  let ripple = vec3<f32>(w1 * 0.10 + w2 * 0.05, 1.0, w2 * 0.10 + w1 * 0.05);
-  let n = normalize(ripple);
   let toCam = U.cam.xyz - i.wp;
   let dist = length(toCam);
+  let w1 = sin(p.x * 0.055 + t * 1.1) * cos(p.y * 0.047 - t * 0.9);
+  let w2 = sin(p.x * 0.017 - t * 0.6) * cos(p.y * 0.021 + t * 0.5);
+  // Chop, faded out with range so it never goes sub-pixel and aliases. Two
+  // smooth sinusoids alone read as an oil slick: their iso-contours show up as
+  // rings once a tight specular lands on them.
+  let near = 1.0 - smoothstep(80.0, 520.0, dist);
+  let w3 = (vnoise(p * 0.10 + vec2<f32>(t * 0.30, t * -0.20)) - 0.5) * near;
+  let w4 = (vnoise(p * 0.31 + vec2<f32>(t * -0.45, t * 0.36)) - 0.5) * near * 0.5;
+  let ripple = vec3<f32>(w1 * 0.09 + w2 * 0.05 + w3 * 0.34 + w4 * 0.30, 1.0,
+                         w2 * 0.09 + w1 * 0.05 + w4 * 0.34 - w3 * 0.30);
+  let n = normalize(ripple);
   let V = toCam / dist;
   let L = normalize(U.sun.xyz);
   let fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 4.0);
@@ -193,14 +215,16 @@ struct WOut { @builtin(position) pos: vec4<f32>, @location(0) wp: vec3<f32> };
     let bed = textureLoad(hmap, ij, 0).r;
     depth = clamp((U.misc.z - bed) / 26.0, 0.0, 1.0);
   }
-  let deep = vec3<f32>(0.015, 0.055, 0.155);
-  let shallow = vec3<f32>(0.09, 0.36, 0.42);
+  let deep = vec3<f32>(0.02, 0.16, 0.42);
+  let shallow = vec3<f32>(0.13, 0.58, 0.66);
   var col = mix(shallow, deep, depth);
   // Capped well below a mirror: at grazing angles a full sky reflection makes
   // the sea read as more sky and the horizon vanishes into the haze.
-  col = mix(col, refl, clamp(fres * 0.60 + 0.06, 0.0, 1.0));
+  col = mix(col, refl, clamp(fres * 0.62 + 0.06, 0.0, 1.0));
   let H = normalize(L + V);
-  col += vec3<f32>(1.0, 0.88, 0.66) * pow(max(dot(n, H), 0.0), 120.0) * 1.6;
+  // Broad sheen, not a pinpoint: a tight exponent over a smooth normal field
+  // traces thin contour lines the edge pass then outlines.
+  col += vec3<f32>(1.0, 0.95, 0.78) * pow(max(dot(n, H), 0.0), 42.0) * 0.85;
   let foam = smoothstep(0.10, 0.0, depth) * (0.5 + 0.5 * sin(p.x * 0.4 + p.y * 0.33 + t * 3.0));
   col += vec3<f32>(0.9, 0.92, 0.88) * foam * 0.30;
   col = applyFog(col, dist, -V);
@@ -342,30 +366,49 @@ fn bayer4(p: vec2<i32>) -> f32 {
     15.0,  7.0, 13.0,  5.0);
   return m[(p.y & 3) * 4 + (p.x & 3)] / 16.0;
 }
+fn tone(scene: vec3<f32>, bloom: vec3<f32>) -> vec3<f32> {
+  let x = aces((scene + bloom) * U.misc2.x);
+  return pow(x, vec3<f32>(0.95, 0.99, 1.06));   // parchment-warm grade
+}
 @fragment fn compFS(i: FSOut) -> @location(0) vec4<f32> {
-  // Resolve the low-res scene buffer with nearest sampling: one texel of the
-  // scene = one chunky pixel on screen. Everything below keys off tc, so the
-  // dither cell and the grain sit on that same grid instead of the display's.
+  // The scene is rendered at full resolution and stays that way across flat
+  // surfaces. Chunky pixels are applied only where the picture actually
+  // changes — silhouettes, shorelines, the line between grass and rock — which
+  // is where the period look lives. Open sky and open water stay smooth.
   let dim = vec2<f32>(textureDimensions(tex));
-  let tc = vec2<i32>(clamp(i.uv * dim, vec2<f32>(0.0), dim - vec2<f32>(1.0)));
-  var c = textureLoad(tex, tc, 0).rgb;
-  // bloom stays smooth, but sampled at the chunky pixel's centre
-  c += textureSample(tex2, samp, (vec2<f32>(tc) + 0.5) / dim).rgb * U.misc2.y;
-  c *= U.misc2.x;
-  c = aces(c);
-  // parchment-warm grade
-  c = pow(c, vec3<f32>(0.95, 0.99, 1.06));
+  let B = max(U.grade.z, 1.0);
+  let cell = floor(i.uv * dim / B);
+  let bUV = (cell + 0.5) * B / dim;      // block centre: constant across a block
+  let stp = B / dim;
+
+  let blS = textureSample(tex2, samp, i.uv).rgb * U.misc2.y;
+  let blB = textureSample(tex2, samp, bUV).rgb * U.misc2.y;
+  let sharp  = tone(textureSample(tex, samp, i.uv).rgb, blS);
+  let blocky = tone(textureSample(tex, samp, bUV).rgb, blB);
+  // Contrast against the four neighbouring blocks. Every term here is constant
+  // within a block, so the result snaps to the grid rather than smearing.
+  let nl = tone(textureSample(tex, samp, bUV - vec2<f32>(stp.x, 0.0)).rgb, blB);
+  let nr = tone(textureSample(tex, samp, bUV + vec2<f32>(stp.x, 0.0)).rgb, blB);
+  let nd = tone(textureSample(tex, samp, bUV - vec2<f32>(0.0, stp.y)).rgb, blB);
+  let nu = tone(textureSample(tex, samp, bUV + vec2<f32>(0.0, stp.y)).rgb, blB);
+  var e = max(max(distance(blocky, nl), distance(blocky, nr)),
+              max(distance(blocky, nd), distance(blocky, nu)));
+  let k = select(smoothstep(0.085, 0.26, e), 0.0, U.grade.z < 1.5);
+
+  var c = mix(sharp, blocky, k);
   let q = i.uv - 0.5;
-  c *= 1.0 - dot(q, q) * 0.62;
+  c *= 1.0 - dot(q, q) * 0.42;
   // damage flash toward madder red
   c = mix(c, vec3<f32>(0.62, 0.09, 0.07), clamp(U.misc2.w, 0.0, 1.0) * 0.55);
 
-  // ---- period grade: static, ordered dither, then a hard palette step
-  let n = hash21(vec2<f32>(tc) + vec2<f32>(fract(U.cam.w * 7.3) * 311.0, fract(U.cam.w * 5.1) * 197.0));
-  c += (n - 0.5) * U.grade.y;
-  let L = max(U.grade.x, 1.0);
+  // Static and the hard palette step ride the same edge mask, so flat areas
+  // keep full precision and never fizz.
+  let bi = vec2<i32>(cell);
+  let n = hash21(vec2<f32>(bi) + vec2<f32>(fract(U.cam.w * 7.3) * 311.0, fract(U.cam.w * 5.1) * 197.0));
+  c += (n - 0.5) * U.grade.y * k;
+  let L = mix(255.0, max(U.grade.x, 2.0), k);
   c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-  c = floor(c * L + bayer4(tc) * U.grade.z) / L;
+  c = floor(c * L + bayer4(bi)) / L;
   return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 `;
@@ -493,17 +536,15 @@ function pack(p, n, idx) {
 // ============================ renderer ======================================
 const MAXI = 8192, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
 
-// Scene resolutions the `V` key cycles through. 200 lines is the period target
-// (Magic Carpet ran at 320x200); 0 means render at the display's own resolution.
-export const PIXEL_MODES = [200, 288, 432, 0];
+// Edge-pixel block sizes the `V` key cycles through, in CSS pixels. 0 is off.
+export const BLOCK_MODES = [4, 3, 6, 0];
 
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas; this.ok = false; this.bloom = true;
-    this.pixelHeight = PIXEL_MODES[0];
-    this.levels = 22;      // palette steps per channel
-    this.grain = 0.055;    // animated static
-    this.dither = 1.0;     // ordered-dither amplitude, in quantisation steps
+    this.block = BLOCK_MODES[0];
+    this.levels = 20;      // palette steps per channel, at edges only
+    this.grain = 0.05;     // animated static, at edges only
     this.far = 1300;       // draw range; fog closes off completely by here
   }
 
@@ -664,23 +705,19 @@ export class Renderer {
     return this;
   }
 
-  // cw/ch = the canvas itself; w/h = the low-res buffer the scene is drawn into.
   resize() {
     const d = this.device, dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cw = Math.max(2, Math.floor(this.canvas.clientWidth * dpr));
-    const ch = Math.max(2, Math.floor(this.canvas.clientHeight * dpr));
-    const ph = this.pixelHeight;
-    const h = ph > 0 ? Math.min(ph, ch) : ch;
-    const w = ph > 0 ? Math.max(2, Math.round(h * cw / ch)) : cw;
-    if (this.cw === cw && this.ch === ch && this.w === w && this.h === h) return;
-    this.cw = cw; this.ch = ch; this.w = w; this.h = h;
-    this.canvas.width = cw; this.canvas.height = ch;
+    const w = Math.max(2, Math.floor(this.canvas.clientWidth * dpr));
+    const h = Math.max(2, Math.floor(this.canvas.clientHeight * dpr));
+    this.dpr = dpr;
+    if (this.w === w && this.h === h) return;
+    this.cw = w; this.ch = h; this.w = w; this.h = h;
+    this.canvas.width = w; this.canvas.height = h;
     for (const t of [this.hdrTex, this.depthTex, this.bloomA, this.bloomB]) t && t.destroy();
     const HDR = 'rgba16float';
     this.hdrTex = d.createTexture({ size: [w, h], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.depthTex = d.createTexture({ size: [w, h], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
-    // half of an already-small buffer: a quarter would blur into mush
-    const bw = Math.max(1, w >> 1), bh = Math.max(1, h >> 1);
+    const bw = Math.max(1, w >> 2), bh = Math.max(1, h >> 2);
     this.bloomA = d.createTexture({ size: [bw, bh], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.bloomB = d.createTexture({ size: [bw, bh], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     const mkBG = (a, b) => d.createBindGroup({ layout: this.bglP, entries: [
@@ -703,10 +740,13 @@ export class Renderer {
       { width: W, height: rows, depthOrArrayLayers: 1 });
   }
 
-  // instances arrive as one flat wasm array; split by shape id (field 11)
-  partition(src, n) {
+  // Instances arrive as one flat wasm array; split by shape id (field 11).
+  // [skipLo, skipHi) is dropped entirely — the player's own carpet, in first
+  // person, where it would otherwise sit across the bottom of the screen.
+  partition(src, n, skipLo, skipHi) {
     const c = [0, 0, 0], dst = this.instData;
     for (let i = 0; i < n; i++) {
+      if (i >= skipLo && i < skipHi) continue;
       const o = i * 12;
       let s = src[o + 11] | 0; if (s < 0 || s > 2) s = 0;
       const k = c[s]; if (k >= MAXI) continue;
@@ -741,10 +781,11 @@ export class Renderer {
       if (src) { u[s4] = src[0]; u[s4 + 1] = src[1]; u[s4 + 2] = src[2]; u[s4 + 3] = src[3]; }
       else { u[s4] = 0; u[s4 + 1] = 0; u[s4 + 2] = 0; u[s4 + 3] = 0; }
     }
-    u[64] = this.levels; u[65] = this.grain; u[66] = this.dither; u[67] = this.far;
+    u[64] = this.levels; u[65] = this.grain;
+    u[66] = this.block > 0 ? this.block * this.dpr : 0; u[67] = this.far;
     d.queue.writeBuffer(this.uniBuf, 0, u.buffer, 0, 272);
 
-    const counts = this.partition(instSrc, instN);
+    const counts = this.partition(instSrc, instN, opts.skipLo | 0, opts.skipHi | 0);
     if (partN > 0) d.queue.writeBuffer(this.partBuf, 0, parts, 0, partN * 8);
 
     const enc = d.createCommandEncoder();
