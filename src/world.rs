@@ -30,7 +30,8 @@ pub const MAX_MAP_BLIPS: usize = 2048;
 pub const MAX_SOUND_CUES: usize = 128;
 pub const MAX_WIZARDS: usize = 3;
 /// Floats per render instance: position, scale, colour, yaw, glow, shape.
-pub const INSTANCE_STRIDE: usize = 12;
+// position(3) size(3) colour(3) yaw/pitch/roll(3) glow shape
+pub const INSTANCE_STRIDE: usize = 14;
 /// Floats per particle: position, size, colour, alpha.
 pub const PARTICLE_STRIDE: usize = 8;
 pub const MAP_BLIP_STRIDE: usize = 4;

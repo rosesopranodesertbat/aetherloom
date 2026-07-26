@@ -350,10 +350,27 @@ pub enum Shape {
     /// A flat ground disc, drawn by its own darkening pass. Only the red
     /// channel is read, as the shadow's strength.
     Shadow,
+    /// Round shaft along Y. Tower drums, trunks, limbs, poles, barrels.
+    Cylinder,
+    /// Box tapering to 45% at the top. Tower shafts, thighs, tree trunks —
+    /// anything that should not read as a packing crate.
+    Frustum,
+    /// Triangular prism ridged along Z. Roofs, blades, buttresses, fins.
+    Wedge,
+    /// A palm leaf: rib, drooping curve and cut leaflets, all in the mesh.
+    /// Seven of these make a crown that a stack of boxes never will.
+    Frond,
+    /// An irregular faceted lump. Flat-shaded, so it catches light as stone
+    /// rather than as a billiard ball.
+    Boulder,
+    /// A whole crenellated parapet ring in one instance — merlons, embrasures
+    /// and a walkway lip. Battlements built merlon-by-merlon cost forty
+    /// instances a tower and still look like a row of boxes.
+    Crenels,
 }
 
 impl Shape {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 10;
     #[inline]
     pub fn as_f32(self) -> f32 {
         match self {
@@ -361,6 +378,12 @@ impl Shape {
             Shape::Sphere => 1.0,
             Shape::Cone => 2.0,
             Shape::Shadow => 3.0,
+            Shape::Cylinder => 4.0,
+            Shape::Frustum => 5.0,
+            Shape::Wedge => 6.0,
+            Shape::Frond => 7.0,
+            Shape::Boulder => 8.0,
+            Shape::Crenels => 9.0,
         }
     }
 }

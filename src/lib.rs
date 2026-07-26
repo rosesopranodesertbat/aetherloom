@@ -213,6 +213,47 @@ pub extern "C" fn evtCount() -> i32 {
     WORLD.lock().render.sound_cue_count as i32
 }
 
+// ---- buffer layout ---------------------------------------------------------
+// JS sizes its typed-array views from these rather than from copied numbers.
+// A stale literal on the JS side silently truncates the frame — instances past
+// the view are simulated, written, and never uploaded.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn instCapacity() -> i32 {
+    MAX_INSTANCES as i32
+}
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn instStride() -> i32 {
+    INSTANCE_STRIDE as i32
+}
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn partCapacity() -> i32 {
+    MAX_PARTICLES as i32
+}
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn partStride() -> i32 {
+    PARTICLE_STRIDE as i32
+}
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn mapCapacity() -> i32 {
+    MAX_MAP_BLIPS as i32
+}
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn shapeCount() -> i32 {
+    Shape::COUNT as i32
+}
+
 // ---- terrain upload band ---------------------------------------------------
 #[allow(unsafe_code)]
 #[no_mangle]

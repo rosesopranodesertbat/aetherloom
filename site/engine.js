@@ -288,7 +288,8 @@ struct ShOut {
   @location(2) ipos : vec3<f32>,
   @location(3) iscl : vec3<f32>,
   @location(4) icol : vec3<f32>,
-  @location(5) iext : vec3<f32>
+  @location(5) irot : vec3<f32>,
+  @location(6) iext : vec2<f32>
 ) -> ShOut {
   var o: ShOut;
   o.disc = vpos.xz;
@@ -318,25 +319,39 @@ struct SOut {
   @location(2) col  : vec3<f32>,
   @location(3) glow : f32,
 };
+// Yaw about Y, then pitch about X, then roll about Z, in the instance's own
+// space. Yaw alone leaves every piece of every model square to the world axes,
+// which is most of why parts assembled from prototypes read as a stack of
+// blocks rather than as a creature.
+fn instanceBasis(rot: vec3<f32>) -> mat3x3<f32> {
+  let cy = cos(rot.x); let sy = sin(rot.x);
+  let cp = cos(rot.y); let sp = sin(rot.y);
+  let cr = cos(rot.z); let sr = sin(rot.z);
+  // note the yaw convention: screen-right is (-cos, 0, sin), so the Y rotation
+  // is transposed relative to the textbook form. Changing it silently mirrors
+  // every model in the game.
+  let yawM   = mat3x3<f32>(vec3<f32>( cy, 0.0, -sy), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>( sy, 0.0,  cy));
+  let pitchM = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0,  cp,  sp), vec3<f32>(0.0, -sp,  cp));
+  let rollM  = mat3x3<f32>(vec3<f32>( cr,  sr, 0.0), vec3<f32>(-sr,  cr, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+  return yawM * pitchM * rollM;
+}
 @vertex fn solidVS(
   @location(0) vpos : vec3<f32>,
   @location(1) vnrm : vec3<f32>,
   @location(2) ipos : vec3<f32>,
   @location(3) iscl : vec3<f32>,
   @location(4) icol : vec3<f32>,
-  @location(5) iext : vec3<f32>   // yaw, glow, shape
+  @location(5) irot : vec3<f32>,  // yaw, pitch, roll
+  @location(6) iext : vec2<f32>   // glow, shape
 ) -> SOut {
-  let cy = cos(iext.x); let sy = sin(iext.x);
-  let sp = vpos * iscl * 0.5;
-  let rp = vec3<f32>(sp.x * cy + sp.z * sy, sp.y, -sp.x * sy + sp.z * cy);
+  let basis = instanceBasis(irot);
   // inverse-scale in object space *before* rotating, or non-uniform scale skews the normal
   let ns = vnrm / max(iscl, vec3<f32>(0.001));
-  let rn = vec3<f32>(ns.x * cy + ns.z * sy, ns.y, -ns.x * sy + ns.z * cy);
   var o: SOut;
-  o.wp = ipos + rp;
-  o.nrm = normalize(rn);
+  o.wp = ipos + basis * (vpos * iscl * 0.5);
+  o.nrm = normalize(basis * ns);
   o.col = icol;
-  o.glow = iext.y;
+  o.glow = iext.x;
   o.pos = U.vp * vec4<f32>(o.wp, 1.0);
   return o;
 }
@@ -499,10 +514,12 @@ fn tone(scene: vec3<f32>, bloom: vec3<f32>) -> vec3<f32> {
 
 
 // ============================ renderer ======================================
-const MAXI = 20480, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;   // MAXI must match MAX_INSTANCES in the core
+// Instance and particle layout is read from the core at construction — see
+// `this.maxInst` / `this.instFloats` below. Nothing here may hard-code it.
+const PART_STRIDE = 32;
 // Prototype meshes, in the order the core numbers them: cuboid, sphere, cone,
 // then the ground-shadow disc, which is drawn by its own pass.
-const SHAPES = [0, 1, 2, 3], SHADOW_SHAPE = 3;
+const SHADOW_SHAPE = 3;
 
 export class Renderer {
   constructor(canvas, sim) {
@@ -538,6 +555,12 @@ export class Renderer {
     // Prototypes are generated in the core and read straight out of its
     // linear memory — nothing is built or copied on the JS side.
     this.sim.buildMeshes();
+    // Prototype count, instance capacity and instance stride all come from the
+    // core. Duplicating any of them here is how a frame ends up half-uploaded.
+    this.shapeIds = Array.from({ length: this.sim.shapeCount() }, (_, i) => i);
+    this.maxInst = this.sim.instCapacity();
+    this.instFloats = this.sim.instStride();
+    this.instStride = this.instFloats * 4;
     const mem = this.sim.memory.buffer;
     const mk = (s) => {
       const verts = new Float32Array(mem, this.sim.meshVertPtr(s), this.sim.meshVertFloats(s));
@@ -549,7 +572,7 @@ export class Renderer {
       d.queue.writeBuffer(ib, 0, idx);
       return { vb, ib, count: idx.length };
     };
-    this.shapes = SHAPES.map(mk);
+    this.shapes = this.shapeIds.map(mk);
     // 32 floats: view-projection, then its inverse
     this.camM = new Float32Array(mem, this.sim.camera(1.0, 1.0, 1, 2, 0, 0, 0, 0, 0, 1, 0, 1, 0), 32);
 
@@ -583,9 +606,9 @@ export class Renderer {
     });
 
     // ---- instance / particle buffers
-    this.instBuf = SHAPES.map(() => d.createBuffer({ size: MAXI * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
-    this.instData = SHAPES.map(() => new Float32Array(MAXI * 12));
-    this.partBuf = d.createBuffer({ size: MAXPT * PART_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    this.instBuf = this.shapeIds.map(() => d.createBuffer({ size: this.maxInst * this.instStride, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
+    this.instData = this.shapeIds.map(() => new Float32Array(this.maxInst * this.instFloats));
+    this.partBuf = d.createBuffer({ size: this.sim.partCapacity() * PART_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 
     // ---- bind group layouts
     const bglU = d.createBindGroupLayout({ entries: [
@@ -628,11 +651,12 @@ export class Renderer {
         { arrayStride: 24, attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x3' }] },
-        { arrayStride: INST_STRIDE, stepMode: 'instance', attributes: [
+        { arrayStride: this.instStride, stepMode: 'instance', attributes: [
           { shaderLocation: 2, offset: 0, format: 'float32x3' },
           { shaderLocation: 3, offset: 12, format: 'float32x3' },
           { shaderLocation: 4, offset: 24, format: 'float32x3' },
-          { shaderLocation: 5, offset: 36, format: 'float32x3' }] }] },
+          { shaderLocation: 5, offset: 36, format: 'float32x3' },
+          { shaderLocation: 6, offset: 48, format: 'float32x2' }] }] },
       fragment: { module: mod, entryPoint: 'solidFS', targets: [{ format: HDR }] },
       primitive: { topology: 'triangle-list', cullMode: 'back' },
       depthStencil: dss(true, 'less'), multisample: { count: this.sampleCount }
@@ -646,11 +670,12 @@ export class Renderer {
         { arrayStride: 24, attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x3' }] },
-        { arrayStride: INST_STRIDE, stepMode: 'instance', attributes: [
+        { arrayStride: this.instStride, stepMode: 'instance', attributes: [
           { shaderLocation: 2, offset: 0, format: 'float32x3' },
           { shaderLocation: 3, offset: 12, format: 'float32x3' },
           { shaderLocation: 4, offset: 24, format: 'float32x3' },
-          { shaderLocation: 5, offset: 36, format: 'float32x3' }] }] },
+          { shaderLocation: 5, offset: 36, format: 'float32x3' },
+          { shaderLocation: 6, offset: 48, format: 'float32x2' }] }] },
       fragment: { module: mod, entryPoint: 'shadowFS', targets: [{ format: HDR, blend: {
         color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' },
         alpha: { srcFactor: 'zero', dstFactor: 'one' } } }] },
@@ -737,20 +762,17 @@ export class Renderer {
   // [skipLo, skipHi) is dropped entirely — the player's own carpet, in first
   // person, where it would otherwise sit across the bottom of the screen.
   partition(src, n, skipLo, skipHi) {
-    const c = SHAPES.map(() => 0), dst = this.instData;
+    const c = this.shapeIds.map(() => 0), dst = this.instData, FLOATS = this.instFloats;
     for (let i = 0; i < n; i++) {
       if (i >= skipLo && i < skipHi) continue;
-      const o = i * 12;
-      let s = src[o + 11] | 0; if (s < 0 || s >= SHAPES.length) s = 0;
-      const k = c[s]; if (k >= MAXI) continue;
-      const t = dst[s], p = k * 12;
-      t[p] = src[o]; t[p + 1] = src[o + 1]; t[p + 2] = src[o + 2];
-      t[p + 3] = src[o + 3]; t[p + 4] = src[o + 4]; t[p + 5] = src[o + 5];
-      t[p + 6] = src[o + 6]; t[p + 7] = src[o + 7]; t[p + 8] = src[o + 8];
-      t[p + 9] = src[o + 9]; t[p + 10] = src[o + 10]; t[p + 11] = 0;
+      const o = i * FLOATS;
+      let s = src[o + FLOATS - 1] | 0; if (s < 0 || s >= dst.length) s = 0;
+      const k = c[s]; if (k >= this.maxInst) continue;
+      const t = dst[s], p = k * FLOATS;
+      for (let f = 0; f < FLOATS; f++) t[p + f] = src[o + f];
       c[s]++;
     }
-    for (let s = 0; s < SHAPES.length; s++) if (c[s]) this.device.queue.writeBuffer(this.instBuf[s], 0, this.instData[s], 0, c[s] * 12);
+    for (let s = 0; s < c.length; s++) if (c[s]) this.device.queue.writeBuffer(this.instBuf[s], 0, this.instData[s], 0, c[s] * FLOATS);
     return c;
   }
 
@@ -791,7 +813,7 @@ export class Renderer {
     pass.setVertexBuffer(0, this.gridVB); pass.setIndexBuffer(this.gridIB, 'uint32');
     pass.drawIndexed(this.gridCount);
     pass.setPipeline(this.pSolid);
-    for (let s = 0; s < SHAPES.length; s++) {
+    for (let s = 0; s < counts.length; s++) {
       if (s === SHADOW_SHAPE || !counts[s]) continue;
       const sh = this.shapes[s];
       pass.setVertexBuffer(0, sh.vb); pass.setVertexBuffer(1, this.instBuf[s]);

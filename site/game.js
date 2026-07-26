@@ -220,9 +220,11 @@ class Game {
       this._buf = m;
       this.H = new Float32Array(m, this.sim.heightPtr(), this.TW * this.TW);
       this.ST = new Float32Array(m, this.sim.statePtr(), 128);
-      this.INST = new Float32Array(m, this.sim.instPtr(), 12288 * 12);
-      this.PART = new Float32Array(m, this.sim.partPtr(), 4096 * 8);
-      this.MAP = new Float32Array(m, this.sim.mapPtr(), 2048 * 4);
+      // sized from the core, never from a copied literal: a view that is short
+      // by one instance drops the tail of every frame and says nothing
+      this.INST = new Float32Array(m, this.sim.instPtr(), this.sim.instCapacity() * this.sim.instStride());
+      this.PART = new Float32Array(m, this.sim.partPtr(), this.sim.partCapacity() * this.sim.partStride());
+      this.MAP = new Float32Array(m, this.sim.mapPtr(), this.sim.mapCapacity() * 4);
       this.EVTB = new Float32Array(m, this.sim.evtPtr(), 128 * 4);
     }
   }
