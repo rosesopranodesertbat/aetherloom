@@ -27,7 +27,6 @@ Requires **WebGPU**: Chrome/Edge 113+, Firefox 141+, Safari 18.2+.
 | Left click | cast the held spell |
 | `1`–`9` `0` `-` `=` | pick a spell · `Q`/`E` or wheel to cycle |
 | `C` | first-person ↔ chase view (first person hides your own carpet) |
-| `V` | edge pixel size — 4 · 3 · 6 px · off |
 | `P` pause · `M` mute · `B` bloom · `Shift+R` restart realm |
 
 ## How it plays
@@ -79,7 +78,7 @@ statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 ### Rendering
 
 - **Terrain** is a static 256×256 grid mesh displaced in the vertex shader from an `r32float` height texture, with normals from neighbour taps. Deforming the world means writing one dirty row-band per frame — the mesh never changes. `bytesPerRow` is 1024, so the 256-byte alignment rule is satisfied for free.
-- **Pixels live on the edges, not on everything.** The scene renders at full resolution and stays smooth across open sky, water and grass. In the composite pass each screen-space block compares itself against its four neighbours; where that contrast is high — a silhouette, a shoreline, the line between grass and rock, the rim of a cloud — the block collapses to a single flat colour and the animated static, 4×4 Bayer dither and 20-level quantise fade in with it. Everywhere else keeps full precision. Blanket low-res pixelation puts the same chunk size on a blank sky as on a tree, which reads as a broken display rather than an art style. `V` cycles 4 / 3 / 6 px / off.
+- **Pixels live on the edges, not on everything.** The scene renders at full resolution and stays smooth across open sky, water and grass. In the composite pass each screen-space block compares itself against its four neighbours; where that contrast is high — a silhouette, a shoreline, the line between grass and rock, the rim of a cloud — the block collapses to a single flat colour and the animated static, 4×4 Bayer dither and 20-level quantise fade in with it. Everywhere else keeps full precision. Blanket low-res pixelation puts the same chunk size on a blank sky as on a tree, which reads as a broken display rather than an art style. The 4px block is fixed — it is the art direction, not a setting.
 - HDR `rgba16float` target, threshold → separable blur bloom at quarter res, ACES tonemap, vignette.
 - **Draw range is deliberately short** (1300 units, on a 1024-unit map). Haze is exponential up close and then closed off hard by a `smoothstep` on `dist / far`, so the world always reaches full sky before the far plane and the clipped edge of the sea is never visible. The haze colour is `skyColor()` evaluated with the ray clamped to the horizon — a downward ray through thick air ends in bright air, not in the dark band the sky puts below the horizon — and the sky holds that same colour flat at and below the horizon, so the join is seamless wherever the world runs out.
 - Everything solid is instanced from three procedural prototypes (box, sphere, cone) partitioned by shape each frame; creatures are assembled from a few parts each.

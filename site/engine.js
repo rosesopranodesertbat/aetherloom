@@ -393,7 +393,7 @@ fn tone(scene: vec3<f32>, bloom: vec3<f32>) -> vec3<f32> {
   let nu = tone(textureSample(tex, samp, bUV + vec2<f32>(0.0, stp.y)).rgb, blB);
   var e = max(max(distance(blocky, nl), distance(blocky, nr)),
               max(distance(blocky, nd), distance(blocky, nu)));
-  let k = select(smoothstep(0.085, 0.26, e), 0.0, U.grade.z < 1.5);
+  let k = smoothstep(0.085, 0.26, e);
 
   var c = mix(sharp, blocky, k);
   let q = i.uv - 0.5;
@@ -536,13 +536,10 @@ function pack(p, n, idx) {
 // ============================ renderer ======================================
 const MAXI = 8192, MAXPT = 4096, INST_STRIDE = 48, PART_STRIDE = 32;
 
-// Edge-pixel block sizes the `V` key cycles through, in CSS pixels. 0 is off.
-export const BLOCK_MODES = [4, 3, 6, 0];
-
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas; this.ok = false; this.bloom = true;
-    this.block = BLOCK_MODES[0];
+    this.block = 4;        // edge pixel size in CSS px — part of the look, fixed
     this.levels = 20;      // palette steps per channel, at edges only
     this.grain = 0.05;     // animated static, at edges only
     this.far = 1300;       // draw range; fog closes off completely by here
@@ -782,7 +779,7 @@ export class Renderer {
       else { u[s4] = 0; u[s4 + 1] = 0; u[s4 + 2] = 0; u[s4 + 3] = 0; }
     }
     u[64] = this.levels; u[65] = this.grain;
-    u[66] = this.block > 0 ? this.block * this.dpr : 0; u[67] = this.far;
+    u[66] = this.block * this.dpr; u[67] = this.far;
     d.queue.writeBuffer(this.uniBuf, 0, u.buffer, 0, 272);
 
     const counts = this.partition(instSrc, instN, opts.skipLo | 0, opts.skipHi | 0);

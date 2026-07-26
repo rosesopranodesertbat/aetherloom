@@ -2,7 +2,7 @@
 // AETHERLOOM — game shell: input, HUD, audio, level flow.
 // Simulation = sim.wasm (freestanding WebAssembly). Rendering = engine.js (WebGPU).
 // ============================================================================
-import { Renderer, BLOCK_MODES } from './engine.js';
+import { Renderer } from './engine.js';
 
 // ------------------------------------------------------------------ pixel icons
 // Each icon is an 8x8 grid, one character per pixel, '.' transparent. Rendered
@@ -268,11 +268,6 @@ class Game {
       if (k === 'c') this.chase = !this.chase;
       if (k === 'm') { this.audio.on = !this.audio.on; this.flash(this.audio.on ? 'Sound on' : 'Sound off'); }
       if (k === 'b') { this.r.bloom = !this.r.bloom; this.flash(this.r.bloom ? 'Bloom on' : 'Bloom off'); }
-      if (k === 'v') {
-        const n = (BLOCK_MODES.indexOf(this.r.block) + 1) % BLOCK_MODES.length;
-        this.r.block = BLOCK_MODES[n];
-        this.flash(this.r.block ? `Edge pixels ${this.r.block}px` : 'Edge pixels off');
-      }
       if (k === 'p' || k === 'escape') this.setPaused(!this.paused);
       if (k === 'r' && e.shiftKey) this.startLevel(this.level);
       if (k === ' ') e.preventDefault();
