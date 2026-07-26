@@ -104,20 +104,38 @@ statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 
 ## The simulation core
 
-`src/lib.rs` is `#![no_std]` Rust built for `wasm32-unknown-unknown` as a `cdylib`. There is no allocator, no panic runtime and no host interface — the only dependency is [`libm`](https://crates.io/crates/libm), because `core` has arithmetic but no `sin`/`cos`/`atan2`, and linking `std` would drag in a runtime the module has no use for. `build.mjs` asserts the output has zero imports; `game.js` instantiates with an empty import object, so a single stray import would break instantiation outright.
+`src/lib.rs` and its modules are `#![no_std]` Rust built for `wasm32-unknown-unknown` as a `cdylib`. No allocator, no panic runtime, no host interface. `libm` supplies the transcendentals `core` lacks, and `spin` provides a lock so the world can live in a `static` without unsafe. `build.mjs` fails the build if the output gains a single import.
 
-State is a set of `static mut` arrays — structure-of-arrays, fixed capacity, `.bss`-allocated. The exports hand JS raw offsets into linear memory and JS maps them once as `Float32Array` views. Nothing is marshalled and nothing is copied per frame.
-
-```rust
-static mut HEIGHT: [f32; 320 * 320] = [0.0; 320 * 320];
-
-#[no_mangle] pub extern "C" fn heightPtr() -> usize { unsafe { HEIGHT.as_ptr() as usize } }
-#[no_mangle] pub extern "C" fn step(dt: f32) { /* ... */ }
+```
+src/
+  lib.rs        crate attributes, the world singleton, and the exported ABI
+  types.rs      creature kinds, spells, factions, shapes, blips, cues
+  world.rs      state layout, the RNG, and shared operations
+  terrain.rs    heightmap sampling, noise, deformation, realm generation
+  session.rs    realm setup and the per-frame update order
+  spells.rs     casting: one function per spell
+  creatures.rs  creature AI, projectiles, orbs, particles
+  wizards.rs    player flight and the rival AI
+  render.rs     instance and particle buffers, meshes, minimap, state block
 ```
 
-The exports are camelCase because `game.js` calls them by name, hence the `#![allow(non_snake_case)]` at the top of the file.
+### No unsafe
 
-A note on wrapping arithmetic: the value-noise hash multiplies deliberately overflow. Rust panics on overflow in debug builds and the original core wrapped silently, so those sites use `wrapping_mul`/`wrapping_add` explicitly — without them the same seed produces different terrain.
+The crate is `#![deny(unsafe_code)]` and contains **no unsafe blocks at all**. State lives in a `spin::Mutex<World>`; each exported function takes the lock once and passes `&mut World` down, so every line of logic is ordinary safe Rust. The only exemptions are the `#[no_mangle]` attributes on the ABI itself, which modern Rust classes as unsafe because an unmangled symbol can collide at link time — unavoidable for a module that has to expose named exports.
+
+`World::new()` is deliberately all zeros. A single non-zero field anywhere in it moves two megabytes of arrays out of `.bss` and into the wasm as initialised data — that mistake took the module from 94 KB to 1.8 MB. The RNG therefore starts at zero and repairs itself on first use.
+
+### Things that will bite
+
+- **Wrapping arithmetic.** The value-noise hash multiplies deliberately overflow. Rust panics on overflow in debug where the original wrapped silently, so those sites use `wrapping_mul`/`wrapping_add`. Without them the same seed grows different terrain.
+- **Short-circuit order is load-bearing.** Random draws inside a condition must stay inside it. Hoisting the rival's aggression roll out of its `&&` chain consumed a number on frames where the rival was never going to engage, which shifted the entire sequence and changed the world. Every RNG call site is written to draw exactly when the original did.
+
+```rust
+static WORLD: spin::Mutex<World> = spin::Mutex::new(World::new());
+
+#[allow(unsafe_code)] #[no_mangle]
+pub extern "C" fn step(dt: f32) { WORLD.lock().advance(dt); }
+```
 
 ## Build
 

@@ -14,6 +14,10 @@ path       = "src/lib.rs"
 # would drag a runtime we have no use for — the module must stay importless.
 [dependencies]
 libm = { version = "0.2", default-features = false }
+# Safe global state without an allocator. wasm32-unknown-unknown is
+# single-threaded so the lock never contends; it exists so the world can be
+# reached from a `static` without a single unsafe block.
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 
 [profile.release]
 opt-level     = 3
