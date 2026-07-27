@@ -5,7 +5,7 @@
 
 use super::*;
 
-pub(crate) const PREVIEW_SCENE_COUNT: i32 = 29;
+pub(crate) const PREVIEW_SCENE_COUNT: i32 = 30;
 pub(crate) const PREVIEW_VARIANT_COUNT: i32 = 8;
 
 const PREVIEW_Y: f32 = 512.0;
@@ -78,6 +78,8 @@ impl World {
             27 => self.draw_preview_effect(7, variant, origin),
             // 28: Dragon fire
             28 => self.draw_preview_effect(8, variant, origin),
+            // 29: Fireball impact against an unflashed enemy
+            29 => self.draw_preview_fireball_impact(variant, origin),
             _ => {}
         }
 
@@ -85,7 +87,8 @@ impl World {
         self.render.instance_count as i32
     }
 
-    /// Derive one camera target from the geometry that was actually emitted.
+    /// Derive one camera target from the geometry and particles actually
+    /// emitted.
     ///
     /// Prototype meshes live inside the -1..1 cube and the shader applies
     /// half the instance size. Half the size-vector diagonal is therefore a
@@ -93,7 +96,7 @@ impl World {
     /// taken from the extrema of those spheres, then the final radius encloses
     /// every instance sphere with a small camera-framing margin.
     fn derive_preview_focus(&mut self) {
-        if self.render.instance_count == 0 {
+        if self.render.instance_count == 0 && self.render.particle_count == 0 {
             return;
         }
 
@@ -107,6 +110,17 @@ impl World {
             let extent = 0.5 * length3(size_x, size_y, size_z);
             for axis in 0..3 {
                 let position = self.render.instances[base + axis];
+                lower[axis] = min(lower[axis], position - extent);
+                upper[axis] = max(upper[axis], position + extent);
+            }
+        }
+        // Particle quads face the camera. Their corner is sqrt(2) * size from
+        // the centre, which is a conservative orientation-independent bound.
+        for particle in 0..self.render.particle_count {
+            let base = particle * PARTICLE_STRIDE;
+            let extent = self.render.particles[base + 3] * 1.414_214;
+            for axis in 0..3 {
+                let position = self.render.particles[base + axis];
                 lower[axis] = min(lower[axis], position - extent);
                 upper[axis] = max(upper[axis], position + extent);
             }
@@ -127,6 +141,17 @@ impl World {
             let size_y = self.render.instances[base + 4];
             let size_z = self.render.instances[base + 5];
             let extent = 0.5 * length3(size_x, size_y, size_z);
+            radius = max(
+                radius,
+                length3(offset_x, offset_y, offset_z) + extent,
+            );
+        }
+        for particle in 0..self.render.particle_count {
+            let base = particle * PARTICLE_STRIDE;
+            let offset_x = self.render.particles[base] - centre[0];
+            let offset_y = self.render.particles[base + 1] - centre[1];
+            let offset_z = self.render.particles[base + 2] - centre[2];
+            let extent = self.render.particles[base + 3] * 1.414_214;
             radius = max(
                 radius,
                 length3(offset_x, offset_y, offset_z) + extent,
@@ -163,7 +188,6 @@ impl World {
             facing_sin: sin(facing),
             facing_cos: cos(facing),
             phase: variant as f32 * 0.71 + 0.35,
-            hurt: 0.0,
             faction,
             detail: BodyDetail::Full,
             slot: 10_000 + variant as usize,
@@ -180,6 +204,79 @@ impl World {
             CreatureKind::Villager => self.draw_villager(&body),
             CreatureKind::Soldier => self.draw_soldier(&body),
         }
+    }
 
+    /// Show the real contact-particle recipe around a normal, unflashed enemy.
+    ///
+    /// This writes the render particle buffer directly, leaving the live
+    /// particle ring and the realm RNG untouched.
+    fn draw_preview_fireball_impact(&mut self, variant: i32, origin: [f32; 3]) {
+        self.draw_preview_creature(CreatureKind::Troll, variant, origin);
+
+        let angle =
+            variant as f32 * core::f32::consts::TAU / PREVIEW_VARIANT_COUNT as f32;
+        let outward = [sin(angle), 0.0, cos(angle)];
+        let impact = [
+            origin[0] + outward[0] * 7.0,
+            origin[1] + 13.0,
+            origin[2] + outward[2] * 7.0,
+        ];
+        let incoming = [-outward[0] * 70.0, -5.0, -outward[2] * 70.0];
+        let kind = if variant & 1 == 0 {
+            ProjectileKind::Firebolt
+        } else {
+            ProjectileKind::DragonFire
+        };
+        let mut rng = Rng::new();
+        rng.reseed(0x4649_5245 ^ (variant as u32).wrapping_mul(0x9e37_79b9));
+        let mut particles = [ParticleSpec::ZERO; MAX_FIREBALL_IMPACT_PARTICLES];
+        let count =
+            build_fireball_impact_particles(&mut rng, impact, incoming, kind, &mut particles);
+        let age = 0.095 + (variant % 3) as f32 * 0.012;
+        for particle in &particles[..count] {
+            self.push_preview_particle(*particle, age);
+        }
+    }
+
+    /// Advance one particle exactly like the fixed-step gameplay integrator,
+    /// then pack it into the ordinary eight-float render ABI.
+    fn push_preview_particle(&mut self, mut particle: ParticleSpec, age: f32) {
+        let initial_life = particle.life;
+        let mut elapsed = 0.0;
+        for _ in 0..8 {
+            let dt = min(0.05, age - elapsed);
+            if dt <= 0.0 {
+                break;
+            }
+            particle.life -= dt;
+            if particle.life <= 0.0 {
+                return;
+            }
+            particle.velocity[1] += particle.gravity * dt;
+            let retained = max(1.0 - particle.drag * dt, 0.0);
+            particle.velocity[0] *= retained;
+            particle.velocity[1] *= retained;
+            particle.velocity[2] *= retained;
+            particle.position[0] += particle.velocity[0] * dt;
+            particle.position[1] += particle.velocity[1] * dt;
+            particle.position[2] += particle.velocity[2] * dt;
+            elapsed += dt;
+        }
+
+        if self.render.particle_count >= MAX_PARTICLES {
+            return;
+        }
+        let remaining = particle.life / initial_life;
+        let base = self.render.particle_count * PARTICLE_STRIDE;
+        self.render.particles[base] = particle.position[0];
+        self.render.particles[base + 1] = particle.position[1];
+        self.render.particles[base + 2] = particle.position[2];
+        self.render.particles[base + 3] =
+            particle.size * (0.35 + remaining * 0.9);
+        self.render.particles[base + 4] = particle.colour[0];
+        self.render.particles[base + 5] = particle.colour[1];
+        self.render.particles[base + 6] = particle.colour[2];
+        self.render.particles[base + 7] = remaining * remaining;
+        self.render.particle_count += 1;
     }
 }

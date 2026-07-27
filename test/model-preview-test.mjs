@@ -8,28 +8,41 @@ const SCENES = [
   'castle-tier-4', 'castle-tier-5', 'castle-tier-6', 'castle-ruin', 'palm',
   'boulder', 'burnt-stump', 'player-carpet', 'rival-carpet', 'unclaimed-mana-orb',
   'player-mana-orb', 'rival-mana-orb', 'firebolt', 'meteor', 'creature-bolt',
-  'dragon-fire',
+  'dragon-fire', 'fireball-impact',
 ];
 const VARIANTS = 8;
+const FIREBALL_IMPACT_SCENE = 29;
 const SIGNATURE_PATH = new URL('./model-preview-signatures.json', import.meta.url);
 const printSignatures = process.argv.includes('--print-signatures');
 
 const wasm = fs.readFileSync('site/sim.wasm');
 const sim = new WebAssembly.Instance(new WebAssembly.Module(wasm), {}).exports;
 assert.ok(fs.existsSync('site/models.html'), 'model gallery HTML is missing from the deployable site');
+const galleryHtml = fs.readFileSync('site/models.html', 'utf8');
 const gallerySource = fs.readFileSync('site/models.js', 'utf8');
 const gallerySlugs = [...gallerySource.matchAll(/\bslug:\s*'([^']+)'/g)].map((match) => match[1]);
 assert.deepEqual(gallerySlugs, SCENES, 'model gallery catalog/order differs from the preview ABI');
+assert.match(
+  gallerySource,
+  /\blabel:\s*'Fireball Impact'\s*,\s*slug:\s*'fireball-impact'/,
+  'scene 29 is missing its Fireball Impact gallery label',
+);
+assert.match(galleryHtml, /\bid="particleCount"/, 'model gallery does not display particle count');
 assert.equal(sim.previewSceneCount(), SCENES.length, 'preview scene catalog changed');
 assert.equal(sim.instStride(), 14, 'preview validator expects the documented 14-float instance ABI');
+assert.equal(sim.partStride(), 8, 'preview validator expects the documented 8-float particle ABI');
+assert.equal(SCENES[FIREBALL_IMPACT_SCENE], 'fireball-impact', 'fireball impact scene ABI moved');
 sim.buildMeshes();
 
 const capacity = sim.instCapacity();
 const stride = sim.instStride();
+const particleCapacity = sim.partCapacity();
+const particleStride = sim.partStride();
 const shapeCount = sim.shapeCount();
 const worldSize = sim.worldSize();
 const pairSignatures = [];
 const variantContentHashes = SCENES.map(() => new Set());
+const impactParticleHashes = new Set();
 
 function copyBytes(pointer, byteLength) {
   assert.ok(pointer >= 0 && pointer + byteLength <= sim.memory.buffer.byteLength,
@@ -44,11 +57,19 @@ function snapshot(scene, variant) {
   assert.ok(count > 0, `${SCENES[scene]} variant ${variant}: empty preview`);
   assert.ok(count < capacity,
     `${SCENES[scene]} variant ${variant}: filled the instance buffer and may be truncated`);
-  assert.equal(sim.partCount(), 0, `${SCENES[scene]} variant ${variant}: unexpected particles`);
+  const particleCount = sim.partCount();
+  if (scene === FIREBALL_IMPACT_SCENE) {
+    assert.ok(particleCount > 0, `${SCENES[scene]} variant ${variant}: missing impact particles`);
+  } else {
+    assert.equal(particleCount, 0, `${SCENES[scene]} variant ${variant}: unexpected particles`);
+  }
+  assert.ok(particleCount < particleCapacity,
+    `${SCENES[scene]} variant ${variant}: filled the particle buffer and may be truncated`);
 
   const instanceBytes = copyBytes(sim.instPtr(), count * stride * 4);
+  const particleBytes = copyBytes(sim.partPtr(), particleCount * particleStride * 4);
   const focusBytes = copyBytes(sim.previewFocusPtr(), 4 * 4);
-  return { count, instanceBytes, focusBytes };
+  return { count, particleCount, instanceBytes, particleBytes, focusBytes };
 }
 
 function validateSnapshot(scene, variant, shot) {
@@ -61,8 +82,13 @@ function validateSnapshot(scene, variant, shot) {
     shot.focusBytes.byteOffset,
     shot.focusBytes.byteOffset + shot.focusBytes.byteLength,
   ));
+  const particles = new Float32Array(shot.particleBytes.buffer.slice(
+    shot.particleBytes.byteOffset,
+    shot.particleBytes.byteOffset + shot.particleBytes.byteLength,
+  ));
 
   for (const value of values) assert.ok(Number.isFinite(value), `${label}: non-finite instance value`);
+  for (const value of particles) assert.ok(Number.isFinite(value), `${label}: non-finite particle value`);
   for (const value of focus) assert.ok(Number.isFinite(value), `${label}: non-finite focus value`);
   assert.ok(focus[3] > 0 && focus[3] <= worldSize, `${label}: invalid focus radius ${focus[3]}`);
   for (let axis = 0; axis < 3; axis++) {
@@ -105,6 +131,46 @@ function validateSnapshot(scene, variant, shot) {
     assert.ok(Number.isInteger(shape) && shape >= 0 && shape < shapeCount,
       `${label}: instance ${i} has illegal shape ${shape}`);
   }
+  for (let i = 0; i < shot.particleCount; i++) {
+    const base = i * particleStride;
+    for (let axis = 0; axis < 3; axis++) {
+      const position = particles[base + axis];
+      assert.ok(Math.abs(position) <= worldSize * 2,
+        `${label}: particle ${i} position axis ${axis} is out of bounds (${position})`);
+    }
+    const size = particles[base + 3];
+    assert.ok(size > 0 && size <= worldSize,
+      `${label}: particle ${i} size is invalid (${size})`);
+    // Particle vertices form a camera-facing square from -size..size on both
+    // axes, so its rotation-independent bounding radius is size * sqrt(2).
+    const extent = size * Math.SQRT2;
+    for (let axis = 0; axis < 3; axis++) {
+      lower[axis] = Math.min(lower[axis], particles[base + axis] - extent);
+      upper[axis] = Math.max(upper[axis], particles[base + axis] + extent);
+    }
+    for (let channel = 0; channel < 3; channel++) {
+      const colour = particles[base + 4 + channel];
+      assert.ok(colour >= 0 && colour <= 2,
+        `${label}: particle ${i} colour channel ${channel} is invalid (${colour})`);
+    }
+    const alpha = particles[base + 7];
+    assert.ok(alpha > 0 && alpha <= 1,
+      `${label}: particle ${i} alpha is invalid (${alpha})`);
+  }
+  if (shot.particleCount > 0) {
+    const positions = new Set();
+    const sizes = new Set();
+    const colours = new Set();
+    for (let i = 0; i < shot.particleCount; i++) {
+      const base = i * particleStride;
+      positions.add(`${particles[base]},${particles[base + 1]},${particles[base + 2]}`);
+      sizes.add(String(particles[base + 3]));
+      colours.add(`${particles[base + 4]},${particles[base + 5]},${particles[base + 6]}`);
+    }
+    assert.ok(positions.size >= 4, `${label}: impact particles lack spatial spread`);
+    assert.ok(sizes.size >= 2, `${label}: impact particles lack size layering`);
+    assert.ok(colours.size >= 2, `${label}: impact particles lack colour layering`);
+  }
 
   const expectedCentre = lower.map((value, axis) => (value + upper[axis]) * 0.5);
   for (let axis = 0; axis < 3; axis++) {
@@ -126,6 +192,15 @@ function validateSnapshot(scene, variant, shot) {
         values[base + 2] - focus[2],
       ) + halfDiagonal);
   }
+  for (let i = 0; i < shot.particleCount; i++) {
+    const base = i * particleStride;
+    requiredRadius = Math.max(requiredRadius,
+      Math.hypot(
+        particles[base] - focus[0],
+        particles[base + 1] - focus[1],
+        particles[base + 2] - focus[2],
+      ) + particles[base + 3] * Math.SQRT2);
+  }
   const expectedRadius = requiredRadius * 1.05;
   const radiusTolerance = Math.max(0.01, expectedRadius * 0.0001);
   assert.ok(Math.abs(focus[3] - expectedRadius) <= radiusTolerance,
@@ -137,11 +212,11 @@ function signature(scene, variant, shot) {
   header.writeUInt32LE(scene, 0);
   header.writeUInt32LE(variant, 4);
   header.writeUInt32LE(shot.count, 8);
-  return createHash('sha256')
+  const hash = createHash('sha256')
     .update(header)
-    .update(shot.instanceBytes)
-    .update(shot.focusBytes)
-    .digest('hex');
+    .update(shot.instanceBytes);
+  if (shot.particleCount > 0) hash.update(shot.particleBytes);
+  return hash.update(shot.focusBytes).digest('hex');
 }
 
 for (let scene = 0; scene < SCENES.length; scene++) {
@@ -153,20 +228,31 @@ for (let scene = 0; scene < SCENES.length; scene++) {
     const second = snapshot(scene, variant);
     assert.equal(second.count, first.count,
       `${SCENES[scene]} variant ${variant}: nondeterministic instance count`);
+    assert.equal(second.particleCount, first.particleCount,
+      `${SCENES[scene]} variant ${variant}: nondeterministic particle count`);
     assert.ok(second.instanceBytes.equals(first.instanceBytes),
       `${SCENES[scene]} variant ${variant}: nondeterministic instance bytes`);
+    assert.ok(second.particleBytes.equals(first.particleBytes),
+      `${SCENES[scene]} variant ${variant}: nondeterministic particle bytes`);
     assert.ok(second.focusBytes.equals(first.focusBytes),
       `${SCENES[scene]} variant ${variant}: nondeterministic focus`);
-    const contentHash = createHash('sha256')
-      .update(first.instanceBytes)
-      .update(first.focusBytes)
-      .digest('hex');
+    const contentDigest = createHash('sha256').update(first.instanceBytes);
+    if (first.particleCount > 0) contentDigest.update(first.particleBytes);
+    const contentHash = contentDigest.update(first.focusBytes).digest('hex');
     assert.ok(!variantContentHashes[scene].has(contentHash),
       `${SCENES[scene]} variant ${variant} duplicates an earlier variant`);
     variantContentHashes[scene].add(contentHash);
+    if (first.particleCount > 0) {
+      const particleHash = createHash('sha256').update(first.particleBytes).digest('hex');
+      assert.ok(!impactParticleHashes.has(particleHash),
+        `${SCENES[scene]} variant ${variant} duplicates an earlier particle effect`);
+      impactParticleHashes.add(particleHash);
+    }
     pairSignatures.push([first.count, signature(scene, variant, first)]);
   }
 }
+assert.equal(impactParticleHashes.size, VARIANTS,
+  'fireball-impact must expose one distinct particle effect per variant');
 
 assert.equal(sim.previewVariantCount(-1), 0, 'negative scene must have no variants');
 assert.equal(sim.previewVariantCount(SCENES.length), 0, 'past-end scene must have no variants');

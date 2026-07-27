@@ -150,8 +150,6 @@ pub struct Creatures {
     pub attack_cooldown: [f32; MAX_CREATURES],
     /// Animation phase, also used for bobbing and wing beats.
     pub phase: [f32; MAX_CREATURES],
-    /// Seconds left of the hit flash.
-    pub hurt_flash: [f32; MAX_CREATURES],
 }
 
 // ---- projectiles -----------------------------------------------------------
@@ -203,6 +201,35 @@ pub struct Particles {
     pub gravity: [f32; MAX_PARTICLES],
     pub next: usize,
 }
+
+/// One particle before it is inserted into the world's ring buffer.
+///
+/// Fireball impacts are generated as data first so gameplay and the
+/// deterministic visual-QA scene exercise the same composition.
+#[derive(Clone, Copy)]
+pub(crate) struct ParticleSpec {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub life: f32,
+    pub size: f32,
+    pub colour: [f32; 3],
+    pub gravity: f32,
+    pub drag: f32,
+}
+
+impl ParticleSpec {
+    pub const ZERO: ParticleSpec = ParticleSpec {
+        position: [0.0; 3],
+        velocity: [0.0; 3],
+        life: 0.0,
+        size: 0.0,
+        colour: [0.0; 3],
+        gravity: 0.0,
+        drag: 0.0,
+    };
+}
+
+pub(crate) const MAX_FIREBALL_IMPACT_PARTICLES: usize = 24;
 
 // ---- wizards (index 0 is the player) --------------------------------------
 pub struct Wizards {
@@ -334,6 +361,162 @@ pub struct World {
     pub minimap: crate::render::Minimap,
 }
 
+/// Build the complete layered contact effect without touching world state.
+///
+/// The caller supplies the RNG. Gameplay passes the realm generator so the
+/// historical draw budget stays unchanged; previews pass a local fixed seed.
+pub(crate) fn build_fireball_impact_particles(
+    rng: &mut Rng,
+    position: [f32; 3],
+    incoming: [f32; 3],
+    kind: ProjectileKind,
+    output: &mut [ParticleSpec; MAX_FIREBALL_IMPACT_PARTICLES],
+) -> usize {
+    // Each stochastic particle below consumes exactly five RNG draws.
+    // Keeping 22 for Firebolt and 14 for DragonFire matches their former
+    // generic bursts, so richer visuals do not perturb later simulation
+    // randomness.
+    let (shell_count, ember_count, smoke_count) = match kind {
+        ProjectileKind::Firebolt => (12, 6, 4),
+        ProjectileKind::DragonFire => (8, 4, 2),
+        _ => return 0,
+    };
+    let (warm, head_size) = kind.head_style();
+    let scale = head_size / 3.0;
+    let hot = [
+        1.0,
+        min(warm[1] + 0.34, 1.0),
+        min(warm[2] + 0.50, 1.0),
+    ];
+    let smoke = [warm[0] * 0.22, warm[1] * 0.18, warm[2] * 0.20];
+    let incoming_length = length3(incoming[0], incoming[1], incoming[2]);
+    let recoil = if incoming_length > 0.001 {
+        [
+            -incoming[0] / incoming_length,
+            -incoming[1] / incoming_length,
+            -incoming[2] / incoming_length,
+        ]
+    } else {
+        [0.0, 0.0, -1.0]
+    };
+    let mut count = 0usize;
+
+    // Two nested flashes prevent the centre disappearing between the
+    // projectile head and the first expanding shell particles.
+    output[count] = ParticleSpec {
+        position,
+        velocity: [
+            recoil[0] * 3.0 * scale,
+            (5.0 + recoil[1] * 3.0) * scale,
+            recoil[2] * 3.0 * scale,
+        ],
+        life: 0.13,
+        size: 10.0 * scale,
+        colour: [1.0, 0.96, 0.82],
+        gravity: 0.0,
+        drag: 7.0,
+    };
+    count += 1;
+    output[count] = ParticleSpec {
+        position,
+        velocity: [
+            recoil[0] * 5.0 * scale,
+            (7.0 + recoil[1] * 5.0) * scale,
+            recoil[2] * 5.0 * scale,
+        ],
+        life: 0.24,
+        size: 7.2 * scale,
+        colour: hot,
+        gravity: 4.0,
+        drag: 4.5,
+    };
+    count += 1;
+
+    // Broad flame shell: biased upward so ground contacts roll into a
+    // fireball, and back along the arrival path so a hit reads directionally.
+    for _ in 0..shell_count {
+        let angle = rng.range(0.0, core::f32::consts::TAU);
+        let vertical = rng.range(-0.30, 0.86);
+        let horizontal = sqrt(1.0 - vertical * vertical);
+        let speed = rng.range(15.0, 33.0) * scale;
+        let life = rng.range(0.30, 0.58);
+        let size = rng.range(3.6, 6.5) * scale;
+        let heat = (vertical + 0.30) * 0.15;
+        output[count] = ParticleSpec {
+            position,
+            velocity: [
+                cos(angle) * horizontal * speed + recoil[0] * speed * 0.24,
+                vertical * speed + (5.0 + recoil[1] * 4.0) * scale,
+                sin(angle) * horizontal * speed + recoil[2] * speed * 0.24,
+            ],
+            life,
+            size,
+            colour: [
+                min(warm[0] + heat, 1.0),
+                min(warm[1] + heat * 0.72, 1.0),
+                min(warm[2] + heat * 0.48, 1.0),
+            ],
+            gravity: 7.0,
+            drag: 2.2,
+        };
+        count += 1;
+    }
+
+    // Small fast embers make the recoil direction legible after the broad
+    // shell has faded.
+    for _ in 0..ember_count {
+        let angle = rng.range(0.0, core::f32::consts::TAU);
+        let vertical = rng.range(-0.18, 0.94);
+        let horizontal = sqrt(1.0 - vertical * vertical);
+        let speed = rng.range(30.0, 58.0) * scale;
+        let life = rng.range(0.38, 0.78);
+        let size = rng.range(1.1, 2.2) * scale;
+        output[count] = ParticleSpec {
+            position,
+            velocity: [
+                cos(angle) * horizontal * speed + recoil[0] * speed * 0.36,
+                vertical * speed + (8.0 + recoil[1] * 7.0) * scale,
+                sin(angle) * horizontal * speed + recoil[2] * speed * 0.36,
+            ],
+            life,
+            size,
+            colour: hot,
+            gravity: -32.0,
+            drag: 1.2,
+        };
+        count += 1;
+    }
+
+    // Sparse smoke follows the recoil rather than hiding the struck model.
+    for _ in 0..smoke_count {
+        let angle = rng.range(0.0, core::f32::consts::TAU);
+        let radius = rng.range(0.4, 2.5) * scale;
+        let speed = rng.range(5.0, 12.0) * scale;
+        let life = rng.range(0.55, 0.92);
+        let size = rng.range(4.2, 7.2) * scale;
+        output[count] = ParticleSpec {
+            position: [
+                position[0] + cos(angle) * radius,
+                position[1] + radius * 0.35,
+                position[2] + sin(angle) * radius,
+            ],
+            velocity: [
+                cos(angle + 1.1) * speed + recoil[0] * speed * 0.75,
+                8.0 * scale + speed + recoil[1] * speed * 0.4,
+                sin(angle + 1.1) * speed + recoil[2] * speed * 0.75,
+            ],
+            life,
+            size,
+            colour: smoke,
+            gravity: 5.0,
+            drag: 2.8,
+        };
+        count += 1;
+    }
+
+    count
+}
+
 impl World {
     /// Everything starts zeroed so the whole struct lands in `.bss` rather
     /// than being emitted as multi-megabyte initialised data in the wasm.
@@ -361,7 +544,6 @@ impl World {
                 timer: [0.0; MAX_CREATURES],
                 attack_cooldown: [0.0; MAX_CREATURES],
                 phase: [0.0; MAX_CREATURES],
-                hurt_flash: [0.0; MAX_CREATURES],
             },
             projectiles: Projectiles {
                 alive: [false; MAX_PROJECTILES],
@@ -591,6 +773,37 @@ impl World {
                 colour,
                 BURST_GRAVITY,
                 BURST_DRAG,
+            );
+        }
+    }
+
+    /// A fireball contact is more than a spherical spray: a short white-hot
+    /// flash sits inside an expanding coloured flame shell, with fast sparks
+    /// escaping ahead of a slower dark smoke layer. Firebolt and dragon fire
+    /// share the motion but inherit their own projectile palette and scale.
+    pub(crate) fn spawn_fireball_impact(
+        &mut self,
+        position: [f32; 3],
+        incoming: [f32; 3],
+        kind: ProjectileKind,
+    ) {
+        let mut particles = [ParticleSpec::ZERO; MAX_FIREBALL_IMPACT_PARTICLES];
+        let count = build_fireball_impact_particles(
+            &mut self.rng,
+            position,
+            incoming,
+            kind,
+            &mut particles,
+        );
+        for particle in &particles[..count] {
+            self.spawn_particle(
+                particle.position,
+                particle.velocity,
+                particle.life,
+                particle.size,
+                particle.colour,
+                particle.gravity,
+                particle.drag,
             );
         }
     }
@@ -844,7 +1057,6 @@ impl World {
             c.timer[i] = timer;
             c.attack_cooldown[i] = 0.0;
             c.phase[i] = phase;
-            c.hurt_flash[i] = 0.0;
             c.health[i] = kind.max_health();
             c.max_health[i] = kind.max_health();
             return Some(i);
@@ -943,7 +1155,6 @@ impl World {
             // full damage at the centre, 45% at the rim
             let falloff = 1.0 - sqrt(dist_sq) / radius;
             self.creatures.health[i] -= damage * (0.45 + 0.55 * falloff);
-            self.creatures.hurt_flash[i] = 0.25;
             self.spawn_impact(
                 [
                     self.creatures.pos_x[i],

@@ -69,9 +69,6 @@ impl World {
             }
             let kind = self.creatures.kind[index];
             self.creatures.phase[index] += dt * kind.phase_rate();
-            if self.creatures.hurt_flash[index] > 0.0 {
-                self.creatures.hurt_flash[index] -= dt;
-            }
             self.creatures.attack_cooldown[index] -= dt;
 
             match kind {
@@ -864,6 +861,11 @@ impl World {
             self.projectiles.pos_y[index],
             self.projectiles.pos_z[index],
         ];
+        let incoming = [
+            self.projectiles.vel_x[index],
+            self.projectiles.vel_y[index],
+            self.projectiles.vel_z[index],
+        ];
         let owner = self.projectiles.owner[index];
         let damage = self.projectiles.damage[index];
         let kind = self.projectiles.kind[index];
@@ -892,15 +894,18 @@ impl World {
                 self.session.screen_shake = 1.6;
                 self.emit_sound(SoundCue::MeteorImpact, at);
             }
-            ProjectileKind::Firebolt => {
-                self.deform(at[0], at[2], 16.0, 2.2, DeformKind::Crater);
-                self.spawn_burst(at, 22, 20.0, 4.4, [1.0, 0.6, 0.22], 0.7);
-                // a firebolt is fire: whatever it lands in catches
-                self.ignite_scenery(at, 34.0);
+            ProjectileKind::Firebolt | ProjectileKind::DragonFire => {
+                if kind == ProjectileKind::Firebolt {
+                    self.deform(at[0], at[2], 16.0, 2.2, DeformKind::Crater);
+                    // A player firebolt can reshape and ignite the landscape;
+                    // dragon volleys keep their existing damage-only behavior.
+                    self.ignite_scenery(at, 34.0);
+                }
+                self.spawn_fireball_impact(at, incoming, kind);
                 self.emit_sound(SoundCue::Pop, at);
             }
-            other => {
-                self.spawn_burst(at, 14, 15.0, 3.4, other.trail_colour(), 0.6);
+            ProjectileKind::CreatureBolt => {
+                self.spawn_burst(at, 14, 15.0, 3.4, kind.trail_colour(), 0.6);
                 self.emit_sound(SoundCue::Pop, at);
             }
         }

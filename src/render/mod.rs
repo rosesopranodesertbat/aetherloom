@@ -459,8 +459,6 @@ struct CreatureBody {
     facing_sin: f32,
     facing_cos: f32,
     phase: f32,
-    /// 1.0 while the hit flash is showing, 0.0 otherwise.
-    hurt: f32,
     faction: Faction,
     /// How much of this creature is worth drawing from here.
     detail: BodyDetail,
@@ -482,11 +480,6 @@ impl CreatureBody {
             facing_sin: sin(facing),
             facing_cos: cos(facing),
             phase: world.creatures.phase[index],
-            hurt: if world.creatures.hurt_flash[index] > 0.0 {
-                1.0
-            } else {
-                0.0
-            },
             faction: world.creatures.faction[index],
             detail: {
                 let range_sq = length_sq3(

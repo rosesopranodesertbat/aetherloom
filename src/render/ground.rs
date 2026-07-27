@@ -187,12 +187,12 @@ impl World {
                 body.ahead(-back, rise, side_now),
                 [width, width * 0.95, width * 1.25 * stretch],
                 [
-                    clamp(hide[0] * shade + body.hurt * 0.35, 0.0, 1.0),
-                    clamp(hide[1] * shade - body.hurt * 0.16, 0.0, 1.0),
+                    clamp(hide[0] * shade, 0.0, 1.0),
+                    clamp(hide[1] * shade, 0.0, 1.0),
                     clamp(hide[2] * shade, 0.0, 1.0),
                 ],
                 aim,
-                body.hurt * 0.45,
+                0.0,
                 Shape::Boulder,
             );
             // A dark collar sunk into the crease behind the ring. One instance
@@ -327,12 +327,12 @@ impl World {
             body.ahead(reach, head_up, head_side),
             [girth * 1.04, girth * 0.96, girth * 1.34],
             [
-                clamp(hide[0] * 0.84 + body.hurt * 0.35, 0.0, 1.0),
-                clamp(hide[1] * 0.82 - body.hurt * 0.16, 0.0, 1.0),
+                clamp(hide[0] * 0.84, 0.0, 1.0),
+                clamp(hide[1] * 0.82, 0.0, 1.0),
                 clamp(hide[2] * 0.86, 0.0, 1.0),
             ],
             Rotation::new(head_yaw, lead_pitch, twist * 0.5),
-            body.hurt * 0.45,
+            0.0,
             Shape::Boulder,
         );
         if !body.detail.at_least(BodyDetail::Reduced) {
@@ -517,8 +517,7 @@ impl World {
         let stature = 1.0 + body.vary(12.0) * 0.15;
         let hide = body.tint([0.33, 0.42, 0.30], 13.0, 0.11);
         let dark = [hide[0] * 0.70, hide[1] * 0.68, hide[2] * 0.74];
-        let lit = [clamp(hide[0] + body.hurt * 0.5, 0.0, 1.0), hide[1], hide[2]];
-        let flash = body.hurt * 0.45;
+        let lit = [clamp(hide[0], 0.0, 1.0), hide[1], hide[2]];
         let horn = [0.84, 0.80, 0.66];
         // one arm does all the work and has thickened for it, and which arm is
         // this troll's own — a pair of them must never read as one model twice
@@ -541,7 +540,7 @@ impl World {
             [7.8 * bulk, 7.0 * stature, 6.6 * bulk],
             lit,
             body.tilted(0.10, heel * 0.6),
-            flash,
+            0.0,
             Shape::Boulder,
         );
         self.push_oriented(
@@ -549,7 +548,7 @@ impl World {
             [8.8 * bulk, 7.0 * stature, 5.8 * bulk],
             lit,
             upended(body.facing, 0.16, heel),
-            flash,
+            0.0,
             Shape::Frustum,
         );
         self.push_oriented(
@@ -557,7 +556,7 @@ impl World {
             [4.6 * bulk, 4.2 * stature, 5.0 * bulk],
             lit,
             Rotation::new(body.facing + heel * 0.5, 0.18, heel * 1.4),
-            flash,
+            0.0,
             Shape::Boulder,
         );
         if !body.detail.at_least(BodyDetail::Reduced) {
@@ -686,7 +685,7 @@ impl World {
                 [3.3 * heft * bulk, 6.4 * stature * heft, 3.3 * heft * bulk],
                 lit,
                 upended(body.facing, swing * 0.28, side * 0.24),
-                flash,
+                0.0,
                 Shape::Frustum,
             );
             self.push_oriented(
@@ -707,7 +706,7 @@ impl World {
                 [3.4 * heft, 3.2 * heft, 3.6 * heft],
                 lit,
                 Rotation::new(body.facing + side * 0.2, 0.2, side * 0.3),
-                flash,
+                0.0,
                 Shape::Boulder,
             );
             if body.detail.at_least(BodyDetail::Full) {
@@ -747,7 +746,7 @@ impl World {
                 [cap, cap * 0.86, cap * 0.94],
                 lit,
                 Rotation::new(body.facing + side * 0.4, 0.14, side * 0.2),
-                flash,
+                0.0,
                 Shape::Boulder,
             );
         }
@@ -757,7 +756,7 @@ impl World {
             [4.0 * bulk, 2.8 * stature, 3.8 * bulk],
             lit,
             upended(body.facing, 0.26, heel * 0.5),
-            flash,
+            0.0,
             Shape::Frustum,
         );
         for side in [1.0f32, -1.0] {
@@ -927,8 +926,7 @@ impl World {
         let chitin = body.tint(chitin_base, 74.0, 0.06);
         let sac = body.tint(sac_base, 78.0, 0.09);
         let bone = body.tint([0.78, 0.72, 0.60], 79.0, 0.07);
-        let lit = [clamp(flesh[0] + body.hurt * 0.4, 0.0, 1.0), flesh[1], flesh[2]];
-        let flash = body.hurt * 0.4;
+        let lit = [clamp(flesh[0], 0.0, 1.0), flesh[1], flesh[2]];
         // whatever is down the throat lights it in the brood's own colour, so
         // a bilious nest does not glow amethyst
         let ember = [
@@ -981,7 +979,7 @@ impl World {
             ],
             shade(lit, 0.94),
             Rotation::new(-heavy, 0.06, body.vary(81.0) * 0.16),
-            flash,
+            0.0,
             Shape::Boulder,
         );
         // The collar the maw opens through, offset so the crown never stands
@@ -1005,7 +1003,7 @@ impl World {
             [collar_wide * lead, collar_tall, collar_wide * 0.92 / lead],
             shade(lit, 1.08),
             Rotation::new(-collar_bearing, body.vary(83.8) * 0.18, body.vary(84.2) * 0.24),
-            flash,
+            0.0,
             Shape::Boulder,
         );
         for flank in 0..masses - 2 {
@@ -1027,7 +1025,7 @@ impl World {
                 [wide * puff, wide * 0.82 * squat, wide * 0.94 / puff],
                 shade(lit, 0.82 + body.vary_unit(salt + 0.6) * 0.34),
                 Rotation::new(-bearing, body.vary(salt + 0.8) * 0.3, body.vary(salt + 1.0) * 0.36),
-                flash,
+                0.0,
                 Shape::Boulder,
             );
         }
@@ -1145,7 +1143,7 @@ impl World {
                     body.vary(salt + 0.6) * 0.3,
                     0.3 + body.vary_unit(salt + 0.8) * 0.38,
                 ),
-                flash,
+                0.0,
                 Shape::Boulder,
             );
         }
@@ -1183,7 +1181,7 @@ impl World {
                     0.25 + (1.0 - climb) * 1.0,
                     body.vary(salt + 1.4) * 0.5,
                 ),
-                flash * 0.4,
+                0.0,
                 Shape::Wedge,
             );
         }
@@ -1240,7 +1238,7 @@ impl World {
                     0.25 + body.vary(salt + 1.2) * 0.42,
                 ),
                 // the thin-shelled ones are lit through; the crusted ones are not
-                (if bursting { 0.30 } else { 0.05 + ripe * 0.15 }) + flash * 0.12,
+                if bursting { 0.30 } else { 0.05 + ripe * 0.15 },
                 // some have hardened over into a crust and some have not
                 if body.quirk(salt + 1.4, 0.34) {
                     Shape::Boulder
@@ -1457,8 +1455,6 @@ impl World {
         // everyone leans into the walk, and a few of them are stooped
         let lean = 0.06 + body.vary_unit(4.0) * 0.11;
         let sway = stride * 0.05;
-        let flash = body.hurt * 0.45;
-        let glow = body.hurt * 0.4;
 
         let dye = WOOLS[(body.vary_unit(5.0) * WOOLS.len() as f32) as usize];
         // the two keeps grow different dye plants, so a crowd still reads as
@@ -1473,9 +1469,9 @@ impl World {
             6.0,
             0.07,
         );
-        let smock = [clamp(wool[0] + flash, 0.0, 1.0), wool[1], wool[2]];
+        let smock = [clamp(wool[0], 0.0, 1.0), wool[1], wool[2]];
         let bodice = [
-            clamp(wool[0] * 0.90 + flash, 0.0, 1.0),
+            clamp(wool[0] * 0.90, 0.0, 1.0),
             wool[1] * 0.90,
             wool[2] * 0.94,
         ];
@@ -1506,7 +1502,7 @@ impl World {
             [2.95 * girth, 3.60 * build, 2.30 * girth],
             smock,
             body.tilted(lean * 0.4, sway),
-            glow,
+            0.0,
             Shape::Frustum,
         );
         self.push_oriented(
@@ -1514,7 +1510,7 @@ impl World {
             [2.45 * girth, 3.10 * build, 1.80 * girth],
             bodice,
             body.tilted(lean, sway),
-            glow,
+            0.0,
             Shape::Frustum,
         );
         self.push_oriented(
@@ -1522,7 +1518,7 @@ impl World {
             [1.55 * girth, 1.80 * build, 1.60 * girth],
             skin,
             Rotation::new(body.facing + head_turn, lean * 0.5, sway * 0.5),
-            glow,
+            0.0,
             Shape::Sphere,
         );
         // hair sits back off the brow, so the face still reads as a face
@@ -1993,8 +1989,6 @@ impl World {
         let bob = (0.6 - abs(stride)) * 0.36 * build;
         let lean = 0.05 + body.vary_unit(54.0) * 0.07;
         let sway = stride * 0.04;
-        let flash = body.hurt * 0.45;
-        let glow = body.hurt * 0.4;
 
         let helm = (body.vary_unit(55.0) * 3.0) as usize;
         let weapon = (body.vary_unit(56.0) * 3.0) as usize;
@@ -2010,7 +2004,7 @@ impl World {
             58.0,
             0.05,
         );
-        let surcoat = [clamp(livery[0] + flash, 0.0, 1.0), livery[1], livery[2]];
+        let surcoat = [clamp(livery[0], 0.0, 1.0), livery[1], livery[2]];
         let plume =
             body.tint(PLUMES[(body.vary_unit(59.0) * PLUMES.len() as f32) as usize], 60.0, 0.05);
         let steel = body.tint([0.60, 0.62, 0.66], 61.0, 0.07);
@@ -2048,17 +2042,17 @@ impl World {
         self.push_oriented(
             body.ahead(lean * 0.4, hip_y + 0.30 * build, 0.0),
             [3.35 * girth, 3.50 * build, 2.75 * girth],
-            [clamp(hauberk[0] + flash, 0.0, 1.0), hauberk[1], hauberk[2]],
+            [clamp(hauberk[0], 0.0, 1.0), hauberk[1], hauberk[2]],
             body.tilted(lean * 0.4, sway),
-            glow,
+            0.0,
             Shape::Frustum,
         );
         self.push_oriented(
             body.ahead(lean * 1.0, chest_y, 0.0),
             [3.05 * girth, 3.40 * build, 2.35 * girth],
-            [clamp(hauberk[0] + flash, 0.0, 1.0), hauberk[1], hauberk[2]],
+            [clamp(hauberk[0], 0.0, 1.0), hauberk[1], hauberk[2]],
             body.tilted(lean, sway),
-            glow,
+            0.0,
             Shape::Cylinder,
         );
         self.push_oriented(
@@ -2066,7 +2060,7 @@ impl World {
             [1.75 * girth, 1.95 * build, 1.80 * girth],
             skin,
             Rotation::new(body.facing + head_turn, lean * 0.5, sway * 0.5),
-            glow,
+            0.0,
             Shape::Sphere,
         );
         // the bowl rides high enough on the skull to leave a face below it;
@@ -2210,7 +2204,7 @@ impl World {
             [2.10 * girth, 4.70 * build, 0.42],
             surcoat,
             body.tilted(lean * 1.4, sway),
-            glow,
+            0.0,
             Shape::Frustum,
         );
         self.push_oriented(
@@ -2457,7 +2451,7 @@ impl World {
             [2.00 * girth, 4.50 * build, 0.42],
             [surcoat[0] * 0.86, surcoat[1] * 0.86, surcoat[2] * 0.90],
             body.tilted(-lean * 0.8, sway),
-            glow,
+            0.0,
             Shape::Frustum,
         );
         // the household's device, painted on the surcoat only

@@ -561,13 +561,14 @@ impl World {
         );
     }
 
-    /// A fireball, not a glowing marble: a white-hot core inside a swollen
-    /// orange body, a tapering wake of cooling blobs behind it, and tongues
-    /// that lick outward and shift frame to frame.
+    /// A directional flame volume rather than a glowing marble: nested head
+    /// layers around a white-hot core, licks pulled back by motion, a tapered
+    /// helical wake, detached embers, then a few cool smoke lobes.
     ///
-    /// Only the core is fully emissive. Everything else keeps enough ordinary
-    /// shading to show its own form — push the glow up and the bloom fuses the
-    /// whole thing back into the white ball this was written to replace.
+    /// Every colour is derived from `warm`, so the same assembly stays orange
+    /// for Firebolt, heavy amber for Meteor, and magenta for DragonFire. Only
+    /// the core is fully emissive; the outer layers retain enough shading for
+    /// their overlapping silhouettes to survive bloom.
     pub(super) fn draw_fireball(
         &mut self,
         at: [f32; 3],
@@ -576,13 +577,13 @@ impl World {
         warm: [f32; 3],
         index: usize,
     ) {
-        /// Blobs in the wake behind the head.
-        const WAKE: i32 = 5;
-        /// Licking tongues around the head.
+        const WAKE_KNOTS: i32 = 6;
         const TONGUES: i32 = 4;
+        const EMBERS: i32 = 4;
+        const SMOKE_LOBES: i32 = 3;
 
         let speed = length3(velocity[0], velocity[1], velocity[2]);
-        // a stalled projectile still needs an axis to build the wake along
+        // A stalled projectile still needs an axis to build the wake along.
         let along = if speed > 0.001 {
             [
                 velocity[0] / speed,
@@ -592,7 +593,9 @@ impl World {
         } else {
             [0.0, 1.0, 0.0]
         };
-        // any two directions across the flight axis, for the tongues
+        // Two stable directions across the flight axis. The horizontal
+        // construction avoids a basis that rolls unpredictably as the shot
+        // pitches; the fallback covers a perfectly vertical meteor.
         let across = {
             let raw = [along[2], 0.0, -along[0]];
             let len = length3(raw[0], raw[1], raw[2]);
@@ -607,82 +610,280 @@ impl World {
             along[2] * across[0] - along[0] * across[2],
             along[0] * across[1] - along[1] * across[0],
         ];
-        // every projectile flickers on its own clock
-        let clock = self.session.elapsed * 14.0 + index as f32 * 1.7;
-        let flare = 0.86 + sin(clock) * 0.14;
 
-        // wake: blobs trailing back, growing then shrinking, cooling to smoke
-        for step in 0..WAKE {
-            let along_wake = (step as f32 + 1.0) / WAKE as f32;
-            let back = size * (0.9 + along_wake * 3.6);
-            let swell = sin(along_wake * 3.14159) * 0.5 + 0.55;
-            let blob = size * swell * (1.0 - along_wake * 0.35) * flare;
-            let wobble = sin(clock * 0.7 + step as f32 * 2.1) * size * 0.28;
-            self.push_instance(
+        // Exact orientation of a local +Z axis along the velocity. Rolling an
+        // ellipsoid around that axis changes its outline without changing its
+        // direction, which gives the head a live, asymmetric edge.
+        let horizontal = length3(along[0], 0.0, along[2]);
+        let flight_yaw = atan2(along[0], along[2]);
+        let flight_pitch = -atan2(along[1], horizontal);
+        let clock = self.session.elapsed * 11.0 + index as f32 * 2.399_963;
+        let flare = 0.90 + sin(clock) * 0.10;
+        let cross_flare = 0.90 + cos(clock * 1.31) * 0.10;
+        // Faster shots pull a longer flame, but the bounded factor keeps
+        // meteors from consuming half the screen and stalled previews useful.
+        let motion_stretch = clamp(speed / 180.0, 0.78, 1.25);
+        // Size is also a visual vocabulary input: the nine-unit meteor should
+        // remain a heavy, faceted mass when the gallery normalises its scale,
+        // while the three-unit bolts stay narrow and fluid.
+        let mass = clamp((size - 4.0) / 5.0, 0.0, 1.0);
+
+        let hot = [
+            1.0,
+            clamp(0.72 + warm[1] * 0.28, 0.0, 1.0),
+            clamp(0.46 + warm[2] * 0.45, 0.0, 1.0),
+        ];
+        let inner = [
+            clamp(warm[0] * 0.42 + hot[0] * 0.58, 0.0, 1.0),
+            clamp(warm[1] * 0.48 + hot[1] * 0.52, 0.0, 1.0),
+            clamp(warm[2] * 0.54 + hot[2] * 0.46, 0.0, 1.0),
+        ];
+        let outer = [warm[0] * 0.78, warm[1] * 0.70, warm[2] * 0.72];
+        let smoke = [
+            0.14 + warm[0] * 0.18,
+            0.13 + warm[1] * 0.14,
+            0.14 + warm[2] * 0.12,
+        ];
+
+        // The shaded sheath is broad and slightly aft; two hotter volumes sit
+        // progressively farther forward, ending in a small leading cap.
+        let head_wobble = sin(clock * 0.73) * size * 0.08;
+        self.push_oriented(
+            [
+                at[0] - along[0] * size * 0.16 + across[0] * head_wobble,
+                at[1] - along[1] * size * 0.16 + across[1] * head_wobble,
+                at[2] - along[2] * size * 0.16 + across[2] * head_wobble,
+            ],
+            [
+                size * (1.72 + mass * 0.34) * flare,
+                size * (1.46 + mass * 0.30) * cross_flare,
+                size * (2.52 - mass * 0.32) * motion_stretch,
+            ],
+            outer,
+            Rotation::new(flight_yaw, flight_pitch, clock * 0.18),
+            0.36,
+            Shape::Sphere,
+        );
+        self.push_oriented(
+            [
+                at[0] + along[0] * size * 0.20 - up[0] * head_wobble * 0.45,
+                at[1] + along[1] * size * 0.20 - up[1] * head_wobble * 0.45,
+                at[2] + along[2] * size * 0.20 - up[2] * head_wobble * 0.45,
+            ],
+            [
+                size * (1.16 + mass * 0.22) * cross_flare,
+                size * (1.02 + mass * 0.18) * flare,
+                size * (1.70 - mass * 0.08) * motion_stretch,
+            ],
+            inner,
+            Rotation::new(flight_yaw, flight_pitch, -clock * 0.14),
+            0.68,
+            if mass > 0.5 {
+                Shape::Boulder
+            } else {
+                Shape::Sphere
+            },
+        );
+        self.push_oriented(
+            [
+                at[0] + along[0] * size * 0.43,
+                at[1] + along[1] * size * 0.43,
+                at[2] + along[2] * size * 0.43,
+            ],
+            [
+                size * (0.78 + mass * 0.30),
+                size * (0.72 + mass * 0.28),
+                size * (1.02 + mass * 0.15),
+            ],
+            hot,
+            Rotation::new(clock * 0.31, clock * 0.23, clock * 0.17),
+            0.94,
+            Shape::Boulder,
+        );
+        self.push_oriented(
+            [
+                at[0] + along[0] * size * 0.78,
+                at[1] + along[1] * size * 0.78,
+                at[2] + along[2] * size * 0.78,
+            ],
+            [size * 0.42, size * 0.42, size * 0.62],
+            [1.0, 0.97, clamp(0.82 + warm[2] * 0.12, 0.0, 1.0)],
+            Rotation::new(flight_yaw, flight_pitch, 0.0),
+            1.0,
+            Shape::Sphere,
+        );
+
+        // Overlapping wake knots narrow and cool as they recede. Their centres
+        // follow a loose helix rather than a ruler-straight row, so the tail
+        // has a different silhouette from either side.
+        for step in 0..WAKE_KNOTS {
+            let progress = (step as f32 + 1.0) / WAKE_KNOTS as f32;
+            let spiral = clock * 0.24 + step as f32 * 2.15;
+            let lateral = size * (0.12 + progress * 0.42) * (1.0 - progress * 0.35);
+            let spiral_cos = cos(spiral);
+            let spiral_sin = sin(spiral);
+            let radial_x = across[0] * spiral_cos + up[0] * spiral_sin;
+            let radial_y = across[1] * spiral_cos + up[1] * spiral_sin;
+            let radial_z = across[2] * spiral_cos + up[2] * spiral_sin;
+            let back = size * (0.72 + progress * 5.0) * motion_stretch;
+            let flicker = 0.91 + sin(clock * 1.07 + step as f32 * 1.91) * 0.09;
+            let radius = size * (0.82 * (1.0 - progress) + 0.24) * flicker;
+            let length = size
+                * (1.55 * (1.0 - progress) + 0.58)
+                * motion_stretch;
+            let heat = 1.0 - progress;
+            self.push_oriented(
                 [
-                    at[0] - along[0] * back + across[0] * wobble,
-                    at[1] - along[1] * back + across[1] * wobble,
-                    at[2] - along[2] * back + across[2] * wobble,
+                    at[0] - along[0] * back + radial_x * lateral,
+                    at[1] - along[1] * back + radial_y * lateral,
+                    at[2] - along[2] * back + radial_z * lateral,
                 ],
-                [blob, blob, blob],
+                [radius * 1.08, radius * 0.86, length],
                 [
-                    warm[0] * (1.0 - along_wake * 0.55),
-                    warm[1] * (1.0 - along_wake * 0.72),
-                    warm[2] * (1.0 - along_wake * 0.82),
+                    warm[0] * (0.38 + heat * 0.57),
+                    warm[1] * (0.12 + heat * 0.76),
+                    warm[2] * (0.08 + heat * 0.72),
                 ],
-                0.0,
-                0.42 * (1.0 - along_wake * 0.85),
+                Rotation::new(flight_yaw, flight_pitch, spiral * 0.35),
+                0.08 + heat * heat * 0.46,
                 Shape::Sphere,
             );
         }
 
-        // outer body: the bulk of the flame, a little ahead of the wake
-        let body = size * 1.5 * flare;
-        self.push_instance(
-            at,
-            [body, body, body],
-            [warm[0] * 0.92, warm[1] * 0.62, warm[2] * 0.36],
-            0.0,
-            0.46,
-            Shape::Sphere,
-        );
-
-        // tongues, splayed around the axis and dragged backwards
+        // Conical licks root at the head and point aft/outward. Unlike the old
+        // upright cones, their local +Y axes are aligned to the actual flame
+        // direction, so pitching a projectile pitches its whole silhouette.
         for tongue in 0..TONGUES {
-            let angle = tongue as f32 * core::f32::consts::TAU / TONGUES as f32 + clock * 0.35;
-            let reach = size * (0.9 + sin(clock * 1.3 + tongue as f32 * 2.3) * 0.45);
-            let out_x = across[0] * cos(angle) + up[0] * sin(angle);
-            let out_y = across[1] * cos(angle) + up[1] * sin(angle);
-            let out_z = across[2] * cos(angle) + up[2] * sin(angle);
-            let lick = size * 1.1;
-            self.push_instance(
+            let phase = tongue as f32 * 2.399_963 + clock * 0.33;
+            let pulse = 0.5 + sin(clock * 1.37 + tongue as f32 * 2.11) * 0.5;
+            let phase_cos = cos(phase);
+            let phase_sin = sin(phase);
+            let radial = [
+                across[0] * phase_cos + up[0] * phase_sin,
+                across[1] * phase_cos + up[1] * phase_sin,
+                across[2] * phase_cos + up[2] * phase_sin,
+            ];
+            let splay = 0.24 + pulse * 0.18;
+            let raw = [
+                -along[0] + radial[0] * splay,
+                -along[1] + radial[1] * splay,
+                -along[2] + radial[2] * splay,
+            ];
+            let raw_length = length3(raw[0], raw[1], raw[2]);
+            let direction = [
+                raw[0] / raw_length,
+                raw[1] / raw_length,
+                raw[2] / raw_length,
+            ];
+            let length = size * (1.15 + pulse * 0.75);
+            let base = [
+                at[0] - along[0] * size * 0.10
+                    + radial[0] * size * (0.25 + pulse * 0.12),
+                at[1] - along[1] * size * 0.10
+                    + radial[1] * size * (0.25 + pulse * 0.12),
+                at[2] - along[2] * size * 0.10
+                    + radial[2] * size * (0.25 + pulse * 0.12),
+            ];
+            let tongue_horizontal = length3(direction[0], 0.0, direction[2]);
+            self.push_oriented(
                 [
-                    at[0] + out_x * reach - along[0] * size * 0.5,
-                    at[1] + out_y * reach - along[1] * size * 0.5,
-                    at[2] + out_z * reach - along[2] * size * 0.5,
+                    base[0] + direction[0] * length * 0.45,
+                    base[1] + direction[1] * length * 0.45,
+                    base[2] + direction[2] * length * 0.45,
                 ],
-                [lick * 0.72, lick * 1.7, lick * 0.72],
-                [0.98, 0.44, 0.10],
-                angle,
-                0.62,
+                [
+                    size * (0.32 + pulse * 0.16),
+                    length,
+                    size * (0.32 + pulse * 0.16),
+                ],
+                [
+                    warm[0] * 0.54 + hot[0] * 0.46,
+                    warm[1] * 0.58 + hot[1] * 0.42,
+                    warm[2] * 0.62 + hot[2] * 0.38,
+                ],
+                Rotation::new(
+                    atan2(direction[0], direction[2]),
+                    atan2(tongue_horizontal, direction[1]),
+                    0.0,
+                ),
+                0.48 + pulse * 0.20,
                 Shape::Cone,
             );
         }
 
-        // white-hot core, slightly ahead so the leading edge is brightest
-        let core = size * 0.62 * flare;
-        self.push_instance(
-            [
-                at[0] + along[0] * size * 0.35,
-                at[1] + along[1] * size * 0.35,
-                at[2] + along[2] * size * 0.35,
-            ],
-            [core, core, core],
-            [1.0, 0.95, 0.74],
-            0.0,
-            1.0,
-            Shape::Sphere,
-        );
+        // Detached sparks escape the wake on different deterministic phases.
+        // Boulder prototypes catch one bright facet instead of reading as a
+        // second row of smooth bubbles.
+        for ember in 0..EMBERS {
+            let progress = (ember as f32 + 1.0) / (EMBERS + 1) as f32;
+            let phase = clock * 0.61 + ember as f32 * 2.73;
+            let phase_cos = cos(phase);
+            let phase_sin = sin(phase);
+            let radial = [
+                across[0] * phase_cos + up[0] * phase_sin,
+                across[1] * phase_cos + up[1] * phase_sin,
+                across[2] * phase_cos + up[2] * phase_sin,
+            ];
+            let back = size * (1.8 + progress * 4.8) * motion_stretch;
+            let out = size
+                * (0.52 + progress * 0.78)
+                * (0.82 + sin(clock * 0.47 + ember as f32) * 0.18);
+            let ember_size = size
+                * (0.10 + (1.0 - progress) * 0.10)
+                * (0.88 + cos(phase * 1.7) * 0.12);
+            self.push_oriented(
+                [
+                    at[0] - along[0] * back + radial[0] * out,
+                    at[1] - along[1] * back + radial[1] * out,
+                    at[2] - along[2] * back + radial[2] * out,
+                ],
+                [ember_size * 0.72, ember_size * 1.45, ember_size * 0.72],
+                [
+                    warm[0] * 0.72 + hot[0] * 0.28,
+                    warm[1] * 0.72 + hot[1] * 0.28,
+                    warm[2] * 0.72 + hot[2] * 0.28,
+                ],
+                Rotation::new(phase, phase * 0.73, phase * 0.41),
+                0.72 - progress * 0.28,
+                Shape::Boulder,
+            );
+        }
+
+        // Opaque rendering cannot support a long translucent plume, so three
+        // small, dim lobes are enough to cool the tail without turning it into
+        // a chain of dark rocks.
+        for puff in 0..SMOKE_LOBES {
+            let progress = (puff as f32 + 1.0) / SMOKE_LOBES as f32;
+            let phase = clock * 0.12 + puff as f32 * 2.17;
+            let phase_cos = cos(phase);
+            let phase_sin = sin(phase);
+            let radial = [
+                across[0] * phase_cos + up[0] * phase_sin,
+                across[1] * phase_cos + up[1] * phase_sin,
+                across[2] * phase_cos + up[2] * phase_sin,
+            ];
+            let back = size * (4.70 + progress * 1.55) * motion_stretch;
+            let drift = size * (0.22 + progress * 0.42);
+            let puff_size = size
+                * (0.50 + progress * 0.38)
+                * (0.92 + sin(clock * 0.31 + puff as f32 * 1.7) * 0.08);
+            self.push_oriented(
+                [
+                    at[0] - along[0] * back + radial[0] * drift,
+                    at[1] - along[1] * back + radial[1] * drift,
+                    at[2] - along[2] * back + radial[2] * drift,
+                ],
+                [puff_size * 1.08, puff_size * 0.76, puff_size * 1.35],
+                [
+                    smoke[0] * (1.0 - progress * 0.14),
+                    smoke[1] * (1.0 - progress * 0.14),
+                    smoke[2] * (1.0 - progress * 0.12),
+                ],
+                Rotation::new(flight_yaw, flight_pitch, phase),
+                0.07 + (1.0 - progress) * 0.07,
+                Shape::Sphere,
+            );
+        }
     }
 
 }

@@ -337,8 +337,7 @@ impl World {
             min(plume[1] * 1.16 + 0.09, 1.0),
             min(plume[2] * 0.98 + 0.02, 1.0),
         ];
-        let flash = body.hurt * 0.5;
-        let lit = [min(plume[0] + body.hurt * 0.2, 1.0), plume[1], plume[2]];
+        let lit = [min(plume[0], 1.0), plume[1], plume[2]];
         // this one holds its head a little off the line of flight, and always
         // the same little
         let peer = body.vary(23.0) * 0.30;
@@ -356,7 +355,7 @@ impl World {
             [5.2 * build * barrel, 5.8 * build, 7.8 * build],
             lit,
             body.facing,
-            flash,
+            0.0,
             Shape::Sphere,
         );
         // hindquarters: leaner than the chest, and lumpy where it is smooth,
@@ -366,7 +365,7 @@ impl World {
             [4.1 * build, 4.0 * build, 6.6 * build],
             pelt,
             body.facing + body.vary(37.0) * 0.20,
-            flash,
+            0.0,
             Shape::Boulder,
         );
         // Skull as a boulder rather than a sphere: a feathered head has no
@@ -376,7 +375,7 @@ impl World {
             [3.1 * build, 3.0 * build, 3.7 * build],
             hackle,
             body.facing + peer,
-            flash,
+            0.0,
             Shape::Boulder,
         );
 
@@ -416,7 +415,7 @@ impl World {
             [5.4 * build, length * 1.14, 4.8 * build],
             shaded(plume, 0.92),
             rotation,
-            flash,
+            0.0,
             Shape::Frustum,
         );
         // The fur line, sunk into the crease between the two masses rather
@@ -693,7 +692,7 @@ impl World {
         let band = body.tint([0.10, 0.07, 0.05], 9.0, 0.04);
         let fuzz = body.tint([0.46, 0.34, 0.13], 13.0, 0.11);
         let chitin = body.tint([0.24, 0.17, 0.07], 17.0, 0.07);
-        let lit = [min(coat[0] + body.hurt * 0.15, 1.0), coat[1], coat[2]];
+        let lit = [min(coat[0], 1.0), coat[1], coat[2]];
         // the abdomen pumps as it breathes; a still insect reads as a brooch
         let pump = 1.0 + sin(body.phase * 2.4) * 0.05;
         // how far under itself this one curls its abdomen
@@ -734,7 +733,7 @@ impl World {
                 ],
                 if index % 2 == 0 { lit } else { shaded(lit, 0.88) },
                 body.facing,
-                body.hurt * 0.6,
+                0.0,
                 Shape::Sphere,
             );
         }
@@ -744,7 +743,7 @@ impl World {
             [3.3 * build, 3.1 * build, 3.8 * build],
             fuzz,
             body.facing,
-            body.hurt * 0.4,
+            0.0,
             Shape::Sphere,
         );
 
@@ -1579,12 +1578,11 @@ impl World {
         let bulk = 1.0 + body.vary(5.0) * 0.18;
         let unit = 9.4 * bulk;
 
-        let flash = body.hurt * 0.42;
         let hide = body.tint(HIDES[family], 7.0, 0.05);
         let scale_lit = [
-            clamp(hide[0] + flash, 0.0, 1.0),
-            clamp(hide[1] + flash * 0.25, 0.0, 1.0),
-            clamp(hide[2] + flash * 0.25, 0.0, 1.0),
+            clamp(hide[0], 0.0, 1.0),
+            clamp(hide[1], 0.0, 1.0),
+            clamp(hide[2], 0.0, 1.0),
         ];
         let scale_mid = [scale_lit[0] * 0.78, scale_lit[1] * 0.76, scale_lit[2] * 0.82];
         let scale_dark = [scale_lit[0] * 0.50, scale_lit[1] * 0.48, scale_lit[2] * 0.56];
@@ -1676,7 +1674,7 @@ impl World {
                     spine.pitch,
                     spine.roll + body.vary(salt + 0.8) * 0.30,
                 ),
-                body.hurt * 0.4,
+                0.0,
                 Shape::Boulder,
             );
         }
@@ -1853,7 +1851,7 @@ impl World {
             [skull * 1.02, skull * 0.94, skull * 1.34],
             scale_lit,
             Rotation::new(head_yaw, head_pitch, head_roll),
-            body.hurt * 0.4,
+            0.0,
             Shape::Boulder,
         );
         // snout: the muzzle breaks downward off the skull line instead of

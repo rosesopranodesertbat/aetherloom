@@ -33,6 +33,7 @@ const CATALOG = [
   { label: 'Meteor', slug: 'meteor', group: 'Projectiles', copy: 'A heavy falling spell projectile with an incandescent leading face and rocky mass.' },
   { label: 'Creature Bolt', slug: 'creature-bolt', group: 'Projectiles', copy: 'Hostile creature projectile, isolated to inspect its silhouette and emissive balance.' },
   { label: 'Dragon Fire', slug: 'dragon-fire', group: 'Projectiles', copy: 'Dragon breath projectile with its distinct hot-magenta palette and compact flame shape.' },
+  { label: 'Fireball Impact', slug: 'fireball-impact', group: 'Impacts', particles: true, copy: 'An enemy model without damage tint, paired with deterministic fireball-impact sparks, flame, and smoke.' },
 ].map((scene, id) => ({ ...scene, id }));
 
 const el = (id) => document.getElementById(id);
@@ -40,7 +41,7 @@ const ui = {
   canvas: el('view'), scene: el('scene'), variant: el('variant'),
   variantPrev: el('variantPrev'), variantNext: el('variantNext'), resetView: el('resetView'),
   sceneCopy: el('sceneCopy'), sceneId: el('sceneId'), variantStat: el('variantStat'),
-  instanceCount: el('instanceCount'), radius: el('radius'),
+  instanceCount: el('instanceCount'), particleCount: el('particleCount'), radius: el('radius'),
   status: el('status'), error: el('error'),
 };
 
@@ -52,6 +53,7 @@ const gallery = {
   variant: null,
   variantCount: 0,
   instanceCount: 0,
+  particleCount: 0,
   hash: null,
   error: null,
   setScene: null,
@@ -59,7 +61,8 @@ const gallery = {
   snapshot: () => ({
     ready: gallery.ready, state: gallery.state, sceneId: gallery.sceneId,
     scene: gallery.scene, variant: gallery.variant, variantCount: gallery.variantCount,
-    instanceCount: gallery.instanceCount, hash: gallery.hash, error: gallery.error,
+    instanceCount: gallery.instanceCount, particleCount: gallery.particleCount,
+    hash: gallery.hash, error: gallery.error,
   }),
 };
 window.__modelGallery = gallery;
@@ -159,8 +162,20 @@ function fnv1a(...blocks) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function previewBytes(count) {
+function instanceBytes(count) {
   return new Uint8Array(sim.memory.buffer, sim.instPtr(), count * sim.instStride() * 4);
+}
+
+function particleBytes(count) {
+  return new Uint8Array(sim.memory.buffer, sim.partPtr(), count * sim.partStride() * 4);
+}
+
+function previewHash(instances, particles, focus) {
+  // Preserve every pre-particle scene hash byte-for-byte. Particle previews
+  // extend the digest only when they actually emit particle data.
+  return particles.length > 0
+    ? fnv1a(instances, particles, focus)
+    : fnv1a(instances, focus);
 }
 
 function validatePreview(scene, variant) {
@@ -176,8 +191,15 @@ function validatePreview(scene, variant) {
   if (firstCount >= sim.instCapacity()) {
     throw new Error(`Preview filled its ${sim.instCapacity()}-instance buffer and may be truncated.`);
   }
-  if (sim.partCount() !== 0) {
-    throw new Error(`Preview emitted ${sim.partCount()} unexpected particles.`);
+  const firstParticleCount = sim.partCount();
+  if (scene.particles === true && firstParticleCount <= 0) {
+    throw new Error(`Preview ${scene.id}/${variant} did not emit its expected impact particles.`);
+  }
+  if (scene.particles !== true && firstParticleCount !== 0) {
+    throw new Error(`Preview emitted ${firstParticleCount} unexpected particles.`);
+  }
+  if (firstParticleCount >= sim.partCapacity()) {
+    throw new Error(`Preview filled its ${sim.partCapacity()}-particle buffer and may be truncated.`);
   }
   refreshViews();
 
@@ -185,7 +207,26 @@ function validatePreview(scene, variant) {
   for (let i = 0; i < usedFloats; i++) {
     if (!Number.isFinite(instView[i])) throw new Error(`Preview contains a non-finite instance value at ${i}.`);
   }
-  const firstBytes = new Uint8Array(previewBytes(firstCount));
+  const usedParticleFloats = firstParticleCount * sim.partStride();
+  for (let i = 0; i < usedParticleFloats; i++) {
+    if (!Number.isFinite(partView[i])) throw new Error(`Preview contains a non-finite particle value at ${i}.`);
+  }
+  for (let particle = 0; particle < firstParticleCount; particle++) {
+    const base = particle * sim.partStride();
+    if (partView[base + 3] <= 0) {
+      throw new Error(`Preview particle ${particle} has a non-positive size.`);
+    }
+    for (let channel = 4; channel <= 6; channel++) {
+      if (partView[base + channel] < 0 || partView[base + channel] > 2) {
+        throw new Error(`Preview particle ${particle} has an invalid colour channel.`);
+      }
+    }
+    if (partView[base + 7] <= 0 || partView[base + 7] > 1) {
+      throw new Error(`Preview particle ${particle} has an invalid alpha.`);
+    }
+  }
+  const firstBytes = new Uint8Array(instanceBytes(firstCount));
+  const firstParticleBytes = new Uint8Array(particleBytes(firstParticleCount));
   const firstFocusBytes = new Uint8Array(
     new Uint8Array(sim.memory.buffer, sim.previewFocusPtr(), 4 * 4),
   );
@@ -195,22 +236,36 @@ function validatePreview(scene, variant) {
   if (!firstFocus.every(Number.isFinite) || firstFocus[3] <= 0) {
     throw new Error(`Preview ${scene.id}/${variant} returned an invalid focus sphere.`);
   }
-  const firstHash = fnv1a(firstBytes, firstFocusBytes);
+  const firstHash = previewHash(firstBytes, firstParticleBytes, firstFocusBytes);
 
   // A gallery PASS is meaningful: building the same pair twice must reproduce
-  // every used instance and focus byte, not merely the same count or picture.
+  // every used instance, particle, and focus byte, not merely the same count
+  // or picture.
   const secondCount = sim.previewScene(scene.id, variant);
   if (secondCount !== firstCount || secondCount !== sim.instCount()) {
     throw new Error(`Preview ${scene.id}/${variant} changed count between identical builds.`);
   }
+  const secondParticleCount = sim.partCount();
+  if (secondParticleCount !== firstParticleCount) {
+    throw new Error(`Preview ${scene.id}/${variant} changed particle count between identical builds.`);
+  }
   refreshViews();
-  const secondBytes = previewBytes(secondCount);
+  const secondBytes = instanceBytes(secondCount);
   if (secondBytes.length !== firstBytes.length) {
     throw new Error(`Preview ${scene.id}/${variant} changed byte length between identical builds.`);
   }
   for (let i = 0; i < secondBytes.length; i++) {
     if (secondBytes[i] !== firstBytes[i]) {
       throw new Error(`Preview ${scene.id}/${variant} is nondeterministic at byte ${i}.`);
+    }
+  }
+  const secondParticleBytes = particleBytes(secondParticleCount);
+  if (secondParticleBytes.length !== firstParticleBytes.length) {
+    throw new Error(`Preview ${scene.id}/${variant} changed particle byte length between identical builds.`);
+  }
+  for (let i = 0; i < secondParticleBytes.length; i++) {
+    if (secondParticleBytes[i] !== firstParticleBytes[i]) {
+      throw new Error(`Preview ${scene.id}/${variant} has a nondeterministic particle at byte ${i}.`);
     }
   }
 
@@ -220,7 +275,13 @@ function validatePreview(scene, variant) {
       throw new Error(`Preview ${scene.id}/${variant} has a nondeterministic focus sphere.`);
     }
   }
-  return { count: secondCount, focus: firstFocus, hash: firstHash, variantCount };
+  return {
+    count: secondCount,
+    particleCount: secondParticleCount,
+    focus: firstFocus,
+    hash: firstHash,
+    variantCount,
+  };
 }
 
 function resetOrbit() {
@@ -246,7 +307,7 @@ function syncUrl() {
 }
 
 function updateUi() {
-  const { scene, variant, variantCount, count, focus, hash } = current;
+  const { scene, variant, variantCount, count, particleCount, focus, hash } = current;
   ui.scene.value = String(scene.id);
   ui.variant.min = '0';
   ui.variant.max = String(variantCount - 1);
@@ -255,6 +316,7 @@ function updateUi() {
   ui.sceneId.textContent = String(scene.id).padStart(2, '0');
   ui.variantStat.textContent = `${variant + 1} / ${variantCount}`;
   ui.instanceCount.textContent = count.toLocaleString();
+  ui.particleCount.textContent = particleCount.toLocaleString();
   ui.radius.textContent = focus[3].toFixed(1);
 
   gallery.sceneId = scene.id;
@@ -262,6 +324,7 @@ function updateUi() {
   gallery.variant = variant;
   gallery.variantCount = variantCount;
   gallery.instanceCount = count;
+  gallery.particleCount = particleCount;
   gallery.hash = hash;
 }
 
@@ -307,7 +370,7 @@ function renderFrame() {
   dirty = false;
   renderer.resize();
   const generation = selectionGeneration;
-  renderer.frame(cameraForOrbit(), partView, 0, instView, current.count, {
+  renderer.frame(cameraForOrbit(), partView, current.particleCount, instView, current.count, {
     fov: 0.92,
     time: 17.0,
     sun: [0.44, 0.78, 0.36],
@@ -327,7 +390,7 @@ function renderFrame() {
     if (generation !== selectionGeneration || gallery.state !== 'loading') return;
     setStatus(
       'pass',
-      `PASS — ${current.scene.label} · variant ${current.variant + 1}/${current.variantCount} · ${current.count} instances · ${current.hash}`,
+      `PASS — ${current.scene.label} · variant ${current.variant + 1}/${current.variantCount} · ${current.count} instances · ${current.particleCount} particles · ${current.hash}`,
     );
   }).catch(showFailure);
 }
@@ -439,6 +502,12 @@ async function boot() {
   ];
   const missing = required.filter((name) => typeof sim[name] !== 'function');
   if (missing.length) throw new Error(`sim.wasm is missing preview exports: ${missing.join(', ')}`);
+  if (sim.instStride() !== 14 || sim.partStride() !== 8) {
+    throw new Error(
+      `Preview ABI mismatch: expected 14-float instances and 8-float particles; ` +
+      `received ${sim.instStride()} and ${sim.partStride()}.`,
+    );
+  }
   if (sim.previewSceneCount() !== CATALOG.length) {
     throw new Error(`Preview catalogue has ${CATALOG.length} entries but the core reports ${sim.previewSceneCount()}.`);
   }
