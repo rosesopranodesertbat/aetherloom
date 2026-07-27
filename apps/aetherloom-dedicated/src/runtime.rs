@@ -1,26 +1,25 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use aetherloom_core::{
-    CommandSet, Controller, CoreError, Entity, MatchState, PlayerCommand, PlayerId,
-    PlayerOutcome, TeamId, TickEvent, TickEventKind, TickEvents,
+    CommandSet, Controller, CoreError, Entity, MatchState, PlayerCommand, PlayerId, PlayerOutcome,
+    TeamId, TickEvent, TickEventKind, TickEvents,
 };
 use aetherloom_protocol::{
-    ChunkRevision, EntityId, EntityState, EnvelopeMetadata, EventBatch, EventKind,
-    GameEvent, InputBatch, LootEntry, MatchOutcome, MatchResult, Message,
-    MessageEnvelope, PlayerMatchResult, ProtocolError, SnapshotDelta, SnapshotId,
-    SnapshotKeyframe, TerrainChunkState, TerrainDelta, TerrainOp, TerrainOpKind,
-    MAX_DATAGRAM_BYTES, MAX_EVENTS_PER_BATCH,
+    ChunkRevision, EntityId, EntityState, EnvelopeMetadata, EventBatch, EventKind, GameEvent,
+    InputBatch, LootEntry, MatchOutcome, MatchResult, Message, MessageEnvelope, PlayerMatchResult,
+    ProtocolError, SnapshotDelta, SnapshotId, SnapshotKeyframe, TerrainChunkState, TerrainDelta,
+    TerrainOp, TerrainOpKind, MAX_DATAGRAM_BYTES, MAX_EVENTS_PER_BATCH,
 };
 use aetherloom_server::{
-    can_reconnect, disconnect_action, DeliveryKind, DisconnectAction, HostError,
-    HostKind, HostState, InboundMessage, MatchHost, MonotonicClock, PeerId,
-    SchedulerError, TickId, TickSample, TickScheduler,
+    can_reconnect, disconnect_action, DeliveryKind, DisconnectAction, HostError, HostKind,
+    HostState, InboundMessage, MatchHost, MonotonicClock, PeerId, SchedulerError, TickId,
+    TickSample, TickScheduler,
 };
 
 use crate::{
-    AdmissionError, DeterministicSpatialGrid, EgressClass, OutboundPacket,
-    PersistenceKind, PriorityEgress, ProcessConfig, ReplayCheckpointSink, ReplayChunk,
-    SettlementSink, SignedTicketVerifier, SinkError, VerifiedTicket,
+    AdmissionError, DeterministicSpatialGrid, EgressClass, OutboundPacket, PersistenceKind,
+    PriorityEgress, ProcessConfig, ReplayCheckpointSink, ReplayChunk, SettlementSink,
+    SignedTicketVerifier, SinkError, VerifiedTicket,
 };
 
 pub const MAX_COMMAND_FUTURE_TICKS: u64 = 8;
@@ -162,7 +161,10 @@ pub enum ProcessError {
     Host(HostError),
     Scheduler(SchedulerError),
     Protocol(ProtocolError),
-    PermitMismatch { expected: u64, actual: u64 },
+    PermitMismatch {
+        expected: u64,
+        actual: u64,
+    },
     InvalidResult,
     MatchNotTerminal(PlayerId),
     MissingAuthoritativePlayer(PlayerId),
@@ -360,7 +362,7 @@ impl PersistenceQueue {
                 let Some(index) = self
                     .chunks
                     .iter()
-                .position(|queued| queued.kind == PersistenceKind::TickRecord)
+                    .position(|queued| queued.kind == PersistenceKind::TickRecord)
                 else {
                     break;
                 };
@@ -419,6 +421,7 @@ pub struct DedicatedMatch<H, V, R, S> {
     state: MatchState,
     spatial_grid: DeterministicSpatialGrid,
     sessions: BTreeMap<PlayerId, PlayerSession>,
+    used_ticket_nonces: BTreeMap<[u8; 16], u64>,
     peer_bindings: BTreeMap<PeerId, PlayerId>,
     pending_commands: BTreeMap<u64, BTreeMap<PlayerId, PlayerCommand>>,
     egress: PriorityEgress,
@@ -455,6 +458,7 @@ where
             state: MatchState::new(config.core_match_config(), config.seed()),
             spatial_grid: DeterministicSpatialGrid::default(),
             sessions: BTreeMap::new(),
+            used_ticket_nonces: BTreeMap::new(),
             peer_bindings: BTreeMap::new(),
             pending_commands: BTreeMap::new(),
             egress: PriorityEgress::new(
@@ -472,9 +476,7 @@ where
             critical_updates_deferred: 0,
             host_receive_failures: 0,
             ingress_quota_drops: 0,
-            recent_critical_events: VecDeque::with_capacity(
-                MAX_RECENT_CRITICAL_EVENTS,
-            ),
+            recent_critical_events: VecDeque::with_capacity(MAX_RECENT_CRITICAL_EVENTS),
             config,
             host,
             verifier,
@@ -528,9 +530,11 @@ where
                 .filter(|player| player.controller != Controller::Empty)
                 .count(),
             max_players: self.config.max_players(),
-            admission_headroom: self.capacity.has_headroom(
-                self.config.build().content_build_hash(),
-            ) && self.host.accepts_new_players(),
+            admission_headroom: self
+                .capacity
+                .has_headroom(self.config.build().content_build_hash())
+                && self.host.accepts_new_players()
+                && !self.started,
             egress_packets: self.egress.len(),
             egress_bytes: self.egress.queued_bytes(),
             persistence_chunks: self.persistence.chunks.len(),
@@ -547,6 +551,16 @@ where
         }
     }
 
+    /// Advances non-blocking replay and settlement handoffs without advancing
+    /// authoritative simulation time.
+    ///
+    /// Deployment loops use this while draining so an acknowledged background
+    /// spool can retire the final queued chunks before process exit.
+    pub fn poll_external_handoffs(&mut self) {
+        self.persistence.flush(&mut self.replay_sink);
+        self.flush_settlement();
+    }
+
     pub fn admit(
         &mut self,
         peer: PeerId,
@@ -554,9 +568,12 @@ where
         now_unix_seconds: u64,
     ) -> Result<PlayerId, AdmissionError> {
         self.preflight_admission(peer)?;
-        let ticket = self
-            .verifier
-            .verify(signed_ticket, self.config.build(), now_unix_seconds)?;
+        let ticket = self.verifier.verify(
+            signed_ticket,
+            self.config.build(),
+            self.config.admission_scope(),
+            now_unix_seconds,
+        )?;
         self.bind_verified_admission(peer, ticket, now_unix_seconds)
     }
 
@@ -599,6 +616,11 @@ where
         now_unix_seconds: u64,
     ) -> Result<PlayerId, AdmissionError> {
         self.validate_ticket(ticket, now_unix_seconds)?;
+        self.used_ticket_nonces
+            .retain(|_, expires_at| *expires_at > now_unix_seconds);
+        if self.used_ticket_nonces.contains_key(&ticket.nonce) {
+            return Err(AdmissionError::TicketReplayed);
+        }
 
         if let Some(existing) = self.sessions.get_mut(&ticket.player_id) {
             if existing.account_id != ticket.account_id {
@@ -613,9 +635,7 @@ where
             let disconnected_at = existing
                 .disconnected_at
                 .ok_or(AdmissionError::PlayerAlreadyConnected)?;
-            if existing.expired
-                || !can_reconnect(disconnected_at, TickId(self.state.tick()))
-            {
+            if existing.expired || !can_reconnect(disconnected_at, TickId(self.state.tick())) {
                 return Err(AdmissionError::ReconnectExpired);
             }
             self.state
@@ -626,6 +646,8 @@ where
             existing.last_envelope_sequence = None;
             existing.replication.needs_keyframe = true;
             self.peer_bindings.insert(peer, ticket.player_id);
+            self.used_ticket_nonces
+                .insert(ticket.nonce, ticket.expires_at_unix_seconds);
             return Ok(ticket.player_id);
         }
 
@@ -651,17 +673,15 @@ where
                 last_envelope_sequence: None,
                 last_client_ack_tick: 0,
                 replication_profile: match self.host.kind() {
-                    HostKind::DedicatedQuic => {
-                        ReplicationProfile::NativeCompetitive128Hz
-                    }
-                    HostKind::CloudflareWebSocket => {
-                        ReplicationProfile::BrowserCasual32Hz
-                    }
+                    HostKind::DedicatedQuic => ReplicationProfile::NativeCompetitive128Hz,
+                    HostKind::CloudflareWebSocket => ReplicationProfile::BrowserCasual32Hz,
                 },
                 replication: ReplicationState::new(),
             },
         );
         self.peer_bindings.insert(peer, ticket.player_id);
+        self.used_ticket_nonces
+            .insert(ticket.nonce, ticket.expires_at_unix_seconds);
         Ok(ticket.player_id)
     }
 
@@ -683,6 +703,17 @@ where
         if ticket.match_epoch != build.match_epoch() {
             return Err(AdmissionError::WrongEpoch);
         }
+        if ticket.region != self.config.admission_scope().region() {
+            return Err(AdmissionError::WrongRegion);
+        }
+        if ticket.input_pool != self.config.admission_scope().input_pool() {
+            return Err(AdmissionError::WrongInputPool);
+        }
+        if ticket.nonce.iter().all(|byte| *byte == 0) {
+            return Err(AdmissionError::Ticket(
+                crate::TicketVerificationError::Malformed,
+            ));
+        }
         if ticket.player_id.get() >= self.config.max_players() {
             return Err(AdmissionError::PlayerOutOfRange(ticket.player_id));
         }
@@ -691,6 +722,75 @@ where
 
     pub fn begin_drain(&mut self) {
         self.host.begin_drain();
+    }
+
+    pub const fn has_started(&self) -> bool {
+        self.started
+    }
+
+    pub fn admitted_player_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// True once every profile-backed participant has reached an authoritative
+    /// terminal outcome. Bots are not profile reservations and are ignored.
+    pub fn all_admitted_players_terminal(&self) -> bool {
+        !self.sessions.is_empty()
+            && self.sessions.iter().all(|(player_id, session)| {
+                session.terminal_settlement.is_some()
+                    || self
+                        .state
+                        .player(*player_id)
+                        .is_some_and(|player| player.outcome != PlayerOutcome::Active)
+            })
+    }
+
+    /// Converts still-active admitted participants to authoritative
+    /// abandonment during an orchestrated shutdown.
+    ///
+    /// This is deliberately process-owned: callers cannot supply outcomes,
+    /// score, loot, teams, or player membership. Unbanked and banked loot are
+    /// forfeited, while the informational score remains the server-observed
+    /// banked-resource count.
+    pub fn abandon_active_players(&mut self) -> Result<usize, ProcessError> {
+        let active: Vec<(PlayerId, TeamId, u32)> = self
+            .sessions
+            .iter()
+            .filter_map(|(player_id, session)| {
+                if session.terminal_settlement.is_some() {
+                    return None;
+                }
+                let player = self.state.player(*player_id)?;
+                (player.outcome == PlayerOutcome::Active).then_some((
+                    *player_id,
+                    session.reserved_team_id,
+                    player.inventory.banked_resources,
+                ))
+            })
+            .collect();
+
+        for (player_id, team_id, score) in &active {
+            self.state.set_controller(*player_id, Controller::Empty)?;
+            let session = self
+                .sessions
+                .get_mut(player_id)
+                .expect("active players come from sessions");
+            if let Some(peer) = session.peer.take() {
+                self.peer_bindings.remove(&peer);
+                self.egress.purge_peer(peer);
+            }
+            session.expired = true;
+            session.terminal_settlement = Some(PlayerMatchResult {
+                player_id: *player_id,
+                team_id: *team_id,
+                outcome: MatchOutcome::Abandoned,
+                rating_delta: 0,
+                score: *score,
+                banked_loot: Vec::new(),
+            });
+            self.clear_pending_for(*player_id);
+        }
+        Ok(active.len())
     }
 
     pub fn disconnect_peer(&mut self, peer: PeerId) -> bool {
@@ -729,14 +829,9 @@ where
         Ok(())
     }
 
-    pub fn ingest_message(
-        &mut self,
-        inbound: InboundMessage,
-    ) -> Result<usize, InboundRejection> {
+    pub fn ingest_message(&mut self, inbound: InboundMessage) -> Result<usize, InboundRejection> {
         let envelope = match (inbound.delivery, self.host.kind()) {
-            (DeliveryKind::Datagram, _) => {
-                MessageEnvelope::decode_datagram(&inbound.payload)
-            }
+            (DeliveryKind::Datagram, _) => MessageEnvelope::decode_datagram(&inbound.payload),
             (DeliveryKind::Reliable, HostKind::CloudflareWebSocket) => {
                 // WebSocket preserves this logical datagram frame reliably;
                 // the envelope still carries gameplay-datagram semantics.
@@ -904,10 +999,7 @@ where
     }
 
     pub fn pending_command_count(&self) -> usize {
-        self.pending_commands
-            .values()
-            .map(BTreeMap::len)
-            .sum()
+        self.pending_commands.values().map(BTreeMap::len).sum()
     }
 
     pub fn replication_profile(&self, peer: PeerId) -> Option<ReplicationProfile> {
@@ -961,8 +1053,7 @@ where
         report.scheduler_sample = scheduler_sample;
         if let Some(metrics) = scheduler.metrics().snapshot() {
             self.capacity.p99_simulation_ns = metrics.p99_duration_ns;
-            self.capacity.p99_tick_start_jitter_ns =
-                metrics.p99_start_jitter_ns.unsigned_abs();
+            self.capacity.p99_tick_start_jitter_ns = metrics.p99_start_jitter_ns.unsigned_abs();
         }
         Ok(report)
     }
@@ -1010,9 +1101,7 @@ where
             state_hash: self.state.authoritative_hash(),
             applied_commands: events.applied_commands.len(),
             ingress_rejections: self.ingress_rejections.len() - rejected_before,
-            ingress_quota_drops: self
-                .ingress_quota_drops
-                .saturating_sub(quota_drops_before),
+            ingress_quota_drops: self.ingress_quota_drops.saturating_sub(quota_drops_before),
             packets_sent,
             packets_queued: self.egress.len(),
             distant_updates_shed: self.distant_updates_shed,
@@ -1030,11 +1119,7 @@ where
     }
 
     /// Adds one director-selected bot before insertion begins.
-    pub fn add_bot(
-        &mut self,
-        player_id: PlayerId,
-        team_id: TeamId,
-    ) -> Result<(), AdmissionError> {
+    pub fn add_bot(&mut self, player_id: PlayerId, team_id: TeamId) -> Result<(), AdmissionError> {
         if self.started {
             return Err(AdmissionError::MatchAlreadyStarted);
         }
@@ -1070,8 +1155,7 @@ where
                 continue;
             }
             let team_id = TeamId::new(raw).expect("player and team limits are identical");
-            self.state
-                .add_player(player_id, team_id, Controller::Bot)?;
+            self.state.add_player(player_id, team_id, Controller::Bot)?;
             added += 1;
         }
         self.started = true;
@@ -1089,8 +1173,7 @@ where
                 Ok(Some(inbound)) => inbound,
                 Ok(None) => return,
                 Err(_) => {
-                    self.host_receive_failures =
-                        self.host_receive_failures.saturating_add(1);
+                    self.host_receive_failures = self.host_receive_failures.saturating_add(1);
                     self.capacity.healthy = false;
                     return;
                 }
@@ -1100,8 +1183,7 @@ where
                 // Input batches are redundant and superseding. Bounding work
                 // per peer protects the fixed tick budget; the transport's
                 // fair dequeue still lets other admitted peers make progress.
-                self.ingress_quota_drops =
-                    self.ingress_quota_drops.saturating_add(1);
+                self.ingress_quota_drops = self.ingress_quota_drops.saturating_add(1);
                 continue;
             }
             *accepted += 1;
@@ -1142,16 +1224,10 @@ where
                 }
                 DisconnectAction::Defeat => {
                     let reserved_team_id = self.sessions[&player_id].reserved_team_id;
-                    let terminal_settlement = self.authoritative_player_result(
-                        player_id,
-                        reserved_team_id,
-                        true,
-                    )?;
+                    let terminal_settlement =
+                        self.authoritative_player_result(player_id, reserved_team_id, true)?;
                     self.state.set_controller(player_id, Controller::Empty)?;
-                    let session = self
-                        .sessions
-                        .get_mut(&player_id)
-                        .expect("session exists");
+                    let session = self.sessions.get_mut(&player_id).expect("session exists");
                     session.expired = true;
                     session.terminal_settlement = Some(terminal_settlement);
                     self.clear_pending_for(player_id);
@@ -1251,8 +1327,7 @@ where
             .events
             .iter()
             .filter(|event| {
-                event_route(event.kind)
-                    == (DeliveryKind::Datagram, EgressClass::CombatCritical)
+                event_route(event.kind) == (DeliveryKind::Datagram, EgressClass::CombatCritical)
             })
             .copied()
             .map(wire_event)
@@ -1281,8 +1356,7 @@ where
             let peer = session.peer.expect("tick-output viewers are connected");
             let acknowledgement_tick = session.last_client_ack_tick;
             let mut replication = session.replication.clone();
-            let keyframed_this_tick =
-                replication.last_keyframe_tick == self.state.tick();
+            let keyframed_this_tick = replication.last_keyframe_tick == self.state.tick();
 
             for template in &templates {
                 if template.superseded_by_same_tick_keyframe && keyframed_this_tick {
@@ -1379,10 +1453,7 @@ where
             let Some(entity) = current.get(entity_id) else {
                 continue;
             };
-            let distance_squared = horizontal_distance_squared(
-                viewer_position,
-                entity.position_cm,
-            );
+            let distance_squared = horizontal_distance_squared(viewer_position, entity.position_cm);
             let interest = classify_interest(
                 self.state
                     .player(viewer)
@@ -1390,9 +1461,7 @@ where
                 *entity_id,
                 distance_squared,
             );
-            if interest.due(tick)
-                && replication.known_entities.get(entity_id) != Some(entity)
-            {
+            if interest.due(tick) && replication.known_entities.get(entity_id) != Some(entity) {
                 candidates.push(ReplicationCandidate {
                     interest,
                     is_viewer: self
@@ -1463,9 +1532,7 @@ where
             replication
                 .last_sent_ticks
                 .insert(entity.entity_id, self.state.tick());
-            replication
-                .known_entities
-                .insert(entity.entity_id, entity);
+            replication.known_entities.insert(entity.entity_id, entity);
         }
         replication.baseline = snapshot_id;
         replication.advance_cursors();
@@ -1569,11 +1636,7 @@ where
             .collect()
     }
 
-    fn envelope_metadata(
-        &self,
-        sequence: u32,
-        acknowledgement_tick: u64,
-    ) -> EnvelopeMetadata {
+    fn envelope_metadata(&self, sequence: u32, acknowledgement_tick: u64) -> EnvelopeMetadata {
         EnvelopeMetadata::new(
             self.config.build().content_build_hash(),
             self.config.build().match_epoch(),
@@ -1604,15 +1667,11 @@ where
             }
             let result = match &session.terminal_settlement {
                 Some(result) => result.clone(),
-                None => self.authoritative_player_result(
-                    *player_id,
-                    session.reserved_team_id,
-                    false,
-                )?,
+                None => {
+                    self.authoritative_player_result(*player_id, session.reserved_team_id, false)?
+                }
             };
-            if result.player_id != *player_id
-                || result.team_id != session.reserved_team_id
-            {
+            if result.player_id != *player_id || result.team_id != session.reserved_team_id {
                 return Err(ProcessError::ReservationTeamMismatch(*player_id));
             }
             players.push(result);
@@ -1634,10 +1693,7 @@ where
     /// Repeating the same id retries a backpressured sink. Once a different
     /// result has been sealed, this match can never be settled under another
     /// id.
-    pub fn seal_match_result(
-        &mut self,
-        result_id: [u8; 16],
-    ) -> Result<MatchResult, ProcessError> {
+    pub fn seal_match_result(&mut self, result_id: [u8; 16]) -> Result<MatchResult, ProcessError> {
         if let Some(existing) = self.sealed_result() {
             if existing.result_id != result_id {
                 return Err(ProcessError::SettlementAlreadyFinalized);
@@ -1853,17 +1909,13 @@ fn event_route(kind: TickEventKind) -> (DeliveryKind, EgressClass) {
         TickEventKind::PlayerJoined
         | TickEventKind::PlayerLeft
         | TickEventKind::Defeat
-        | TickEventKind::Extraction => {
-            (DeliveryKind::Reliable, EgressClass::ReliableControl)
-        }
+        | TickEventKind::Extraction => (DeliveryKind::Reliable, EgressClass::ReliableControl),
         TickEventKind::Cast | TickEventKind::Damage => {
             (DeliveryKind::Datagram, EgressClass::CombatCritical)
         }
         TickEventKind::EntitySpawned
         | TickEventKind::EntityDespawned
-        | TickEventKind::TerrainDeformed => {
-            (DeliveryKind::Datagram, EgressClass::Cosmetic)
-        }
+        | TickEventKind::TerrainDeformed => (DeliveryKind::Datagram, EgressClass::Cosmetic),
     }
 }
 
@@ -2077,19 +2129,11 @@ mod tests {
             Ok(None)
         }
 
-        fn try_send_gameplay(
-            &mut self,
-            _peer: PeerId,
-            _payload: &[u8],
-        ) -> Result<(), HostError> {
+        fn try_send_gameplay(&mut self, _peer: PeerId, _payload: &[u8]) -> Result<(), HostError> {
             Ok(())
         }
 
-        fn try_send_reliable(
-            &mut self,
-            _peer: PeerId,
-            _payload: &[u8],
-        ) -> Result<(), HostError> {
+        fn try_send_reliable(&mut self, _peer: PeerId, _payload: &[u8]) -> Result<(), HostError> {
             Ok(())
         }
 
@@ -2110,6 +2154,7 @@ mod tests {
             &self,
             _signed_ticket: &[u8],
             _expected_build: crate::MatchBuild,
+            _expected_scope: crate::MatchAdmissionScope,
             _now_unix_seconds: u64,
         ) -> Result<VerifiedTicket, crate::TicketVerificationError> {
             Err(crate::TicketVerificationError::BadSignature)
@@ -2138,12 +2183,8 @@ mod tests {
         }
     }
 
-    type SettlementRuntime = DedicatedMatch<
-        TestHost,
-        NeverVerifier,
-        crate::NoopReplaySink,
-        ScriptedSettlementSink,
-    >;
+    type SettlementRuntime =
+        DedicatedMatch<TestHost, NeverVerifier, crate::NoopReplaySink, ScriptedSettlementSink>;
 
     #[derive(Debug, Default)]
     struct ManualClock {
@@ -2161,29 +2202,29 @@ mod tests {
     }
 
     fn test_command(tick: u64, sequence: u32) -> PlayerCommand {
-        PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, None)
-            .expect("valid command")
+        PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, None).expect("valid command")
+    }
+
+    fn test_admission_scope() -> crate::MatchAdmissionScope {
+        crate::MatchAdmissionScope::new(
+            aetherloom_protocol::RegionId::new("local").expect("region"),
+            aetherloom_protocol::InputPool::Mixed,
+        )
     }
 
     fn settlement_runtime(
         responses: impl IntoIterator<Item = Result<(), SinkError>>,
     ) -> (SettlementRuntime, Rc<RefCell<Vec<MatchResult>>>) {
         let build = crate::MatchBuild::new([1; 16], [2; 16], 1).expect("build");
-        let config =
-            ProcessConfig::new(build, WorldSeed::new(7), 2).expect("config");
+        let config = ProcessConfig::new(build, test_admission_scope(), WorldSeed::new(7), 2)
+            .expect("config");
         let attempts = Rc::new(RefCell::new(Vec::new()));
         let sink = ScriptedSettlementSink {
             attempts: Rc::clone(&attempts),
             responses: responses.into_iter().collect(),
         };
         (
-            DedicatedMatch::new(
-                config,
-                TestHost,
-                NeverVerifier,
-                crate::NoopReplaySink,
-                sink,
-            ),
+            DedicatedMatch::new(config, TestHost, NeverVerifier, crate::NoopReplaySink, sink),
             attempts,
         )
     }
@@ -2199,11 +2240,11 @@ mod tests {
                     PeerId(u64::from(raw) + 1),
                     VerifiedTicket {
                         match_id: runtime.config.build().match_id(),
-                        content_build_hash: runtime
-                            .config
-                            .build()
-                            .content_build_hash(),
+                        content_build_hash: runtime.config.build().content_build_hash(),
                         match_epoch: runtime.config.build().match_epoch(),
+                        region: runtime.config.admission_scope().region(),
+                        input_pool: runtime.config.admission_scope().input_pool(),
+                        nonce: [raw as u8 + 1; 16],
                         account_id,
                         player_id,
                         team_id,
@@ -2220,17 +2261,8 @@ mod tests {
             let player_id = PlayerId::new(raw).expect("player");
             runtime.pending_commands.entry(0).or_default().insert(
                 player_id,
-                PlayerCommand::new(
-                    0,
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                    aetherloom_protocol::ACTION_EXTRACT,
-                    None,
-                )
-                .expect("extract command"),
+                PlayerCommand::new(0, 1, 0, 0, 0, 0, aetherloom_protocol::ACTION_EXTRACT, None)
+                    .expect("extract command"),
             );
         }
         let mut scheduler = TickScheduler::new(ManualClock::default(), 8);
@@ -2335,8 +2367,7 @@ mod tests {
 
     #[test]
     fn backpressured_settlement_retries_only_the_exact_seal() {
-        let (mut runtime, attempts) =
-            settlement_runtime([Err(SinkError::Backpressure), Ok(())]);
+        let (mut runtime, attempts) = settlement_runtime([Err(SinkError::Backpressure), Ok(())]);
         admit_settlement_players(&mut runtime);
         extract_settlement_players(&mut runtime);
 
@@ -2364,10 +2395,7 @@ mod tests {
             .expect("exact retry succeeds");
         assert!(!runtime.health().settlement_pending);
         assert!(runtime.health().settlement_finalized);
-        assert_eq!(
-            attempts.borrow().as_slice(),
-            &[expected.clone(), expected]
-        );
+        assert_eq!(attempts.borrow().as_slice(), &[expected.clone(), expected]);
     }
 
     #[test]
@@ -2385,6 +2413,9 @@ mod tests {
                     match_id: runtime.config.build().match_id(),
                     content_build_hash: runtime.config.build().content_build_hash(),
                     match_epoch: runtime.config.build().match_epoch(),
+                    region: runtime.config.admission_scope().region(),
+                    input_pool: runtime.config.admission_scope().input_pool(),
+                    nonce: [99; 16],
                     account_id,
                     player_id: PlayerId::new(0).expect("player"),
                     team_id: TeamId::new(12).expect("different team"),
@@ -2397,10 +2428,85 @@ mod tests {
     }
 
     #[test]
+    fn verified_admission_rechecks_scope_and_consumes_nonce_once() {
+        let (mut runtime, _attempts) = settlement_runtime([]);
+        let build = runtime.config.build();
+        let scope = runtime.config.admission_scope();
+        let base = VerifiedTicket {
+            match_id: build.match_id(),
+            content_build_hash: build.content_build_hash(),
+            match_epoch: build.match_epoch(),
+            region: scope.region(),
+            input_pool: scope.input_pool(),
+            nonce: [12; 16],
+            account_id: [7; 16],
+            player_id: PlayerId::new(0).expect("player"),
+            team_id: TeamId::new(0).expect("team"),
+            expires_at_unix_seconds: 100,
+        };
+
+        assert_eq!(
+            runtime.admit_verified(
+                PeerId(1),
+                VerifiedTicket {
+                    region: aetherloom_protocol::RegionId::new("eeur").expect("region"),
+                    ..base
+                },
+                1,
+            ),
+            Err(AdmissionError::WrongRegion)
+        );
+        assert_eq!(
+            runtime.admit_verified(
+                PeerId(1),
+                VerifiedTicket {
+                    input_pool: aetherloom_protocol::InputPool::Controller,
+                    ..base
+                },
+                1,
+            ),
+            Err(AdmissionError::WrongInputPool)
+        );
+        assert_eq!(
+            runtime.admit_verified(
+                PeerId(1),
+                VerifiedTicket {
+                    nonce: [0; 16],
+                    ..base
+                },
+                1,
+            ),
+            Err(AdmissionError::Ticket(
+                crate::TicketVerificationError::Malformed
+            ))
+        );
+        assert_eq!(
+            runtime.admit_verified(PeerId(1), base, 1),
+            Ok(base.player_id)
+        );
+        assert!(runtime.disconnect_peer(PeerId(1)));
+        assert_eq!(
+            runtime.admit_verified(PeerId(2), base, 1),
+            Err(AdmissionError::TicketReplayed)
+        );
+        assert_eq!(
+            runtime.admit_verified(
+                PeerId(2),
+                VerifiedTicket {
+                    nonce: [13; 16],
+                    ..base
+                },
+                1,
+            ),
+            Ok(base.player_id)
+        );
+    }
+
+    #[test]
     fn core_rejection_cancels_permit_and_preserves_pending_tick_for_retry() {
         let build = crate::MatchBuild::new([1; 16], [2; 16], 1).expect("build");
-        let config =
-            ProcessConfig::new(build, WorldSeed::new(7), 1).expect("config");
+        let config = ProcessConfig::new(build, test_admission_scope(), WorldSeed::new(7), 1)
+            .expect("config");
         let mut runtime = DedicatedMatch::new(
             config,
             TestHost,
@@ -2411,11 +2517,7 @@ mod tests {
         let player = PlayerId::new(0).expect("player");
         runtime
             .state
-            .add_player(
-                player,
-                TeamId::new(0).expect("team"),
-                Controller::Human,
-            )
+            .add_player(player, TeamId::new(0).expect("team"), Controller::Human)
             .expect("player");
         runtime
             .pending_commands
@@ -2455,7 +2557,7 @@ mod tests {
     #[test]
     fn replay_evidence_loss_is_visible_in_health() {
         let build = crate::MatchBuild::new([1; 16], [2; 16], 1).expect("build");
-        let config = ProcessConfig::new(build, WorldSeed::new(7), 1)
+        let config = ProcessConfig::new(build, test_admission_scope(), WorldSeed::new(7), 1)
             .expect("config")
             .with_queue_limits(8, 8_192, 1)
             .expect("queue limits");
@@ -2482,8 +2584,8 @@ mod tests {
     #[test]
     fn queued_replay_evidence_is_not_reported_as_complete() {
         let build = crate::MatchBuild::new([1; 16], [2; 16], 1).expect("build");
-        let config =
-            ProcessConfig::new(build, WorldSeed::new(7), 1).expect("config");
+        let config = ProcessConfig::new(build, test_admission_scope(), WorldSeed::new(7), 1)
+            .expect("config");
         let mut runtime = DedicatedMatch::new(
             config,
             TestHost,
@@ -2503,11 +2605,30 @@ mod tests {
     }
 
     #[test]
+    fn orchestrated_shutdown_seals_active_humans_as_abandoned() {
+        let (mut runtime, attempts) = settlement_runtime([Ok(())]);
+        admit_settlement_players(&mut runtime);
+        assert!(!runtime.all_admitted_players_terminal());
+        assert_eq!(runtime.abandon_active_players().expect("abandon"), 2);
+        assert!(runtime.all_admitted_players_terminal());
+        let result = runtime
+            .seal_match_result([0x55; 16])
+            .expect("authoritative shutdown result");
+        assert!(result
+            .players
+            .iter()
+            .all(|player| player.outcome == MatchOutcome::Abandoned));
+        assert!(result
+            .players
+            .iter()
+            .all(|player| player.banked_loot.is_empty()));
+        assert_eq!(attempts.borrow().as_slice(), &[result]);
+    }
+
+    #[test]
     fn full_width_positions_cannot_overflow_replication_distance() {
-        let distance = horizontal_distance_squared(
-            [i32::MIN, 0, i32::MIN],
-            [i32::MAX, 0, i32::MAX],
-        );
+        let distance =
+            horizontal_distance_squared([i32::MIN, 0, i32::MIN], [i32::MAX, 0, i32::MAX]);
         assert_eq!(
             classify_interest(None, EntityId::new(0, 1).expect("entity"), distance),
             WireInterest::Distant

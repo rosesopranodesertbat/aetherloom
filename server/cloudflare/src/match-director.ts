@@ -20,6 +20,7 @@ import {
 
 export interface ReserveMatchRequest {
   matchId: string;
+  matchEpoch: number;
   dispatchHash: string;
   rosterHash: string;
   region: string;
@@ -48,6 +49,7 @@ export interface ResumableDispatch {
 
 export interface MatchAssignment {
   matchId: string;
+  matchEpoch: number;
   joinTicket: string;
   transport: MatchTransport;
   endpoint: string;
@@ -115,6 +117,7 @@ interface CapacityResponse {
 
 interface AllocationRow {
   match_id: string;
+  match_epoch: number;
   dispatch_hash: string;
   roster_hash: string;
   host_id: string;
@@ -226,6 +229,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
         !["reserved", "active"].includes(existing.status) ||
         existing.expires_at_ms <= Date.now() ||
         existing.dispatch_hash !== request.dispatchHash ||
+        existing.match_epoch !== request.matchEpoch ||
         existing.roster_hash !== request.rosterHash ||
         existing.region !== request.region ||
         existing.playlist !== request.playlist ||
@@ -247,6 +251,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
     }
     const serviceTicket = await this.serviceTicket("match-director", ["capacity:reserve"], {
       match_id: request.matchId,
+      match_epoch: request.matchEpoch,
       build_hash: request.buildHash,
       region: request.region,
     });
@@ -270,6 +275,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
     const capacity = this.capacityResponse(await readJson<unknown>(response), request);
     const allocation: MatchAllocation = {
       matchId: request.matchId,
+      matchEpoch: request.matchEpoch,
       hostId: capacity.hostId,
       region: request.region,
       playlist: request.playlist,
@@ -283,13 +289,14 @@ export class ServiceBindingMatchDirector implements MatchDirector {
     try {
       await this.env.CONTROL_DB.prepare(
         `INSERT INTO match_allocations(
-           match_id, dispatch_hash, roster_hash, host_id, region, playlist, input_pool, transport,
+           match_id, match_epoch, dispatch_hash, roster_hash, host_id, region, playlist, input_pool, transport,
            native_endpoint, build_hash, status, player_count, bot_count,
            created_at_ms, expires_at_ms
-         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?)`,
+         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?)`,
       )
         .bind(
           allocation.matchId,
+          allocation.matchEpoch,
           request.dispatchHash,
           request.rosterHash,
           allocation.hostId,
@@ -663,7 +670,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
     const matchId = requireIdentifier(matchIdRaw, "matchId");
     const row = await this.env.CONTROL_DB.prepare(
       `SELECT match_id, dispatch_hash, roster_hash, host_id, region, playlist, input_pool, transport,
-              native_endpoint, build_hash, expires_at_ms, status, player_count, bot_count,
+              native_endpoint, build_hash, match_epoch, expires_at_ms, status, player_count, bot_count,
               matchmaking_shard, lease_id, assignments_json, reservations_json,
               queue_confirmed_at_ms
        FROM match_allocations
@@ -734,6 +741,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
   private presentAllocation(row: AllocationRow): MatchAllocation {
     return {
       matchId: row.match_id,
+      matchEpoch: row.match_epoch,
       hostId: row.host_id,
       region: row.region,
       playlist: row.playlist,
@@ -748,7 +756,7 @@ export class ServiceBindingMatchDirector implements MatchDirector {
   private allocationRow(matchId: string): Promise<AllocationRow | null> {
     return this.env.CONTROL_DB.prepare(
       `SELECT match_id, dispatch_hash, roster_hash, host_id, region, playlist, input_pool,
-              transport, native_endpoint, build_hash, expires_at_ms, status,
+              transport, native_endpoint, build_hash, match_epoch, expires_at_ms, status,
               player_count, bot_count, matchmaking_shard, lease_id, assignments_json,
               reservations_json, queue_confirmed_at_ms
        FROM match_allocations WHERE match_id = ?`,

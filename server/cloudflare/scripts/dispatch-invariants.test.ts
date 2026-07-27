@@ -36,6 +36,7 @@ test("dispatch identity binds every immutable request field", () => {
   const dispatch = {
     shard: "weur:solo-extraction:controller:mmr-5:shard-1",
     matchId: "match-1",
+    matchEpoch: 1,
     region: "weur",
     playlist: "solo-extraction",
     inputPool: "controller",
@@ -47,6 +48,7 @@ test("dispatch identity binds every immutable request field", () => {
   const mutations = {
     shard: "weur:solo-extraction:controller:mmr-5:shard-2",
     matchId: "match-2",
+    matchEpoch: 2,
     region: "eeur",
     playlist: "squad-extraction",
     inputPool: "mouse-keyboard",

@@ -4,7 +4,9 @@ import {
 } from "./match-director";
 import { matchmakingShardName } from "./matchmaking";
 import { acceptSignedSettlement } from "./settlements";
-import { publicWebSocketProtocol, signTicket, ticketFromRequest, verifyTicket } from "./tickets";
+import { signJoinTicket, verifyJoinTicket } from "./join-tickets";
+import { assertCryptographicReadiness } from "./readiness";
+import { publicWebSocketProtocol, ticketFromRequest, verifyTicket } from "./tickets";
 import {
   activateBeforeConfirm,
   checkpointObjectKey,
@@ -37,9 +39,11 @@ import {
   jsonResponse,
   mapInBatches,
   parsePositiveConfigInt,
+  randomHex128,
   randomToken,
   readJson,
   requestId,
+  requireHex128,
   requireIdempotencyKey,
   requireIdentifier,
   requireInteger,
@@ -145,6 +149,19 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     ) {
       await serviceRequest(request, env, ["result:enqueue"]);
       response = await acceptSignedSettlement(request, env);
+    } else if (
+      request.method === "POST" &&
+      url.pathname === "/internal/v1/readiness"
+    ) {
+      await serviceRequest(request, env, ["deployment:verify"]);
+      await assertCryptographicReadiness(env);
+      response = jsonResponse({
+        status: "ready",
+        environment: env.ENVIRONMENT,
+        buildHash: env.CONTENT_BUILD_HASH,
+        authentication: "verified",
+        cryptography: "verified",
+      });
     } else {
       response = jsonResponse({ error: { code: "not_found", message: "Route not found.", requestId: id } }, 404);
     }
@@ -416,6 +433,7 @@ async function dispatchMatch(request: Request, env: Env): Promise<Response> {
     }
     return jsonResponse({
       matchId: dispatch.matchId,
+      matchEpoch: resumed.allocation.matchEpoch,
       status: "active",
       hostId: resumed.allocation.hostId,
       transport: resumed.allocation.transport,
@@ -467,6 +485,7 @@ async function dispatchMatch(request: Request, env: Env): Promise<Response> {
   try {
     allocation = await director.reserve({
       matchId: dispatch.matchId,
+      matchEpoch: dispatch.matchEpoch,
       dispatchHash,
       rosterHash,
       region: dispatch.region,
@@ -486,7 +505,7 @@ async function dispatchMatch(request: Request, env: Env): Promise<Response> {
       await Promise.all(
         players.map(async (player) => {
           const now = Math.floor(Date.now() / 1_000);
-          const joinTicket = await signTicket(
+          const joinTicket = await signJoinTicket(
             {
               v: 1,
               iss: env.TICKET_ISSUER,
@@ -496,15 +515,16 @@ async function dispatchMatch(request: Request, env: Env): Promise<Response> {
               iat: now,
               nbf: now - 2,
               exp: expiresSeconds,
-              nonce: randomToken("join"),
+              nonce: randomHex128(),
               match_id: dispatch.matchId,
+              match_epoch: dispatch.matchEpoch,
               region: dispatch.region,
               build_hash: dispatch.buildHash,
               input_pool: dispatch.inputPool,
               player_slot: player.playerSlot,
               team_id: player.teamId,
             },
-            env.JOIN_TICKET_KEYS_JSON,
+            env.JOIN_TICKET_SIGNING_KEYS_JSON,
             env.ACTIVE_JOIN_TICKET_KID,
           );
           const endpoint =
@@ -515,6 +535,7 @@ async function dispatchMatch(request: Request, env: Env): Promise<Response> {
             player.accountId,
             {
               matchId: dispatch.matchId,
+              matchEpoch: dispatch.matchEpoch,
               joinTicket,
               transport: activeAllocation.transport,
               endpoint,
@@ -804,23 +825,21 @@ async function routeBrowserWebSocket(
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw new ApiError(426, "websocket_required", "This endpoint requires a WebSocket upgrade.");
   }
-  const matchId = requireIdentifier(pathname.slice("/v1/ws/casual/".length), "matchId");
+  const matchId = requireHex128(pathname.slice("/v1/ws/casual/".length), "matchId");
   const token = ticketFromRequest(request, true);
-  const claims = await verifyTicket(token, env.JOIN_TICKET_KEYS_JSON, {
+  const claims = await verifyJoinTicket(token, env.JOIN_TICKET_PUBLIC_KEYS_JSON, {
     issuer: env.TICKET_ISSUER,
     audience: env.JOIN_TICKET_AUDIENCE,
-    purpose: "join",
+    matchId,
+    buildHash: requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH"),
+    inputPool: "browser",
   });
-  if (
-    claims.match_id !== matchId ||
-    claims.build_hash !== env.CONTENT_BUILD_HASH ||
-    claims.input_pool !== "browser"
-  ) {
-    throw new ApiError(403, "join_ticket_mismatch", "Join ticket is not valid for this browser match.");
-  }
   const protocol = publicWebSocketProtocol(request);
   const allocation = await new ServiceBindingMatchDirector(env).browserAllocation(matchId);
-  if (allocation.buildHash !== claims.build_hash) {
+  if (
+    allocation.buildHash !== claims.build_hash ||
+    allocation.matchEpoch !== claims.match_epoch
+  ) {
     throw new ApiError(409, "match_build_mismatch", "Match is running a different content build.");
   }
   if (env.BROWSER_MATCH_ORIGIN === undefined) {
@@ -1002,11 +1021,17 @@ function validateDispatch(value: unknown): DispatchRequest {
   }
   const dispatch = {
     shard: requireIdentifier(value.shard, "shard"),
-    matchId: requireIdentifier(value.matchId, "matchId"),
+    matchId: requireHex128(value.matchId, "matchId"),
+    matchEpoch: requireInteger(
+      value.matchEpoch,
+      "matchEpoch",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
     region: requireIdentifier(value.region, "region"),
     playlist: playlist as Playlist,
     inputPool: inputPool as InputPool,
-    buildHash: requireIdentifier(value.buildHash, "buildHash"),
+    buildHash: requireHex128(value.buildHash, "buildHash"),
     targetPlayers: requireInteger(value.targetPlayers, "targetPlayers", 1, 128),
     allowBots: value.allowBots,
   };

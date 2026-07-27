@@ -1,56 +1,135 @@
-# Publishes site/ to GitHub Pages. A workflow rather than a branch deploy
-# because branch deploys can only serve / or /docs, and the playable files
-# live in site/.
-name: Deploy site to Pages
+# Production is an explicit promotion of the exact artifact that passed the
+# protected staging workflow. Configure required reviewers on `github-pages`.
+name: Promote web production
+run-name: Promote web ${{ inputs.release_sha }}
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      staging_run_id:
+        description: Successful Deploy staging workflow run ID
+        required: true
+        type: string
+      release_sha:
+        description: Full 40-character commit SHA already present on main
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE WEB exactly
+        required: true
+        type: string
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: aetherloom-web-production
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Verify staged release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [[ "${CONFIRMATION}" != "PROMOTE WEB" ]]; then
+            echo "confirmation must be PROMOTE WEB" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+      - name: Verify immutable main commit
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          if [[ ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release SHA must be a full lowercase 40-character Git SHA" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if [[ "$(git rev-parse HEAD)" != "${RELEASE_SHA}" ]]; then
+            echo "checkout does not match the requested release SHA" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${RELEASE_SHA}" origin/main; then
+            echo "production releases must already be present on origin/main" >&2
+            exit 1
+          fi
+      - name: Verify staging workflow result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: node scripts/release/verify-staging-run.mjs "${STAGING_RUN_ID}" "${RELEASE_SHA}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.staging_run_id }}
+          name: web-release
+          path: release
+      - name: Verify promoted artifact
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          node scripts/release/release-artifact.mjs verify \
+            --site release/site \
+            --manifest release/release-manifest.json \
+            --commit "${RELEASE_SHA}"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/cloudflare/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-27
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Revalidate production source
+        run: bash scripts/release/validate-release.sh
+      - name: Prove rebuilt files equal the staged artifact
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          node scripts/release/release-artifact.mjs verify \
+            --site site \
+            --manifest release/release-manifest.json \
+            --commit "${RELEASE_SHA}"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: release/site
+
   deploy:
+    name: Deploy GitHub Pages
+    needs: verify
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Install Cloudflare control-plane toolchain
-        run: npm ci --prefix server/cloudflare
-      - name: Type-check Cloudflare control plane
-        run: npm test --prefix server/cloudflare
-      - name: Check portable Rust crates for WebAssembly
-        run: |
-          cargo check -p aetherloom-protocol --target wasm32-unknown-unknown
-          cargo check -p aetherloom-core --target wasm32-unknown-unknown
-          cargo check -p aetherloom-client --target wasm32-unknown-unknown
-      - name: Validate console vendor C boundary
-        run: clang -std=c11 -Wall -Wextra -Werror -x c-header -fsyntax-only crates/aetherloom-client/include/aetherloom_client.h
-      # `npm test` builds the Rust core first, then exercises that exact wasm.
-      - run: npm test
-      - name: Verify model gallery assets
-        run: |
-          test -f site/models.html
-          test -f site/models.js
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+      - name: Smoke-test production web
+        run: node scripts/release/smoke-web.mjs "${{ steps.deployment.outputs.page_url }}"

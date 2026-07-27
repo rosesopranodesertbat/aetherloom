@@ -30,6 +30,7 @@ export interface TicketClaims {
   platform?: Platform;
   party?: PartyClaim;
   match_id?: string;
+  match_epoch?: number;
   region?: string;
   build_hash?: string;
   input_pool?: InputPool;
@@ -37,6 +38,29 @@ export interface TicketClaims {
   team_id?: number;
   settlement_id?: string;
   result_hash?: string;
+}
+
+/**
+ * Exact claims accepted by a match host. Unlike the multipurpose control-plane
+ * ticket type, join tickets cannot carry optional or extension claims.
+ */
+export interface JoinTicketClaims {
+  v: 1;
+  iss: string;
+  aud: string;
+  purpose: "join";
+  sub: string;
+  iat: number;
+  nbf: number;
+  exp: number;
+  nonce: string;
+  match_id: string;
+  match_epoch: number;
+  region: string;
+  build_hash: string;
+  input_pool: InputPool;
+  player_slot: number;
+  team_id: number;
 }
 
 export interface InventoryStack {
@@ -120,6 +144,7 @@ export interface ClaimedQueueEntry {
 export interface DispatchRequest {
   shard: string;
   matchId: string;
+  matchEpoch: number;
   region: string;
   playlist: Playlist;
   inputPool: InputPool;
@@ -130,6 +155,7 @@ export interface DispatchRequest {
 
 export interface MatchAllocation {
   matchId: string;
+  matchEpoch: number;
   hostId: string;
   region: string;
   playlist: Playlist;
@@ -163,7 +189,8 @@ export interface Env {
   MAX_ISLAND_CHECKPOINT_BYTES: string;
 
   PLAYER_TICKET_KEYS_JSON: string;
-  JOIN_TICKET_KEYS_JSON: string;
+  JOIN_TICKET_SIGNING_KEYS_JSON: string;
+  JOIN_TICKET_PUBLIC_KEYS_JSON: string;
   SERVICE_TICKET_KEYS_JSON: string;
   RESULT_TICKET_KEYS_JSON: string;
   ACTIVE_JOIN_TICKET_KID: string;

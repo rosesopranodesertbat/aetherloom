@@ -234,25 +234,22 @@ npm test           # workspace tests, fresh wasm, balance, renderer and control-
 
 ## Deploy
 
-The deployed result is static files with no runtime server build or special
-headers. Deployment CI still compiles and tests the source before publishing.
+Pull requests and pushes to `main` validate without deploying. Staging and
+production are explicit, protected workflow dispatches:
 
-**GitHub Pages** — `.github/workflows/pages.yml` installs the Rust WASM target,
-runs the fresh-build test suite, and publishes the resulting `site/` on every
-push to `main`, including `models.html` and `models.js`. Set Settings → Pages →
-Source to **GitHub Actions** once, then:
-```bash
-git push
-```
-(A *branch* deploy will not work here: GitHub only offers `/` or `/docs` as the folder, and the playable files live in `site/`.)
+- **Deploy staging** builds one immutable web artifact, deploys the
+  `aetherloom-staging` Cloudflare Pages preview, optionally deploys the staging
+  control plane, and records smoke evidence.
+- **Promote web production** accepts only that staged artifact from a
+  successful staging run and deploys it to GitHub Pages after approval.
+- **Promote control-plane production** additionally requires a matching
+  staging control-plane smoke proof.
 
-**Cloudflare Pages / Netlify**
-```bash
-npx wrangler pages deploy site --project-name aetherloom
-netlify deploy --prod --dir site
-```
-
-**Vercel** — `vercel --prod` from inside `site/`.
+Configure GitHub Pages to use **GitHub Actions** and protect the `staging`,
+`production`, and `github-pages` environments before releasing. Resource
+names, key handling, first deployment commands, required GitHub variables, and
+rollback boundaries are in the
+[deployment runbook](docs/deployment-runbook.md).
 
 WASM is fetched with `fetch` + `arrayBuffer`, not `instantiateStreaming`, so hosts that serve `.wasm` with the wrong MIME type work anyway.
 

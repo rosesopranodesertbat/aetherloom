@@ -134,8 +134,11 @@ Projectiles and terrain deformation are never rewound.
    input pool, skill bucket, and shard number.
 3. The match director reserves a healthy host pinned to the requested content
    build and commits every reservation.
-4. The host accepts only short-lived signed join tickets for that match,
-   region, input pool, and build.
+4. The host accepts only short-lived Ed25519 join tickets for that match,
+   nonzero epoch, region, input pool, and build. Cloudflare owns the private
+   signer; hosts receive only the rotated public-key set. Each successful
+   connection consumes its nonce; reconnects require a newly issued ticket
+   while retaining the existing reservation and grace deadline.
 5. Loot remains match-local until extraction.
 6. The host derives an immutable result seal from its authoritative roster,
    outcomes, scores, and extracted loot. A trusted settlement sink signs that

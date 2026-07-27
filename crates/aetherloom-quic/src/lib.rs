@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use aetherloom_protocol::{PlayerId, TeamId, MAX_RELIABLE_FRAME_BYTES};
+use aetherloom_protocol::{InputPool, PlayerId, RegionId, TeamId, MAX_RELIABLE_FRAME_BYTES};
 use aetherloom_server::{
     DeliveryKind, DisconnectReason, InboundMessage, NetworkTransport, PeerId,
     TransportCapabilities, TransportError, MAX_GAMEPLAY_DATAGRAM_BYTES,
@@ -45,6 +45,9 @@ pub struct VerifiedConnectionClaims {
     pub match_id: [u8; 16],
     pub content_build_hash: [u8; 16],
     pub match_epoch: u64,
+    pub region: RegionId,
+    pub input_pool: InputPool,
+    pub nonce: [u8; 16],
     pub account_id: [u8; 16],
     pub player_id: PlayerId,
     pub team_id: TeamId,
@@ -69,13 +72,8 @@ pub enum ConnectionEvent {
 }
 
 /// Future returned by an authenticated connection-admission policy.
-pub type AdmissionFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<AuthenticatedConnection, AdmissionRejection>>
-            + Send
-            + 'a,
-    >,
->;
+pub type AdmissionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AuthenticatedConnection, AdmissionRejection>> + Send + 'a>>;
 
 /// Authenticates a TLS-established QUIC connection and assigns its server-owned
 /// identity.
@@ -184,9 +182,7 @@ impl QuicTransportConfig {
                 "inbound_queue_byte_capacity must hold one maximum datagram",
             ));
         }
-        if self.inbound_queue_byte_capacity / self.max_connections
-            < MAX_GAMEPLAY_DATAGRAM_BYTES
-        {
+        if self.inbound_queue_byte_capacity / self.max_connections < MAX_GAMEPLAY_DATAGRAM_BYTES {
             return Err(QuicBindError::InvalidConfig(
                 "inbound_queue_byte_capacity must reserve one maximum datagram per connection",
             ));
@@ -241,7 +237,9 @@ impl fmt::Display for QuicBindError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfig(message) => formatter.write_str(message),
-            Self::TransportConfig(message) => write!(formatter, "invalid QUIC transport config: {message}"),
+            Self::TransportConfig(message) => {
+                write!(formatter, "invalid QUIC transport config: {message}")
+            }
             Self::Runtime(message) => write!(formatter, "could not start Tokio runtime: {message}"),
             Self::Bind(message) => write!(formatter, "could not bind QUIC endpoint: {message}"),
             Self::StartupChannelClosed => formatter.write_str("QUIC worker exited during startup"),
@@ -401,15 +399,9 @@ struct FairIngressQueue {
 }
 
 impl FairIngressQueue {
-    fn new(
-        packet_capacity: usize,
-        byte_capacity: usize,
-        max_connections: usize,
-    ) -> Self {
+    fn new(packet_capacity: usize, byte_capacity: usize, max_connections: usize) -> Self {
         debug_assert!(packet_capacity >= max_connections);
-        debug_assert!(
-            byte_capacity / max_connections >= MAX_GAMEPLAY_DATAGRAM_BYTES
-        );
+        debug_assert!(byte_capacity / max_connections >= MAX_GAMEPLAY_DATAGRAM_BYTES);
         Self {
             packet_capacity,
             byte_capacity,
@@ -422,15 +414,15 @@ impl FairIngressQueue {
 
     fn try_push(&self, message: InboundMessage) -> Result<(), IngressQueueError> {
         let length = message.payload.len();
-        let mut state =
-            self.state.lock().map_err(|_| IngressQueueError::Unavailable)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| IngressQueueError::Unavailable)?;
         let peer_full = state.peers.get(&message.peer).map_or(
-            self.packet_capacity_per_peer == 0
-                || length > self.byte_capacity_per_peer,
+            self.packet_capacity_per_peer == 0 || length > self.byte_capacity_per_peer,
             |queue| {
                 queue.messages.len() >= self.packet_capacity_per_peer
-                    || queue.bytes.saturating_add(length)
-                        > self.byte_capacity_per_peer
+                    || queue.bytes.saturating_add(length) > self.byte_capacity_per_peer
             },
         );
         if peer_full {
@@ -725,9 +717,7 @@ impl NativeQuicTransport {
     ///
     /// Dedicated runtimes consume all available lifecycle events before
     /// gameplay ingress so the peer binding exists before its first command.
-    pub fn poll_connection_event(
-        &mut self,
-    ) -> Result<Option<ConnectionEvent>, TransportError> {
+    pub fn poll_connection_event(&mut self) -> Result<Option<ConnectionEvent>, TransportError> {
         match self.connection_events.try_recv() {
             Ok(event) => Ok(Some(event)),
             Err(mpsc::error::TryRecvError::Empty) => {
@@ -737,9 +727,7 @@ impl NativeQuicTransport {
                     Ok(None)
                 }
             }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                Err(TransportError::Closed)
-            }
+            Err(mpsc::error::TryRecvError::Disconnected) => Err(TransportError::Closed),
         }
     }
 
@@ -841,13 +829,17 @@ impl NetworkTransport for NativeQuicTransport {
         let handle = self.peer(peer)?;
         let permit = handle.outbound.try_reserve().map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => {
-                self.stats.queue_backpressure.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .queue_backpressure
+                    .fetch_add(1, Ordering::Relaxed);
                 TransportError::Backpressure
             }
             mpsc::error::TrySendError::Closed(_) => TransportError::Closed,
         })?;
         if !try_reserve_bytes(&handle.queued_bytes, handle.byte_capacity, payload.len()) {
-            self.stats.queue_backpressure.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .queue_backpressure
+                .fetch_add(1, Ordering::Relaxed);
             return Err(TransportError::Backpressure);
         }
         let message = match delivery {
@@ -858,11 +850,7 @@ impl NetworkTransport for NativeQuicTransport {
         Ok(())
     }
 
-    fn disconnect(
-        &mut self,
-        peer: PeerId,
-        reason: DisconnectReason,
-    ) -> Result<(), TransportError> {
+    fn disconnect(&mut self, peer: PeerId, reason: DisconnectReason) -> Result<(), TransportError> {
         let handle = self.peer(peer)?;
         handle.connection.close(
             VarInt::from_u32(close_code(reason)),
@@ -888,9 +876,7 @@ fn apply_transport_limits(
     transport.max_idle_timeout(Some(idle_timeout));
     transport.keep_alive_interval(Some(config.keepalive_interval));
     transport.max_concurrent_bidi_streams(VarInt::from_u32(0));
-    transport.max_concurrent_uni_streams(VarInt::from_u32(
-        config.max_inbound_uni_streams_per_peer,
-    ));
+    transport.max_concurrent_uni_streams(VarInt::from_u32(config.max_inbound_uni_streams_per_peer));
     transport.datagram_receive_buffer_size(Some(config.datagram_buffer_bytes));
     transport.datagram_send_buffer_size(config.datagram_buffer_bytes);
     server_config.transport_config(Arc::new(transport));
@@ -990,18 +976,12 @@ async fn accept_connection(
                 // Do not reflect potentially sensitive authentication
                 // diagnostics to an unauthenticated remote. Policies can record
                 // their own detailed rejection telemetry before returning.
-                connection.close(
-                    VarInt::from_u32(CLOSE_REJECTED),
-                    b"admission rejected",
-                );
+                connection.close(VarInt::from_u32(CLOSE_REJECTED), b"admission rejected");
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             Err(_) => {
-                connection.close(
-                    VarInt::from_u32(CLOSE_REJECTED),
-                    b"admission timeout",
-                );
+                connection.close(VarInt::from_u32(CLOSE_REJECTED), b"admission timeout");
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -1036,9 +1016,7 @@ async fn accept_connection(
         );
     }
 
-    if let Err(error) =
-        connection_events.try_send(ConnectionEvent::Authenticated(authenticated))
-    {
+    if let Err(error) = connection_events.try_send(ConnectionEvent::Authenticated(authenticated)) {
         if matches!(error, mpsc::error::TrySendError::Full(_)) {
             stats.queue_backpressure.fetch_add(1, Ordering::Relaxed);
         }
@@ -1150,14 +1128,7 @@ async fn reliable_acceptor(
         let task_connection = connection.clone();
         let task_inbound = inbound.clone();
         let task_stats = Arc::clone(&stats);
-        read_reliable_stream(
-            peer,
-            task_connection,
-            stream,
-            task_inbound,
-            task_stats,
-        )
-        .await;
+        read_reliable_stream(peer, task_connection, stream, task_inbound, task_stats).await;
     }
 }
 
@@ -1199,7 +1170,9 @@ async fn read_reliable_stream(
         };
         match inbound.try_push(message) {
             Ok(()) => {
-                stats.inbound_reliable_frames.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .inbound_reliable_frames
+                    .fetch_add(1, Ordering::Relaxed);
                 saturating_add_bytes(&stats.inbound_payload_bytes, length);
             }
             Err(IngressQueueError::PeerFull | IngressQueueError::GlobalFull) => {
@@ -1248,10 +1221,8 @@ async fn outbound_writer(
                         Err(_) => {
                             queued_bytes.fetch_sub(payload_length, Ordering::AcqRel);
                             stats.io_errors.fetch_add(1, Ordering::Relaxed);
-                            connection.close(
-                                VarInt::from_u32(CLOSE_IO),
-                                b"reliable stream open failed",
-                            );
+                            connection
+                                .close(VarInt::from_u32(CLOSE_IO), b"reliable stream open failed");
                             return;
                         }
                     }
@@ -1263,10 +1234,7 @@ async fn outbound_writer(
                 {
                     queued_bytes.fetch_sub(payload_length, Ordering::AcqRel);
                     stats.io_errors.fetch_add(1, Ordering::Relaxed);
-                    connection.close(
-                        VarInt::from_u32(CLOSE_IO),
-                        b"reliable stream write failed",
-                    );
+                    connection.close(VarInt::from_u32(CLOSE_IO), b"reliable stream write failed");
                     return;
                 }
                 stats

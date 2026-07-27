@@ -12,8 +12,10 @@ matchmaking coordination, loadout escrow, settlement delivery, and durable
 projections. Competitive native/console traffic connects directly to a regional
 QUIC host after receiving a signed join ticket.
 
-No credentials or Cloudflare resource identifiers are committed. Nothing in
-this scaffold deploys automatically.
+No credentials are committed. Public staging resource identifiers and
+fingerprints are committed so deployment can fail closed if an account or
+resource binding drifts; production identifiers remain operator-supplied.
+Nothing in this scaffold deploys automatically.
 
 ## Components
 
@@ -29,12 +31,14 @@ this scaffold deploys automatically.
 | Queue | At-least-once settlement delivery with a dead-letter queue |
 
 Durable Objects use the current declarative `exports` lifecycle configuration
-with SQLite storage. D1's schema is in
-`migrations/0001_control_plane.sql`.
+with SQLite storage. D1's ordered schema changes are in `migrations/`.
 
 ## Trust boundaries
 
 - Public player requests require a compact HMAC-SHA256 session ticket.
+- Join admission is signed with Ed25519. Only the control plane receives the
+  PKCS#8 private key; WSS gateways and dedicated match hosts receive raw public
+  keys and therefore cannot mint admission.
 - Browser WebSockets carry `aetherloom.v1` and
   `aetherloom.auth.<join-ticket>` in `Sec-WebSocket-Protocol`; the gateway strips
   the auth pseudo-protocol before forwarding.
@@ -55,22 +59,35 @@ with SQLite storage. D1's schema is in
 - Parties and their required input pool come from signed session claims. Web
   parties are restricted to `casual-extraction` and the browser pool.
 
-Tickets have the shape documented by
-`schemas/ticket-claims.schema.json`. Key-set secrets are JSON maps from a
-rotation key id to at least 32 random base64url bytes. Player, join, service,
-and result keys are deliberately independent. `RESULT_TICKET_HOSTS_JSON` binds
+Symmetric session, service and result tickets have the shape documented by
+`schemas/ticket-claims.schema.json`. Their key-set secrets are JSON maps from a
+rotation key id to at least 32 random base64url bytes. Join tickets use the
+strict, extension-free `schemas/join-ticket-claims.schema.json` contract and
+an `EdDSA` / `AETHERLOOM-JOIN` compact header. `JOIN_TICKET_SIGNING_KEYS_JSON`
+maps key ids to base64url Ed25519 PKCS#8 private DER and stays in the control
+plane. `JOIN_TICKET_PUBLIC_KEYS_JSON` maps the same ids to base64url raw
+32-byte public keys; this is the only join-key material provisioned to match
+hosts. The public map and active join/service key ids are ordinary Wrangler
+variables; only private signing and HMAC maps are secrets. Player, join,
+service, and result key domains are deliberately
+independent. `RESULT_TICKET_HOSTS_JSON` binds
 each result key id to exactly one capacity `host_id`; a result signer sets that
 host id as the ticket subject. The control plane keeps the complete verifier
 map, while each match host receives only its own result-signing secret. Never
 distribute the full result key set to a host. A result key can never
 authenticate an internal service request.
 
-Join tickets currently use HS256. Anyone given a join verification secret can
-also mint join tickets, regardless of a verify-only API in their process. Keep
-that key inside one trusted verifier domain. If mutually distrusted match hosts
-must verify tickets directly, use a distinct per-host signing domain (and select
-its key when allocating the match) or replace HS256 with an asymmetric
-control-plane signer before production.
+Join `match_id`, `build_hash`, account `sub`, and `nonce` values are nonzero
+128-bit values encoded as exactly 32 lowercase hexadecimal characters. The
+release pipeline derives `build_hash` as the first 16 bytes of SHA-256 over its
+documented canonical release identity and supplies that exact value to both
+Cloudflare and the dedicated `MatchBuild`; hand-authored build labels are not
+valid. The
+`match_epoch` is a nonzero JavaScript-safe integer and is pinned in the
+dispatch hash, capacity request, D1 allocation, ticket, Rust `MatchBuild`, and
+every gameplay envelope. Join tickets live for at most 120 seconds and contain
+exactly the documented claims; unknown claims, alternate encodings, uppercase
+hex, stale epochs, and noncanonical JSON/base64url are rejected.
 
 Content addressing detects mismatched evidence at acceptance; it is not an R2
 object-lock feature. Limit evidence-prefix writes to the match-host ingestion
@@ -126,6 +143,9 @@ Internal routes:
 - `POST /internal/v1/settlements`, scope `result:enqueue`, plus a signed result
 - `PUT /internal/v1/islands/checkpoints/:checkpointId`, scope
   `island:checkpoint`
+- `POST /internal/v1/readiness`, scope `deployment:verify`; returns only
+  aggregate readiness after HMAC and Ed25519 round trips across all private key
+  domains
 
 Mutation requests use 16-128 character `Idempotency-Key` values. The internal
 island upload is intentionally unavailable to player session tickets: allowing
@@ -214,11 +234,12 @@ The match director sends a scoped service ticket and:
 
 ```json
 {
-  "matchId": "match_...",
+  "matchId": "11111111111111111111111111111111",
+  "matchEpoch": 42,
   "region": "weur",
   "playlist": "squad-extraction",
   "inputPool": "controller",
-  "buildHash": "immutable-build-hash",
+  "buildHash": "22222222222222222222222222222222",
   "playerCount": 96,
   "botCount": 32,
   "authoritativeHz": 128
@@ -270,10 +291,14 @@ npm run dev
 
 `wrangler.jsonc` uses local/automatic resource provisioning and does not include
 the external service bindings, so dispatch and WSS handoff intentionally return
-503 until those services are configured. The production example is a template:
-copy it, replace every `REPLACE_WITH_...` value, create or bind the named
-resources, set all declared secrets with Wrangler, and run migration and
-integration checks before deployment.
+503 until those services are configured. The production example is a template.
+Copy it to the tracked `deploy/production.resources.json`, replace every
+`REPLACE_WITH_...` value, create or bind the named resources, and commit its
+canonical resource fingerprint. The protected workflow compares the generated
+config, account fingerprint, live D1 UUID, R2 location, Queue IDs, Worker
+deployment, and exact secret names before it can migrate. It then captures and
+uploads a fresh D1 Time Travel recovery bookmark before applying any
+production migration.
 
 ## Required production tests before rollout
 

@@ -1,4 +1,25 @@
 use aetherloom_core::{MatchConfig, WorldSeed, MAX_PLAYERS};
+use aetherloom_protocol::{InputPool, RegionId};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MatchAdmissionScope {
+    region: RegionId,
+    input_pool: InputPool,
+}
+
+impl MatchAdmissionScope {
+    pub const fn new(region: RegionId, input_pool: InputPool) -> Self {
+        Self { region, input_pool }
+    }
+
+    pub const fn region(self) -> RegionId {
+        self.region
+    }
+
+    pub const fn input_pool(self) -> InputPool {
+        self.input_pool
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MatchBuild {
@@ -45,6 +66,7 @@ impl MatchBuild {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessConfig {
     build: MatchBuild,
+    admission_scope: MatchAdmissionScope,
     seed: WorldSeed,
     max_players: u16,
     egress_packet_capacity: usize,
@@ -57,6 +79,7 @@ pub struct ProcessConfig {
 impl ProcessConfig {
     pub fn new(
         build: MatchBuild,
+        admission_scope: MatchAdmissionScope,
         seed: WorldSeed,
         max_players: u16,
     ) -> Result<Self, ConfigError> {
@@ -65,6 +88,7 @@ impl ProcessConfig {
         }
         Ok(Self {
             build,
+            admission_scope,
             seed,
             max_players,
             egress_packet_capacity: 512,
@@ -105,6 +129,10 @@ impl ProcessConfig {
 
     pub const fn build(&self) -> MatchBuild {
         self.build
+    }
+
+    pub const fn admission_scope(&self) -> MatchAdmissionScope {
+        self.admission_scope
     }
 
     pub const fn seed(&self) -> WorldSeed {
@@ -158,4 +186,3 @@ impl core::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
-

@@ -4,11 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aetherloom_protocol::{PlayerId, TeamId, MAX_RELIABLE_FRAME_BYTES};
+use aetherloom_protocol::{InputPool, PlayerId, RegionId, TeamId, MAX_RELIABLE_FRAME_BYTES};
 use aetherloom_quic::{
-    AdmissionFuture, AdmissionRejection, AuthenticatedConnection,
-    ConnectionAdmission, ConnectionEvent, NativeQuicTransport,
-    QuicTransportConfig, VerifiedConnectionClaims,
+    AdmissionFuture, AdmissionRejection, AuthenticatedConnection, ConnectionAdmission,
+    ConnectionEvent, NativeQuicTransport, QuicTransportConfig, VerifiedConnectionClaims,
 };
 use aetherloom_server::{
     DeliveryKind, NetworkTransport, PeerId, TransportError, MAX_GAMEPLAY_DATAGRAM_BYTES,
@@ -47,6 +46,9 @@ fn authenticated(peer: PeerId) -> AuthenticatedConnection {
             match_id: [1; 16],
             content_build_hash: [2; 16],
             match_epoch: 3,
+            region: RegionId::new("local").expect("region"),
+            input_pool: InputPool::Mixed,
+            nonce: [3; 16],
             account_id: [4; 16],
             player_id: PlayerId::new(0).expect("player"),
             team_id: TeamId::new(0).expect("team"),
@@ -69,15 +71,11 @@ fn tls_configs() -> (ServerConfig, ClientConfig) {
     let certificate = certified.cert.der().clone();
     let private_key = PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der());
 
-    let server = ServerConfig::with_single_cert(
-        vec![certificate.clone()],
-        private_key.into(),
-    )
-    .expect("server TLS config");
+    let server = ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())
+        .expect("server TLS config");
     let mut roots = RootCertStore::empty();
     roots.add(certificate).expect("test trust anchor");
-    let client =
-        ClientConfig::with_root_certificates(Arc::new(roots)).expect("client TLS config");
+    let client = ClientConfig::with_root_certificates(Arc::new(roots)).expect("client TLS config");
     (server, client)
 }
 
@@ -110,9 +108,7 @@ async fn connect(
     (endpoint, connection)
 }
 
-async fn eventually<T>(
-    mut operation: impl FnMut() -> Option<T>,
-) -> T {
+async fn eventually<T>(mut operation: impl FnMut() -> Option<T>) -> T {
     tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
             if let Some(value) = operation() {
@@ -145,13 +141,14 @@ async fn read_frame(stream: &mut quinn::RecvStream) -> Vec<u8> {
     let mut length = [0_u8; 4];
     stream.read_exact(&mut length).await.expect("frame length");
     let mut payload = vec![0_u8; u32::from_be_bytes(length) as usize];
-    stream.read_exact(&mut payload).await.expect("frame payload");
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("frame payload");
     payload
 }
 
-async fn wait_for(
-    mut predicate: impl FnMut() -> bool,
-) {
+async fn wait_for(mut predicate: impl FnMut() -> bool) {
     eventually(|| predicate().then_some(())).await;
 }
 
@@ -167,12 +164,7 @@ async fn localhost_datagram_and_reliable_roundtrip() {
     let (_client_endpoint, client) = connect(transport.local_address(), client_tls).await;
     let peer = wait_for_peer(&transport).await;
     assert_eq!(peer, PeerId(41));
-    let event = eventually(|| {
-        transport
-            .poll_connection_event()
-            .expect("connection event")
-    })
-    .await;
+    let event = eventually(|| transport.poll_connection_event().expect("connection event")).await;
     assert_eq!(
         event,
         ConnectionEvent::Authenticated(authenticated(PeerId(41)))
@@ -243,12 +235,7 @@ async fn localhost_datagram_and_reliable_roundtrip() {
 
     client.close(0_u32.into(), b"test complete");
     wait_for(|| transport.stats().active_connections == 0).await;
-    let event = eventually(|| {
-        transport
-            .poll_connection_event()
-            .expect("disconnect event")
-    })
-    .await;
+    let event = eventually(|| transport.poll_connection_event().expect("disconnect event")).await;
     assert_eq!(event, ConnectionEvent::Disconnected { peer });
     transport.shutdown_gracefully(Instant::now() + TEST_TIMEOUT);
 }
@@ -260,18 +247,13 @@ async fn flooding_peer_cannot_starve_another_peer_ingress() {
     config.max_connections = 2;
     config.inbound_queue_capacity = 8;
     config.inbound_queue_byte_capacity = 8 * MAX_GAMEPLAY_DATAGRAM_BYTES;
-    let mut transport = NativeQuicTransport::bind(
-        server_tls,
-        config,
-        Arc::new(IncrementingAdmission::new(50)),
-    )
-    .expect("server bind");
+    let mut transport =
+        NativeQuicTransport::bind(server_tls, config, Arc::new(IncrementingAdmission::new(50)))
+            .expect("server bind");
 
-    let (first_endpoint, first) =
-        connect(transport.local_address(), client_tls.clone()).await;
+    let (first_endpoint, first) = connect(transport.local_address(), client_tls.clone()).await;
     wait_for(|| transport.connected_peers().len() == 1).await;
-    let (second_endpoint, second) =
-        connect(transport.local_address(), client_tls).await;
+    let (second_endpoint, second) = connect(transport.local_address(), client_tls).await;
     wait_for(|| transport.connected_peers().len() == 2).await;
 
     for marker in 0..8_u8 {
@@ -310,12 +292,9 @@ async fn peer_telemetry_reports_quinn_path_and_removes_closed_peer() {
     let (server_tls, client_tls) = tls_configs();
     let mut config = test_config();
     config.expose_remote_address_in_telemetry = true;
-    let transport = NativeQuicTransport::bind(
-        server_tls,
-        config,
-        Arc::new(IncrementingAdmission::new(91)),
-    )
-    .expect("server bind");
+    let transport =
+        NativeQuicTransport::bind(server_tls, config, Arc::new(IncrementingAdmission::new(91)))
+            .expect("server bind");
     let (_endpoint, client) = connect(transport.local_address(), client_tls).await;
     let peer = wait_for_peer(&transport).await;
 
@@ -407,12 +386,9 @@ async fn bounded_reliable_ingress_applies_backpressure() {
     let mut config = test_config();
     config.max_connections = 1;
     config.inbound_queue_capacity = 1;
-    let transport = NativeQuicTransport::bind(
-        server_tls,
-        config,
-        Arc::new(IncrementingAdmission::new(8)),
-    )
-    .expect("server bind");
+    let transport =
+        NativeQuicTransport::bind(server_tls, config, Arc::new(IncrementingAdmission::new(8)))
+            .expect("server bind");
     let (_endpoint, client) = connect(transport.local_address(), client_tls).await;
     assert_eq!(wait_for_peer(&transport).await, PeerId(8));
 
@@ -434,12 +410,9 @@ async fn bounded_reliable_egress_reports_backpressure_without_blocking() {
     let mut config = test_config();
     config.outbound_queue_capacity_per_peer = 1;
     config.outbound_queue_byte_capacity_per_peer = MAX_RELIABLE_FRAME_BYTES;
-    let mut transport = NativeQuicTransport::bind(
-        server_tls,
-        config,
-        Arc::new(IncrementingAdmission::new(12)),
-    )
-    .expect("server bind");
+    let mut transport =
+        NativeQuicTransport::bind(server_tls, config, Arc::new(IncrementingAdmission::new(12)))
+            .expect("server bind");
     let (_endpoint, client) = connect(transport.local_address(), client_tls).await;
     let peer = wait_for_peer(&transport).await;
 
@@ -470,14 +443,10 @@ async fn admission_identity_is_server_owned_and_drain_rejects_new_connections() 
     let (server_tls, client_tls) = tls_configs();
     let mut config = test_config();
     config.max_connections = 1;
-    let mut transport = NativeQuicTransport::bind(
-        server_tls,
-        config,
-        Arc::new(IncrementingAdmission::new(77)),
-    )
-    .expect("server bind");
-    let (first_endpoint, first) =
-        connect(transport.local_address(), client_tls.clone()).await;
+    let mut transport =
+        NativeQuicTransport::bind(server_tls, config, Arc::new(IncrementingAdmission::new(77)))
+            .expect("server bind");
+    let (first_endpoint, first) = connect(transport.local_address(), client_tls.clone()).await;
     assert_eq!(wait_for_peer(&transport).await, PeerId(77));
 
     let mut second_endpoint =
@@ -489,8 +458,8 @@ async fn admission_identity_is_server_owned_and_drain_rejects_new_connections() 
             .connect(transport.local_address(), "localhost")
             .expect("connect parameters"),
     )
-        .await
-        .expect("connection-limit timeout");
+    .await
+    .expect("connection-limit timeout");
     assert!(second.is_err(), "connection cap must refuse a second peer");
     wait_for(|| transport.stats().rejected_connections >= 1).await;
     assert_eq!(transport.connected_peers(), vec![PeerId(77)]);
@@ -515,12 +484,8 @@ async fn admission_identity_is_server_owned_and_drain_rejects_new_connections() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_admission_rejection_never_registers_a_peer() {
     let (server_tls, client_tls) = tls_configs();
-    let transport = NativeQuicTransport::bind(
-        server_tls,
-        test_config(),
-        Arc::new(RejectAdmission),
-    )
-    .expect("server bind");
+    let transport = NativeQuicTransport::bind(server_tls, test_config(), Arc::new(RejectAdmission))
+        .expect("server bind");
     let (_endpoint, client) = connect(transport.local_address(), client_tls).await;
     tokio::time::timeout(TEST_TIMEOUT, client.closed())
         .await
@@ -534,12 +499,7 @@ async fn explicit_admission_rejection_never_registers_a_peer() {
 #[allow(dead_code)]
 fn admission_future_is_send(
     future: AdmissionFuture<'_>,
-) -> Pin<
-    Box<
-        dyn Future<Output = Result<AuthenticatedConnection, AdmissionRejection>>
-            + Send
-            + '_,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = Result<AuthenticatedConnection, AdmissionRejection>> + Send + '_>>
+{
     future
 }

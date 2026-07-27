@@ -48,6 +48,7 @@ interface ConfirmCommand {
     string,
     {
       matchId: string;
+      matchEpoch: number;
       joinTicket: string;
       transport: "wss" | "quic";
       endpoint: string;
@@ -76,12 +77,27 @@ function earliestAssignmentExpiry(
   if (values.length === 0) {
     throw new ApiError(400, "assignment_roster_mismatch", "Assignments cannot be empty.");
   }
+  let expectedMatchEpoch: number | undefined;
   return Math.min(
     ...values.map(([accountId, assignment]) => {
       assertObject(assignment, `assignment for ${accountId}`);
       if (assignment.matchId !== matchId) {
         throw new ApiError(400, "invalid_assignment", `Invalid match assignment for ${accountId}.`);
       }
+      const matchEpoch = requireInteger(
+        assignment.matchEpoch,
+        `assignment match epoch for ${accountId}`,
+        1,
+        Number.MAX_SAFE_INTEGER,
+      );
+      if (expectedMatchEpoch !== undefined && matchEpoch !== expectedMatchEpoch) {
+        throw new ApiError(
+          400,
+          "assignment_epoch_mismatch",
+          "Join assignments do not share one match epoch.",
+        );
+      }
+      expectedMatchEpoch = matchEpoch;
       return requireInteger(
         assignment.expiresAtMs,
         `assignment expiry for ${accountId}`,

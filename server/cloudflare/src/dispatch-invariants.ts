@@ -8,6 +8,7 @@
 export interface DispatchIdentityInput {
   shard: string;
   matchId: string;
+  matchEpoch: number;
   region: string;
   playlist: string;
   inputPool: string;
@@ -46,6 +47,7 @@ export function dispatchIdentityValue(dispatch: DispatchIdentityInput): string {
   return JSON.stringify([
     dispatch.shard,
     dispatch.matchId,
+    dispatch.matchEpoch,
     dispatch.region,
     dispatch.playlist,
     dispatch.inputPool,

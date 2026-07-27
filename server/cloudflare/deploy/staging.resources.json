@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "environment": "staging",
+  "accountIdSha256": "7daa42a767d71481fcfd0cd29a42a0116feb7709f7eff26d7ecaa8fc5906b602",
+  "workerName": "aetherloom-control-plane-staging",
+  "workersDev": true,
+  "d1DatabaseName": "aetherloom-control-staging",
+  "d1DatabaseId": "220c38b2-1286-4a35-8c47-a7a24b83f387",
+  "r2BucketName": "aetherloom-match-archive-staging",
+  "r2Location": "WEUR",
+  "settlementQueue": "aetherloom-settlement-staging",
+  "settlementQueueId": "fc40221d05c54ee994849b3090440ffd",
+  "settlementDeadLetterQueue": "aetherloom-settlement-staging-dlq",
+  "settlementDeadLetterQueueId": "783107f6bb1e4e98a029cf5a0173c5c2",
+  "matchmakingShardCount": 16,
+  "allowedOrigins": [
+    "https://aetherloom-staging.pages.dev",
+    "https://staging.aetherloom-staging.pages.dev"
+  ],
+  "resultTicketHosts": {
+    "staging-result-2026-07": "staging-match-host"
+  },
+  "joinTicketPublicKeys": {
+    "staging-join-2026-07": "WmfoT0zLzJQ7W8UC52WmKC-R0SynHmU0FeKOAFpk87g"
+  },
+  "activeJoinTicketKid": "staging-join-2026-07",
+  "activeServiceTicketKid": "staging-service-2026-07",
+  "resourceFingerprint": "5476f27282f9de9735cb5cd8406605d5fcae0cb4ea3ef529c30cefbb5d8531f3"
+}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aetherloom.invalid/schemas/ticket-claims.schema.json",
-  "title": "Aetherloom signed ticket claims",
+  "title": "Aetherloom symmetric session, service and result ticket claims",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "iss", "aud", "purpose", "sub", "iat", "nbf", "exp", "nonce"],
@@ -9,7 +9,7 @@
     "v": { "const": 1 },
     "iss": { "$ref": "#/$defs/id" },
     "aud": { "$ref": "#/$defs/id" },
-    "purpose": { "enum": ["session", "join", "service", "result"] },
+    "purpose": { "enum": ["session", "service", "result"] },
     "sub": { "$ref": "#/$defs/id" },
     "iat": { "type": "integer", "minimum": 0 },
     "nbf": { "type": "integer", "minimum": 0 },
@@ -41,6 +41,7 @@
       }
     },
     "match_id": { "$ref": "#/$defs/id" },
+    "match_epoch": { "type": "integer", "minimum": 1 },
     "region": { "$ref": "#/$defs/id" },
     "build_hash": { "$ref": "#/$defs/id" },
     "input_pool": { "enum": ["browser", "mouse-keyboard", "controller", "mixed"] },
@@ -49,23 +50,6 @@
     "settlement_id": { "$ref": "#/$defs/id" },
     "result_hash": { "$ref": "#/$defs/id" }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": { "purpose": { "const": "join" } },
-        "required": ["purpose"]
-      },
-      "then": {
-        "required": [
-          "match_id",
-          "build_hash",
-          "input_pool",
-          "player_slot",
-          "team_id"
-        ]
-      }
-    }
-  ],
   "$defs": {
     "id": {
       "type": "string",

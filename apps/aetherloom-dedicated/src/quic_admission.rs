@@ -4,19 +4,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aetherloom_quic::{
-    AdmissionFuture, AdmissionRejection, AuthenticatedConnection, Connection,
-    ConnectionAdmission, ConnectionEvent, NativeQuicTransport,
-    VerifiedConnectionClaims,
+    AdmissionFuture, AdmissionRejection, AuthenticatedConnection, Connection, ConnectionAdmission,
+    ConnectionEvent, NativeQuicTransport, VerifiedConnectionClaims,
 };
 use aetherloom_server::{
-    DedicatedQuicHost, DisconnectReason, NetworkTransport, PeerId,
-    TransportError,
+    DedicatedQuicHost, DisconnectReason, NetworkTransport, PeerId, TransportError,
 };
 
 use crate::{
-    AdmissionError, DedicatedMatch, MatchBuild, ReplayCheckpointSink,
-    SettlementSink, SignedTicketVerifier, TicketVerificationError,
-    VerifiedTicket,
+    AdmissionError, DedicatedMatch, MatchAdmissionScope, MatchBuild, ReplayCheckpointSink,
+    SettlementSink, SignedTicketVerifier, TicketVerificationError, VerifiedTicket,
 };
 
 /// Hard cap for the signed ticket sent as the first client-initiated
@@ -74,6 +71,7 @@ impl ServerPeerIdAllocator for SequentialPeerIdAllocator {
 pub struct TicketConnectionAdmission<V, C, A> {
     verifier: V,
     expected_build: MatchBuild,
+    expected_scope: MatchAdmissionScope,
     clock: C,
     peer_ids: A,
 }
@@ -82,12 +80,14 @@ impl<V, C, A> TicketConnectionAdmission<V, C, A> {
     pub const fn new(
         verifier: V,
         expected_build: MatchBuild,
+        expected_scope: MatchAdmissionScope,
         clock: C,
         peer_ids: A,
     ) -> Self {
         Self {
             verifier,
             expected_build,
+            expected_scope,
             clock,
             peer_ids,
         }
@@ -112,6 +112,7 @@ where
                 .verify(
                     &signed_ticket,
                     self.expected_build,
+                    self.expected_scope,
                     now_unix_seconds,
                 )
                 .map_err(|_| AdmissionRejection::new("ticket verification failed"))?;
@@ -128,9 +129,7 @@ where
     }
 }
 
-async fn read_signed_ticket(
-    connection: &Connection,
-) -> Result<Vec<u8>, AdmissionRejection> {
+async fn read_signed_ticket(connection: &Connection) -> Result<Vec<u8>, AdmissionRejection> {
     let mut stream = connection
         .accept_uni()
         .await
@@ -164,6 +163,9 @@ impl From<VerifiedTicket> for VerifiedConnectionClaims {
             match_id: ticket.match_id,
             content_build_hash: ticket.content_build_hash,
             match_epoch: ticket.match_epoch,
+            region: ticket.region,
+            input_pool: ticket.input_pool,
+            nonce: ticket.nonce,
             account_id: ticket.account_id,
             player_id: ticket.player_id,
             team_id: ticket.team_id,
@@ -178,6 +180,9 @@ impl From<VerifiedConnectionClaims> for VerifiedTicket {
             match_id: claims.match_id,
             content_build_hash: claims.content_build_hash,
             match_epoch: claims.match_epoch,
+            region: claims.region,
+            input_pool: claims.input_pool,
+            nonce: claims.nonce,
             account_id: claims.account_id,
             player_id: claims.player_id,
             team_id: claims.team_id,
@@ -196,6 +201,7 @@ impl SignedTicketVerifier for NoDirectTicketVerifier {
         &self,
         _signed_ticket: &[u8],
         _expected_build: MatchBuild,
+        _expected_scope: MatchAdmissionScope,
         _now_unix_seconds: u64,
     ) -> Result<VerifiedTicket, TicketVerificationError> {
         Err(TicketVerificationError::BackendUnavailable)
@@ -222,7 +228,11 @@ pub struct QuicConnectionPumpError(pub TransportError);
 
 impl fmt::Display for QuicConnectionPumpError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "QUIC connection event transport failed: {}", self.0)
+        write!(
+            formatter,
+            "QUIC connection event transport failed: {}",
+            self.0
+        )
     }
 }
 
@@ -234,12 +244,7 @@ impl Error for QuicConnectionPumpError {}
 /// signature-verification call. Rejected claims close the connection and never
 /// establish a gameplay peer binding.
 pub fn pump_quic_connection_events<V, R, S>(
-    process: &mut DedicatedMatch<
-        DedicatedQuicHost<NativeQuicTransport>,
-        V,
-        R,
-        S,
-    >,
+    process: &mut DedicatedMatch<DedicatedQuicHost<NativeQuicTransport>, V, R, S>,
 ) -> Result<QuicConnectionPumpReport, QuicConnectionPumpError>
 where
     V: SignedTicketVerifier,

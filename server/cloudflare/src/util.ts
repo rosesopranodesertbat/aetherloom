@@ -1,5 +1,6 @@
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const IDEMPOTENCY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/;
+const HEX_128_RE = /^[0-9a-f]{32}$/;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -86,6 +87,25 @@ export function requireIdentifier(value: unknown, label: string): string {
   const parsed = requireString(value, label);
   if (!IDENTIFIER_RE.test(parsed)) {
     throw new ApiError(400, "invalid_request", `${label} contains unsupported characters.`);
+  }
+  return parsed;
+}
+
+/**
+ * Parses the wire representation shared with Rust `[u8; 16]` identifiers.
+ *
+ * UUID punctuation, uppercase hex, short values and wider hashes are
+ * deliberately rejected so every service signs and compares one canonical
+ * representation.
+ */
+export function requireHex128(value: unknown, label: string): string {
+  const parsed = requireString(value, label, 32);
+  if (!HEX_128_RE.test(parsed) || /^0{32}$/u.test(parsed)) {
+    throw new ApiError(
+      400,
+      "invalid_hex_128",
+      `${label} must be a nonzero 128-bit value encoded as exactly 32 lowercase hexadecimal characters.`,
+    );
   }
   return parsed;
 }
@@ -177,6 +197,11 @@ export async function sha256Base64Url(value: string | ArrayBuffer): Promise<stri
 export function randomToken(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   return `${prefix}_${bytesToBase64Url(bytes)}`;
+}
+
+export function randomHex128(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function inventoryStacks(value: unknown, label: string, maximumStacks = 64): Array<{ itemId: string; quantity: number }> {

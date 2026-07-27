@@ -8,8 +8,8 @@ The caller supplies the Quinn `ServerConfig` and an asynchronous
 `ConnectionAdmission` implementation. Production certificate loading,
 certificate rotation, and signed connection-ticket validation remain
 caller-owned. A successful hook returns immutable verified player, team,
-account, match, epoch, build, and expiry claims together with a
-server-allocated `PeerId`.
+account, match, epoch, build, region, input-pool, nonce, and expiry claims
+together with a server-allocated `PeerId`.
 
 The transport publishes one ordered `ConnectionEvent::Authenticated` before it
 starts gameplay readers and one `ConnectionEvent::Disconnected` when that QUIC

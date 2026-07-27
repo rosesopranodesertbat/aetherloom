@@ -1,25 +1,23 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use aetherloom_client::{
-    AuthoritativeFeedError, AuthoritativeFeedOutcome,
-    AuthoritativeFeedReplica,
+    AuthoritativeFeedError, AuthoritativeFeedOutcome, AuthoritativeFeedReplica,
 };
 use aetherloom_core::{Controller, PlayerOutcome, WorldSeed};
 use aetherloom_dedicated::{
-    AdmissionError, CapacitySignal, DedicatedMatch, DeterministicSpatialGrid,
-    EgressClass, MatchBuild, NoopReplaySink, NoopSettlementSink, OutboundPacket,
+    AdmissionError, CapacitySignal, DedicatedMatch, DeterministicSpatialGrid, EgressClass,
+    MatchAdmissionScope, MatchBuild, NoopReplaySink, NoopSettlementSink, OutboundPacket,
     PriorityEgress, ProcessConfig, ReplicationProfile, SignedTicketVerifier,
     TicketVerificationError, VerifiedTicket,
 };
 use aetherloom_protocol::{
-    EntityId, EnvelopeMetadata, EventKind, InputBatch, Message, MessageEnvelope,
-    PlayerCommand, PlayerId, TeamId, TerrainOpKind, ACTION_CAST,
-    MAX_DATAGRAM_BYTES,
+    EntityId, EnvelopeMetadata, EventKind, InputBatch, InputPool, Message, MessageEnvelope,
+    PlayerCommand, PlayerId, RegionId, TeamId, TerrainOpKind, ACTION_CAST, MAX_DATAGRAM_BYTES,
 };
 use aetherloom_server::{
-    DeliveryKind, DisconnectReason, HostError, HostKind, HostState, InboundMessage,
-    MatchHost, MonotonicClock, PeerId, TickScheduler, TransportError,
-    BOT_TAKEOVER_AFTER_TICKS, RECONNECT_GRACE_TICKS,
+    DeliveryKind, DisconnectReason, HostError, HostKind, HostState, InboundMessage, MatchHost,
+    MonotonicClock, PeerId, TickScheduler, TransportError, BOT_TAKEOVER_AFTER_TICKS,
+    RECONNECT_GRACE_TICKS,
 };
 
 const NOW: u64 = 10_000;
@@ -95,27 +93,15 @@ impl MatchHost for RecordingHost {
         Ok(self.inbound.pop_front())
     }
 
-    fn try_send_gameplay(
-        &mut self,
-        peer: PeerId,
-        payload: &[u8],
-    ) -> Result<(), HostError> {
+    fn try_send_gameplay(&mut self, peer: PeerId, payload: &[u8]) -> Result<(), HostError> {
         self.send(peer, DeliveryKind::Datagram, payload)
     }
 
-    fn try_send_reliable(
-        &mut self,
-        peer: PeerId,
-        payload: &[u8],
-    ) -> Result<(), HostError> {
+    fn try_send_reliable(&mut self, peer: PeerId, payload: &[u8]) -> Result<(), HostError> {
         self.send(peer, DeliveryKind::Reliable, payload)
     }
 
-    fn disconnect(
-        &mut self,
-        _peer: PeerId,
-        _reason: DisconnectReason,
-    ) -> Result<(), HostError> {
+    fn disconnect(&mut self, _peer: PeerId, _reason: DisconnectReason) -> Result<(), HostError> {
         Ok(())
     }
 }
@@ -153,10 +139,13 @@ impl SignedTicketVerifier for TestVerifier {
         &self,
         signed_ticket: &[u8],
         expected_build: MatchBuild,
+        expected_scope: MatchAdmissionScope,
         _now_unix_seconds: u64,
     ) -> Result<VerifiedTicket, TicketVerificationError> {
-        let [player, account_variant] = *signed_ticket else {
-            return Err(TicketVerificationError::Malformed);
+        let (player, account_variant, nonce_variant) = match signed_ticket {
+            [player, account_variant] => (*player, *account_variant, 1),
+            [player, account_variant, nonce_variant] => (*player, *account_variant, *nonce_variant),
+            _ => return Err(TicketVerificationError::Malformed),
         };
         let player_id =
             PlayerId::new(player as u16).map_err(|_| TicketVerificationError::Malformed)?;
@@ -165,6 +154,10 @@ impl SignedTicketVerifier for TestVerifier {
         let mut account_id = [0_u8; 16];
         account_id[0] = player;
         account_id[1] = account_variant;
+        let mut nonce = [0_u8; 16];
+        nonce[0] = player;
+        nonce[1] = account_variant;
+        nonce[2] = nonce_variant;
         Ok(VerifiedTicket {
             match_id: expected_build.match_id(),
             content_build_hash: if account_variant == 9 {
@@ -173,6 +166,9 @@ impl SignedTicketVerifier for TestVerifier {
                 expected_build.content_build_hash()
             },
             match_epoch: expected_build.match_epoch(),
+            region: expected_scope.region(),
+            input_pool: expected_scope.input_pool(),
+            nonce,
             account_id,
             player_id,
             team_id,
@@ -196,30 +192,30 @@ impl MonotonicClock for ManualClock {
     }
 }
 
-type TestProcess = DedicatedMatch<
-    RecordingHost,
-    TestVerifier,
-    NoopReplaySink,
-    NoopSettlementSink,
->;
+type TestProcess = DedicatedMatch<RecordingHost, TestVerifier, NoopReplaySink, NoopSettlementSink>;
 
 fn build() -> MatchBuild {
     MatchBuild::new([7; 16], [9; 16], 42).expect("valid build")
+}
+
+fn admission_scope() -> MatchAdmissionScope {
+    MatchAdmissionScope::new(RegionId::new("local").expect("region"), InputPool::Mixed)
 }
 
 fn process(max_players: u16, host: RecordingHost) -> TestProcess {
     process_with_seed(max_players, host, 0x5eed)
 }
 
-fn process_with_seed(
-    max_players: u16,
-    host: RecordingHost,
-    seed: u64,
-) -> TestProcess {
-    let config = ProcessConfig::new(build(), WorldSeed::new(seed), max_players)
-        .expect("valid config")
-        .with_intervals(256, 0)
-        .expect("valid intervals");
+fn process_with_seed(max_players: u16, host: RecordingHost, seed: u64) -> TestProcess {
+    let config = ProcessConfig::new(
+        build(),
+        admission_scope(),
+        WorldSeed::new(seed),
+        max_players,
+    )
+    .expect("valid config")
+    .with_intervals(256, 0)
+    .expect("valid intervals");
     DedicatedMatch::new(
         config,
         host,
@@ -230,12 +226,17 @@ fn process_with_seed(
 }
 
 fn constrained_process(max_players: u16, host: RecordingHost) -> TestProcess {
-    let config = ProcessConfig::new(build(), WorldSeed::new(0x5eed), max_players)
-        .expect("valid config")
-        .with_queue_limits(4, 128 * 1024, 128)
-        .expect("valid queues")
-        .with_intervals(256, 0)
-        .expect("valid intervals");
+    let config = ProcessConfig::new(
+        build(),
+        admission_scope(),
+        WorldSeed::new(0x5eed),
+        max_players,
+    )
+    .expect("valid config")
+    .with_queue_limits(4, 128 * 1024, 128)
+    .expect("valid queues")
+    .with_intervals(256, 0)
+    .expect("valid intervals");
     DedicatedMatch::new(
         config,
         host,
@@ -247,6 +248,10 @@ fn constrained_process(max_players: u16, host: RecordingHost) -> TestProcess {
 
 fn ticket(player: u8) -> [u8; 2] {
     [player, 1]
+}
+
+fn reconnect_ticket(player: u8, nonce_variant: u8) -> [u8; 3] {
+    [player, 1, nonce_variant]
 }
 
 fn peer(player: u8) -> PeerId {
@@ -263,10 +268,7 @@ fn admit_players(process: &mut TestProcess, count: u16) {
     }
 }
 
-fn run_tick(
-    process: &mut TestProcess,
-    scheduler: &mut TickScheduler<ManualClock>,
-) {
+fn run_tick(process: &mut TestProcess, scheduler: &mut TickScheduler<ManualClock>) {
     process
         .run_scheduled_tick(scheduler)
         .expect("authoritative tick");
@@ -284,31 +286,12 @@ fn input(
 }
 
 fn command(target_tick: u64, sequence: u32, move_x: i16) -> PlayerCommand {
-    PlayerCommand::new(
-        target_tick,
-        sequence,
-        move_x,
-        0,
-        0,
-        0,
-        0,
-        None,
-    )
-    .expect("valid command")
+    PlayerCommand::new(target_tick, sequence, move_x, 0, 0, 0, 0, None).expect("valid command")
 }
 
 fn cast_command(target_tick: u64, sequence: u32, yaw: u16) -> PlayerCommand {
-    PlayerCommand::new(
-        target_tick,
-        sequence,
-        0,
-        0,
-        yaw,
-        0,
-        ACTION_CAST,
-        Some(0),
-    )
-    .expect("valid cast")
+    PlayerCommand::new(target_tick, sequence, 0, 0, yaw, 0, ACTION_CAST, Some(0))
+        .expect("valid cast")
 }
 
 fn input_batch(
@@ -347,10 +330,7 @@ fn decode_sent(packet: &SentPacket) -> MessageEnvelope {
     }
 }
 
-fn assert_replica_terrain_matches(
-    process: &TestProcess,
-    replica: &AuthoritativeFeedReplica,
-) {
+fn assert_replica_terrain_matches(process: &TestProcess, replica: &AuthoritativeFeedReplica) {
     assert_eq!(replica.terrain().len(), process.state().terrain().len());
     for authoritative in process.state().terrain() {
         let replicated = replica
@@ -374,7 +354,10 @@ fn deterministic_matches_cover_16_and_128_slots() {
             run_tick(&mut first, &mut first_clock);
             run_tick(&mut second, &mut second_clock);
         }
-        assert_eq!(first.state().authoritative_hash(), second.state().authoritative_hash());
+        assert_eq!(
+            first.state().authoritative_hash(),
+            second.state().authoritative_hash()
+        );
         assert_eq!(
             first
                 .state()
@@ -513,38 +496,25 @@ fn rejects_obsolete_current_sequence_without_desynchronizing_scheduler() {
     let obsolete = input_batch(0, peer(0), 2, vec![command(1, 1, 100)]);
     assert!(matches!(
         process.ingest_message(obsolete),
-        Err(aetherloom_dedicated::InboundRejection::ObsoletePlayerSequence {
-            previous: 1,
-            received: 1,
-            ..
-        })
+        Err(
+            aetherloom_dedicated::InboundRejection::ObsoletePlayerSequence {
+                previous: 1,
+                received: 1,
+                ..
+            }
+        )
     ));
     assert!(matches!(
-        process.ingest_message(input_batch(
-            0,
-            peer(0),
-            2,
-            vec![command(0, 2, 100)]
-        )),
+        process.ingest_message(input_batch(0, peer(0), 2, vec![command(0, 2, 100)])),
         Err(aetherloom_dedicated::InboundRejection::StaleCommand { .. })
     ));
     assert!(matches!(
-        process.ingest_message(input_batch(
-            0,
-            peer(0),
-            2,
-            vec![command(10, 2, 100)]
-        )),
+        process.ingest_message(input_batch(0, peer(0), 2, vec![command(10, 2, 100)])),
         Err(aetherloom_dedicated::InboundRejection::FutureCommand { .. })
     ));
     assert_eq!(process.pending_command_count(), 0);
     process
-        .ingest_message(input_batch(
-            0,
-            peer(0),
-            2,
-            vec![command(1, 2, 100)],
-        ))
+        .ingest_message(input_batch(0, peer(0), 2, vec![command(1, 2, 100)]))
         .expect("newer current input remains valid");
 
     run_tick(&mut process, &mut scheduler);
@@ -557,12 +527,7 @@ fn redundant_batch_conflict_is_rejected_atomically() {
     let mut process = process(1, RecordingHost::accepting());
     admit_players(&mut process, 1);
     process
-        .ingest_message(input_batch(
-            0,
-            peer(0),
-            1,
-            vec![command(1, 2, 50)],
-        ))
+        .ingest_message(input_batch(0, peer(0), 1, vec![command(1, 2, 50)]))
         .expect("original future command");
     assert_eq!(process.pending_command_count(), 1);
 
@@ -570,18 +535,11 @@ fn redundant_batch_conflict_is_rejected_atomically() {
         0,
         peer(0),
         2,
-        vec![
-            command(2, 4, 400),
-            command(1, 3, 300),
-            command(0, 2, 200),
-        ],
+        vec![command(2, 4, 400), command(1, 3, 300), command(0, 2, 200)],
     );
     assert!(matches!(
         process.ingest_message(conflicting),
-        Err(aetherloom_dedicated::InboundRejection::DuplicateTickCommand {
-            tick: 1,
-            ..
-        })
+        Err(aetherloom_dedicated::InboundRejection::DuplicateTickCommand { tick: 1, .. })
     ));
     assert_eq!(
         process.pending_command_count(),
@@ -590,12 +548,7 @@ fn redundant_batch_conflict_is_rejected_atomically() {
     );
 
     process
-        .ingest_message(input_batch(
-            0,
-            peer(0),
-            3,
-            vec![command(0, 1, 100)],
-        ))
+        .ingest_message(input_batch(0, peer(0), 3, vec![command(0, 1, 100)]))
         .expect("atomic rejection leaves current tick available");
     let mut scheduler = TickScheduler::new(ManualClock::default(), 8);
     run_tick(&mut process, &mut scheduler);
@@ -630,15 +583,9 @@ fn reliable_resync_emits_a_keyframe() {
 fn damage_events_leave_as_mtu_safe_redundant_datagrams_and_dedupe_client_side() {
     // This seed places player one on player zero's south-west firing line,
     // close enough for the deterministic projectile to collide.
-    let mut process =
-        process_with_seed(2, RecordingHost::accepting(), 455);
+    let mut process = process_with_seed(2, RecordingHost::accepting(), 455);
     admit_players(&mut process, 2);
-    let cast = input_batch(
-        0,
-        peer(0),
-        1,
-        vec![cast_command(0, 1, 40_960)],
-    );
+    let cast = input_batch(0, peer(0), 1, vec![cast_command(0, 1, 40_960)]);
     process.ingest_message(cast).expect("cast input");
     let mut scheduler = TickScheduler::new(ManualClock::default(), 32);
     run_tick(&mut process, &mut scheduler);
@@ -676,8 +623,7 @@ fn damage_events_leave_as_mtu_safe_redundant_datagrams_and_dedupe_client_side() 
         "current plus previous-tick redundancy must survive one lost datagram"
     );
     assert!(damage_packets.iter().all(|packet| {
-        packet.delivery == DeliveryKind::Datagram
-            && packet.payload.len() <= MAX_DATAGRAM_BYTES
+        packet.delivery == DeliveryKind::Datagram && packet.payload.len() <= MAX_DATAGRAM_BYTES
     }));
 
     let mut feed = AuthoritativeFeedReplica::new(PlayerId::new(0).expect("viewer"));
@@ -706,12 +652,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
     let mut scheduler = TickScheduler::new(ManualClock::default(), 128);
 
     process
-        .ingest_message(input_batch(
-            0,
-            peer(0),
-            1,
-            vec![cast_command(0, 1, 0)],
-        ))
+        .ingest_message(input_batch(0, peer(0), 1, vec![cast_command(0, 1, 0)]))
         .expect("first cast");
     run_tick(&mut process, &mut scheduler);
     let initial_keyframe = process
@@ -742,9 +683,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
         .host()
         .sent
         .iter()
-        .filter(|packet| {
-            packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable
-        })
+        .filter(|packet| packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable)
         .map(decode_sent)
         .find(|envelope| {
             matches!(
@@ -805,9 +744,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
         .host()
         .sent
         .iter()
-        .filter(|packet| {
-            packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable
-        })
+        .filter(|packet| packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable)
         .map(decode_sent)
         .find(|envelope| {
             matches!(
@@ -846,9 +783,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
         .host()
         .sent
         .iter()
-        .filter(|packet| {
-            packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable
-        })
+        .filter(|packet| packet.peer == peer(0) && packet.delivery == DeliveryKind::Reliable)
         .map(decode_sent)
         .find(|envelope| matches!(envelope.message, Message::SnapshotKeyframe(_)))
         .expect("full recovery keyframe");
@@ -884,6 +819,10 @@ fn disconnect_transitions_to_bot_then_reconnects_and_expires() {
     let replacement_peer = PeerId(99_999);
     assert_eq!(
         process.admit(replacement_peer, &ticket(0), NOW),
+        Err(AdmissionError::TicketReplayed)
+    );
+    assert_eq!(
+        process.admit(replacement_peer, &reconnect_ticket(0, 2), NOW),
         Ok(player)
     );
     assert_eq!(
@@ -898,7 +837,7 @@ fn disconnect_transitions_to_bot_then_reconnects_and_expires() {
     assert_eq!(expired.controller, Controller::Empty);
     assert_eq!(expired.outcome, PlayerOutcome::Defeated);
     assert_eq!(
-        process.admit(PeerId(100_000), &ticket(0), NOW),
+        process.admit(PeerId(100_000), &reconnect_ticket(0, 3), NOW),
         Err(AdmissionError::ReconnectExpired)
     );
     let result = process
@@ -960,7 +899,9 @@ fn queue_pressure_never_drops_simulation_ticks() {
     assert!(process.egress().len() <= 4);
     let stats = process.egress().stats();
     assert!(
-        stats.reliable_backpressure + stats.coalesced_critical + stats.dropped_medium
+        stats.reliable_backpressure
+            + stats.coalesced_critical
+            + stats.dropped_medium
             + stats.dropped_distant
             > 0
     );
@@ -1118,13 +1059,13 @@ fn disconnect_purges_queued_frames_before_peer_id_reuse() {
     assert!(process.egress().is_empty());
     process.host_mut().backpressured = false;
     process
-        .admit(peer(0), &ticket(0), NOW)
+        .admit(peer(0), &reconnect_ticket(0, 2), NOW)
         .expect("same peer id may be rebound after purge");
     run_tick(&mut process, &mut scheduler);
 
     assert_eq!(process.host().sent.len(), 1);
-    let envelope = MessageEnvelope::decode_reliable(&process.host().sent[0].payload)
-        .expect("fresh keyframe");
+    let envelope =
+        MessageEnvelope::decode_reliable(&process.host().sent[0].payload).expect("fresh keyframe");
     assert_eq!(envelope.metadata.server_tick, 2);
     assert!(matches!(envelope.message, Message::SnapshotKeyframe(_)));
 }
@@ -1139,13 +1080,7 @@ fn browser_snapshots_run_at_32_hz_while_native_remains_128_hz() {
     );
     let mut browser_scheduler = TickScheduler::new(ManualClock::default(), 16);
     for sequence in 1..=12_u32 {
-        let mut inbound = input(
-            0,
-            peer(0),
-            browser.state().tick(),
-            sequence,
-            2_047,
-        );
+        let mut inbound = input(0, peer(0), browser.state().tick(), sequence, 2_047);
         inbound.delivery = DeliveryKind::Reliable;
         browser
             .ingest_message(inbound)
@@ -1175,13 +1110,7 @@ fn browser_snapshots_run_at_32_hz_while_native_remains_128_hz() {
     let mut native_scheduler = TickScheduler::new(ManualClock::default(), 16);
     for sequence in 1..=5_u32 {
         native
-            .ingest_message(input(
-                0,
-                peer(0),
-                native.state().tick(),
-                sequence,
-                2_047,
-            ))
+            .ingest_message(input(0, peer(0), native.state().tick(), sequence, 2_047))
             .expect("native datagram");
         run_tick(&mut native, &mut native_scheduler);
     }
@@ -1203,10 +1132,7 @@ fn browser_snapshots_run_at_32_hz_while_native_remains_128_hz() {
 #[test]
 fn spatial_grid_merge_is_independent_of_worker_completion_order() {
     let entries = vec![
-        (
-            EntityId::new(9, 1).expect("entity"),
-            [2_100, 0, -2_100],
-        ),
+        (EntityId::new(9, 1).expect("entity"), [2_100, 0, -2_100]),
         (EntityId::new(2, 1).expect("entity"), [-100, 0, 100]),
         (EntityId::new(7, 1).expect("entity"), [500, 0, 500]),
         (EntityId::new(1, 1).expect("entity"), [-500, 0, -500]),
@@ -1216,7 +1142,10 @@ fn spatial_grid_merge_is_independent_of_worker_completion_order() {
     let mut reverse = DeterministicSpatialGrid::default();
     reverse.rebuild_entries(entries.iter().rev().copied());
 
-    assert_eq!(forward.cells().collect::<Vec<_>>(), reverse.cells().collect::<Vec<_>>());
+    assert_eq!(
+        forward.cells().collect::<Vec<_>>(),
+        reverse.cells().collect::<Vec<_>>()
+    );
     assert_eq!(
         forward.query_radius([0, 0, 0], 1_000),
         reverse.query_radius([0, 0, 0], 1_000)
@@ -1262,12 +1191,8 @@ fn all_128_player_gameplay_datagrams_respect_the_path_mtu() {
             };
             assert!(delta.entities.len() <= 32);
             if packet.peer == peer(0) {
-                peer_zero_entities.extend(
-                    delta
-                        .entities
-                        .into_iter()
-                        .map(|entity| entity.entity_id),
-                );
+                peer_zero_entities
+                    .extend(delta.entities.into_iter().map(|entity| entity.entity_id));
             }
         } else {
             let envelope =

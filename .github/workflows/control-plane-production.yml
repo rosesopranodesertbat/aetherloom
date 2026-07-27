@@ -1,0 +1,292 @@
+name: Promote control-plane production
+run-name: Promote control plane ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_run_id:
+        description: Successful staging run containing control-plane smoke proof
+        required: true
+        type: string
+      release_sha:
+        description: Full 40-character commit SHA already present on main
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE CONTROL PLANE exactly
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aetherloom-control-plane-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify staged control plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      content_build_id: ${{ steps.build.outputs.content_build_id }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [[ "${CONFIRMATION}" != "PROMOTE CONTROL PLANE" ]]; then
+            echo "confirmation must be PROMOTE CONTROL PLANE" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+      - name: Verify immutable main commit
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          if [[ ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release SHA must be a full lowercase 40-character Git SHA" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if [[ "$(git rev-parse HEAD)" != "${RELEASE_SHA}" ]]; then
+            echo "checkout does not match the requested release SHA" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${RELEASE_SHA}" origin/main; then
+            echo "production releases must already be present on origin/main" >&2
+            exit 1
+          fi
+      - name: Verify staging workflow result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: node scripts/release/verify-staging-run.mjs "${STAGING_RUN_ID}" "${RELEASE_SHA}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.staging_run_id }}
+          name: control-plane-staging-proof
+          path: proof
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.staging_run_id }}
+          name: web-release
+          path: release
+      - id: build
+        name: Recover verified content build id
+        shell: bash
+        run: |
+          content_build_id="$(
+            node scripts/release/release-artifact.mjs build-id \
+              --manifest release/release-manifest.json
+          )"
+          echo "content_build_id=${content_build_id}" >> "${GITHUB_OUTPUT}"
+      - name: Verify staging smoke proof
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONTENT_BUILD_ID: ${{ steps.build.outputs.content_build_id }}
+        run: |
+          node scripts/release/deployment-proof.mjs verify \
+            --proof proof/control-plane-staging-proof.json \
+            --environment staging \
+            --service control-plane \
+            --commit "${RELEASE_SHA}" \
+            --build-hash "${CONTENT_BUILD_ID}"
+
+  deploy:
+    name: Deploy protected production Worker
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: production
+      url: ${{ vars.AETHERLOOM_CONTROL_PLANE_URL }}
+    permissions:
+      contents: read
+    env:
+      CF_WORKER_NAME: ${{ vars.CF_WORKER_NAME }}
+      CF_WORKERS_DEV: ${{ vars.CF_WORKERS_DEV }}
+      CF_WORKER_CUSTOM_DOMAIN: ${{ vars.CF_WORKER_CUSTOM_DOMAIN }}
+      CF_D1_DATABASE_NAME: ${{ vars.CF_D1_DATABASE_NAME }}
+      CF_D1_DATABASE_ID: ${{ vars.CF_D1_DATABASE_ID }}
+      CF_MATCH_ARCHIVE_BUCKET: ${{ vars.CF_MATCH_ARCHIVE_BUCKET }}
+      CF_SETTLEMENT_QUEUE: ${{ vars.CF_SETTLEMENT_QUEUE }}
+      CF_SETTLEMENT_DLQ: ${{ vars.CF_SETTLEMENT_DLQ }}
+      CF_MATCH_CAPACITY_WORKER: ${{ vars.CF_MATCH_CAPACITY_WORKER }}
+      CF_BROWSER_MATCH_WORKER: ${{ vars.CF_BROWSER_MATCH_WORKER }}
+      CF_MATCHMAKING_SHARD_COUNT: ${{ vars.CF_MATCHMAKING_SHARD_COUNT }}
+      AETHERLOOM_ALLOWED_ORIGINS_JSON: ${{ vars.AETHERLOOM_ALLOWED_ORIGINS_JSON }}
+      AETHERLOOM_RESULT_TICKET_HOSTS_JSON: ${{ vars.AETHERLOOM_RESULT_TICKET_HOSTS_JSON }}
+      AETHERLOOM_CONTROL_PLANE_URL: ${{ vars.AETHERLOOM_CONTROL_PLANE_URL }}
+      JOIN_TICKET_PUBLIC_KEYS_JSON: ${{ vars.JOIN_TICKET_PUBLIC_KEYS_JSON }}
+      ACTIVE_JOIN_TICKET_KID: ${{ vars.ACTIVE_JOIN_TICKET_KID }}
+      ACTIVE_SERVICE_TICKET_KID: ${{ vars.ACTIVE_SERVICE_TICKET_KID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/cloudflare/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-27
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Check protected production credentials
+        shell: bash
+        run: |
+          test -n "${AETHERLOOM_CONTROL_PLANE_URL}"
+      - name: Revalidate production source
+        run: bash scripts/release/validate-release.sh
+      - name: Render secret-free production configuration
+        run: |
+          node server/cloudflare/scripts/render-wrangler-config.mjs \
+            --environment production \
+            --resources server/cloudflare/deploy/production.resources.json \
+            --output server/cloudflare/wrangler.generated.production.jsonc \
+            --build-hash "${{ needs.verify.outputs.content_build_id }}"
+      - name: Validate production bundle
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --dry-run
+      - name: Verify remote production resources and secret names
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          test -n "${CF_D1_DATABASE_NAME}"
+          test -n "${CF_MATCH_ARCHIVE_BUCKET}"
+          test -n "${CF_SETTLEMENT_QUEUE}"
+          test -n "${CF_SETTLEMENT_DLQ}"
+          preflight="${RUNNER_TEMP}/aetherloom-cloudflare-preflight"
+          install -d -m 700 "${preflight}"
+          npm exec --prefix server/cloudflare -- wrangler d1 info \
+            "${CF_D1_DATABASE_NAME}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --json > "${preflight}/d1.json"
+          npm exec --prefix server/cloudflare -- wrangler r2 bucket info \
+            "${CF_MATCH_ARCHIVE_BUCKET}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --json > "${preflight}/r2.json"
+          npm exec --prefix server/cloudflare -- wrangler queues info \
+            "${CF_SETTLEMENT_QUEUE}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            > "${preflight}/queue.txt"
+          npm exec --prefix server/cloudflare -- wrangler queues info \
+            "${CF_SETTLEMENT_DLQ}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            > "${preflight}/dlq.txt"
+          npm exec --prefix server/cloudflare -- wrangler secret list \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --format json > "${preflight}/secrets.json"
+          npm exec --prefix server/cloudflare -- wrangler deployments list \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --json > "${preflight}/deployments.json"
+          node scripts/release/verify-cloudflare-resources.mjs verify \
+            --environment production \
+            --manifest server/cloudflare/deploy/production.resources.json \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --d1-info "${preflight}/d1.json" \
+            --r2-info "${preflight}/r2.json" \
+            --settlement-queue-info "${preflight}/queue.txt" \
+            --settlement-dlq-info "${preflight}/dlq.txt" \
+            --secrets "${preflight}/secrets.json" \
+            --deployments "${preflight}/deployments.json"
+      - name: Capture production D1 recovery bookmark
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler d1 time-travel info \
+            "${CF_D1_DATABASE_NAME}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --json > "${RUNNER_TEMP}/production-d1-bookmark.json"
+      - name: Bind recovery point to this release
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          node scripts/release/d1-recovery-proof.mjs create \
+            --bookmark-json "${RUNNER_TEMP}/production-d1-bookmark.json" \
+            --manifest server/cloudflare/deploy/production.resources.json \
+            --release-sha "${RELEASE_SHA}" \
+            --output "${RUNNER_TEMP}/production-d1-recovery.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-d1-recovery-${{ inputs.release_sha }}
+          path: ${{ runner.temp }}/production-d1-recovery.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Require a fresh recoverable D1 point
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          node scripts/release/d1-recovery-proof.mjs verify \
+            --proof "${RUNNER_TEMP}/production-d1-recovery.json" \
+            --manifest server/cloudflare/deploy/production.resources.json \
+            --release-sha "${RELEASE_SHA}" \
+            --max-age-seconds 900
+      - name: Apply production D1 migrations
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler d1 migrations apply \
+            "${CF_D1_DATABASE_NAME}" \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --remote
+      - name: Deploy production Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.production.jsonc \
+            --strict \
+            --message "production ${RELEASE_SHA}"
+      - name: Smoke-test production control plane
+        run: |
+          node scripts/release/smoke-control-plane.mjs \
+            "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            production \
+            "${{ needs.verify.outputs.content_build_id }}"
+      - name: Prepare protected readiness credential
+        shell: bash
+        env:
+          AETHERLOOM_READINESS_KEYS_B64: ${{ secrets.AETHERLOOM_READINESS_KEYS_B64 }}
+        run: |
+          test -n "${AETHERLOOM_READINESS_KEYS_B64}"
+          umask 077
+          printf '%s' "${AETHERLOOM_READINESS_KEYS_B64}" \
+            | base64 --decode > "${RUNNER_TEMP}/aetherloom-readiness-keys.json"
+          chmod 600 "${RUNNER_TEMP}/aetherloom-readiness-keys.json"
+      - name: Verify authenticated cryptographic readiness
+        run: |
+          node scripts/release/smoke-control-plane-readiness.mjs \
+            --url "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            --environment production \
+            --expected-build "${{ needs.verify.outputs.content_build_id }}" \
+            --secrets-file "${RUNNER_TEMP}/aetherloom-readiness-keys.json" \
+            --service-kid "${ACTIVE_SERVICE_TICKET_KID}"
+      - name: Remove readiness credential
+        if: ${{ always() }}
+        run: rm -f "${RUNNER_TEMP}/aetherloom-readiness-keys.json"

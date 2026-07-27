@@ -52,7 +52,9 @@ const requiredFiles = [
   "wrangler.jsonc",
   "wrangler.production.example.jsonc",
   "migrations/0001_control_plane.sql",
+  "migrations/0002_match_epoch.sql",
   "schemas/ticket-claims.schema.json",
+  "schemas/join-ticket-claims.schema.json",
   "schemas/settlement-message.schema.json",
   "schemas/matchmaking-enqueue.schema.json",
   "src/index.ts",
@@ -63,6 +65,8 @@ const requiredFiles = [
   "src/match-director.ts",
   "src/island-runtime.ts",
   "src/island-module.ts",
+  "src/join-tickets.ts",
+  "src/readiness.ts",
   "src/settlements.ts",
   "src/ticket-invariants.ts",
   "src/tickets.ts",
@@ -73,12 +77,18 @@ const config = await json("wrangler.jsonc", true);
 assert.equal(config.compatibility_date, "2026-07-27");
 assert.equal(config.main, "src/index.ts");
 assert.equal(config.vars.ENVIRONMENT, "local");
-assert.equal(config.vars.CONTENT_BUILD_HASH, "local-development-build");
+assert.match(config.vars.CONTENT_BUILD_HASH, /^[0-9a-f]{32}$/u);
 assert.equal(config.vars.RESULT_TICKET_AUDIENCE, "aetherloom-results");
 assert.notEqual(config.vars.RESULT_TICKET_AUDIENCE, config.vars.SERVICE_TICKET_AUDIENCE);
 assert.deepEqual(JSON.parse(config.vars.RESULT_TICKET_HOSTS_JSON), {
   "local-result-host-v1": "local-match-host",
 });
+assert.equal(config.vars.ACTIVE_JOIN_TICKET_KID, "local-join-v1");
+assert.equal(config.vars.ACTIVE_SERVICE_TICKET_KID, "local-service-v1");
+assert.equal(
+  Object.keys(JSON.parse(config.vars.JOIN_TICKET_PUBLIC_KEYS_JSON))[0],
+  config.vars.ACTIVE_JOIN_TICKET_KID,
+);
 assert.deepEqual(
   config.durable_objects.bindings.map((binding) => binding.name).sort(),
   ["MATCHMAKING_SHARD", "PROFILE_ISLAND"],
@@ -90,9 +100,7 @@ assert.deepEqual(config.r2_buckets.map((binding) => binding.binding), ["MATCH_AR
 assert.deepEqual(config.queues.producers.map((binding) => binding.binding), ["SETTLEMENT_QUEUE"]);
 assert.ok(config.queues.consumers[0].dead_letter_queue);
 assert.deepEqual(config.secrets.required.sort(), [
-  "ACTIVE_JOIN_TICKET_KID",
-  "ACTIVE_SERVICE_TICKET_KID",
-  "JOIN_TICKET_KEYS_JSON",
+  "JOIN_TICKET_SIGNING_KEYS_JSON",
   "PLAYER_TICKET_KEYS_JSON",
   "RESULT_TICKET_KEYS_JSON",
   "SERVICE_TICKET_KEYS_JSON",
@@ -110,6 +118,14 @@ assert.deepEqual(
   ["BROWSER_MATCH_ORIGIN", "MATCH_CAPACITY_API"],
 );
 
+const stagingResources = await json("deploy/staging.resources.json");
+assert.equal(stagingResources.version, 1);
+assert.equal(stagingResources.environment, "staging");
+assert.match(stagingResources.accountIdSha256, /^[0-9a-f]{64}$/u);
+assert.match(stagingResources.resourceFingerprint, /^[0-9a-f]{64}$/u);
+assert.match(stagingResources.settlementQueueId, /^[0-9a-f]{32}$/u);
+assert.match(stagingResources.settlementDeadLetterQueueId, /^[0-9a-f]{32}$/u);
+
 for (const schemaFile of (await readdir(join(root, "schemas"))).filter((file) => file.endsWith(".json"))) {
   const schema = await json(join("schemas", schemaFile));
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -117,6 +133,8 @@ for (const schemaFile of (await readdir(join(root, "schemas"))).filter((file) =>
 }
 
 const migration = await readFile(join(root, "migrations/0001_control_plane.sql"), "utf8");
+const matchEpochMigration = await readFile(join(root, "migrations/0002_match_epoch.sql"), "utf8");
+assert.match(matchEpochMigration, /ADD COLUMN match_epoch INTEGER NOT NULL/u);
 for (const table of [
   "match_allocations",
   "profile_projection",
@@ -160,6 +178,8 @@ assert.doesNotMatch(
 );
 assert.match(source, /serviceRequest\(request, env, \["island:checkpoint"\]\)/u);
 const ticketsSource = await readFile(join(root, "src/tickets.ts"), "utf8");
+const joinTicketsSource = await readFile(join(root, "src/join-tickets.ts"), "utf8");
+const readinessSource = await readFile(join(root, "src/readiness.ts"), "utf8");
 const settlementsSource = await readFile(join(root, "src/settlements.ts"), "utf8");
 const gatewaySource = await readFile(join(root, "src/gateway.ts"), "utf8");
 const directorSource = await readFile(join(root, "src/match-director.ts"), "utf8");
@@ -214,6 +234,25 @@ assert.match(
   /Math\.floor\(Date\.now\(\) \/ 1_000\) \+ 120/u,
   "join tickets must remain short-lived even for long capacity reservations",
 );
+assert.match(gatewaySource, /signJoinTicket\(/u);
+assert.match(gatewaySource, /match_epoch: dispatch\.matchEpoch/u);
+assert.match(joinTicketsSource, /alg: "EdDSA"/u);
+assert.match(joinTicketsSource, /exactObjectKeys/u);
+assert.match(joinTicketsSource, /JOIN_TICKET_LIFETIME_SECONDS = 120/u);
+assert.match(joinTicketsSource, /publicKeySetJson/u);
+assert.doesNotMatch(joinTicketsSource, /HMAC/u);
+assert.match(gatewaySource, /"\/internal\/v1\/readiness"/u);
+assert.match(gatewaySource, /serviceRequest\(request, env, \["deployment:verify"\]\)/u);
+assert.match(readinessSource, /assertCryptographicReadiness/u);
+for (const keyDomain of [
+  "PLAYER_TICKET_KEYS_JSON",
+  "JOIN_TICKET_SIGNING_KEYS_JSON",
+  "SERVICE_TICKET_KEYS_JSON",
+  "RESULT_TICKET_KEYS_JSON",
+]) {
+  assert.match(readinessSource, new RegExp(keyDomain, "u"));
+}
+assert.match(ticketsSource, /Join tickets must use the asymmetric Ed25519 signer/u);
 assert.match(ticketsSource, /export async function verifyTicketWithKeyId/u);
 assert.match(ticketsSource, /return \{ claims, keyId: header\.kid \}/u);
 assert.match(settlementsSource, /verifyTicketWithKeyId\(resultTicket, env\.RESULT_TICKET_KEYS_JSON/u);

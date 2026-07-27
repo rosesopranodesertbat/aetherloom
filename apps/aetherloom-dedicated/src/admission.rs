@@ -1,12 +1,15 @@
-use aetherloom_protocol::{PlayerId, TeamId};
+use aetherloom_protocol::{InputPool, PlayerId, RegionId, TeamId};
 
-use crate::MatchBuild;
+use crate::{MatchAdmissionScope, MatchBuild};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedTicket {
     pub match_id: [u8; 16],
     pub content_build_hash: [u8; 16],
     pub match_epoch: u64,
+    pub region: RegionId,
+    pub input_pool: InputPool,
+    pub nonce: [u8; 16],
     pub account_id: [u8; 16],
     pub player_id: PlayerId,
     pub team_id: TeamId,
@@ -21,6 +24,7 @@ pub trait SignedTicketVerifier {
         &self,
         signed_ticket: &[u8],
         expected_build: MatchBuild,
+        expected_scope: MatchAdmissionScope,
         now_unix_seconds: u64,
     ) -> Result<VerifiedTicket, TicketVerificationError>;
 }
@@ -30,7 +34,16 @@ pub enum TicketVerificationError {
     Malformed,
     BadSignature,
     Expired,
+    NotYetValid,
+    UnknownKey,
+    WrongIssuer,
     WrongAudience,
+    WrongPurpose,
+    WrongMatch,
+    WrongBuild,
+    WrongEpoch,
+    WrongRegion,
+    WrongInputPool,
     BackendUnavailable,
 }
 
@@ -44,6 +57,9 @@ pub enum AdmissionError {
     WrongMatch,
     WrongBuild,
     WrongEpoch,
+    WrongRegion,
+    WrongInputPool,
+    TicketReplayed,
     PlayerOutOfRange(PlayerId),
     PeerAlreadyBound,
     PlayerAlreadyConnected,

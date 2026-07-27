@@ -19,7 +19,10 @@
     "SERVICE_TICKET_AUDIENCE": "aetherloom-services",
     "RESULT_TICKET_AUDIENCE": "aetherloom-results",
     "RESULT_TICKET_HOSTS_JSON": "{\"local-result-host-v1\":\"local-match-host\"}",
-    "CONTENT_BUILD_HASH": "local-development-build",
+    "JOIN_TICKET_PUBLIC_KEYS_JSON": "{\"local-join-v1\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}",
+    "ACTIVE_JOIN_TICKET_KID": "local-join-v1",
+    "ACTIVE_SERVICE_TICKET_KID": "local-service-v1",
+    "CONTENT_BUILD_HASH": "00000000000000000000000000000001",
     "ALLOWED_ORIGINS_JSON": "[\"http://localhost:8080\",\"http://127.0.0.1:8080\"]",
     "MATCHMAKING_SHARD_COUNT": "16",
     "MATCHMAKING_SKILL_BUCKET_WIDTH": "200",
@@ -28,11 +31,9 @@
   "secrets": {
     "required": [
       "PLAYER_TICKET_KEYS_JSON",
-      "JOIN_TICKET_KEYS_JSON",
+      "JOIN_TICKET_SIGNING_KEYS_JSON",
       "SERVICE_TICKET_KEYS_JSON",
-      "RESULT_TICKET_KEYS_JSON",
-      "ACTIVE_JOIN_TICKET_KID",
-      "ACTIVE_SERVICE_TICKET_KID"
+      "RESULT_TICKET_KEYS_JSON"
     ]
   },
   "durable_objects": {

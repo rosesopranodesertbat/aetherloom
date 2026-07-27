@@ -3,8 +3,8 @@
 .env
 .env.*
 .wrangler/
+wrangler.generated.*.jsonc
 dist/
 node_modules/
 
 !.dev.vars.example
-

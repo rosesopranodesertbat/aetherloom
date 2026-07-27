@@ -1,4 +1,4 @@
-import type { InputPool, Platform, TicketClaims, TicketPurpose } from "./types";
+import type { InputPool, Platform, TicketClaims, TicketPurpose } from "./types.ts";
 import {
   ApiError,
   assertObject,
@@ -8,7 +8,7 @@ import {
   requireIdentifier,
   requireInteger,
   requireString,
-} from "./util";
+} from "./util.ts";
 
 interface TicketHeader {
   alg: "HS256";
@@ -181,9 +181,18 @@ function validateClaims(value: unknown): TicketClaims {
   if (value.team_id !== undefined) {
     claims.team_id = requireInteger(value.team_id, "ticket team_id", 0, 127);
   }
+  if (value.match_epoch !== undefined) {
+    claims.match_epoch = requireInteger(
+      value.match_epoch,
+      "ticket match_epoch",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    );
+  }
   if (
     purpose === "join" &&
     (claims.match_id === undefined ||
+      claims.match_epoch === undefined ||
       claims.build_hash === undefined ||
       claims.input_pool === undefined ||
       claims.player_slot === undefined ||
@@ -192,7 +201,7 @@ function validateClaims(value: unknown): TicketClaims {
     throw new ApiError(
       401,
       "invalid_ticket",
-      "Join tickets must bind the match, build, input pool, player slot, and team.",
+      "Join tickets must bind the match, epoch, build, input pool, player slot, and team.",
     );
   }
   return claims;
@@ -203,6 +212,9 @@ export async function signTicket(
   keySetJson: string,
   kid: string,
 ): Promise<string> {
+  if (claims.purpose === "join") {
+    throw new Error("Join tickets must use the asymmetric Ed25519 signer.");
+  }
   validateClaims(claims);
   const header: TicketHeader = { alg: "HS256", kid, typ: "AETHERLOOM-TICKET", v: 1 };
   const encodedHeader = bytesToBase64Url(encoder.encode(canonicalJson(header)));
@@ -226,6 +238,9 @@ export async function verifyTicketWithKeyId(
   keySetJson: string,
   expectations: TicketExpectations,
 ): Promise<VerifiedTicket> {
+  if (expectations.purpose === "join") {
+    throw new Error("Join tickets must use the asymmetric Ed25519 verifier.");
+  }
   if (token.length === 0 || token.length > 4_096) {
     throw new ApiError(401, "invalid_ticket", "Ticket length is invalid.");
   }
