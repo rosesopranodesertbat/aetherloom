@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aetherloom.invalid/schemas/settlement-message.schema.json",
+  "title": "Aetherloom per-account settlement command",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "settlementId",
+    "accountId",
+    "reservationId",
+    "matchId",
+    "outcome",
+    "loot",
+    "ratingDelta",
+    "issuedAtMs"
+  ],
+  "properties": {
+    "v": { "const": 1 },
+    "settlementId": { "$ref": "#/$defs/id" },
+    "accountId": { "$ref": "#/$defs/id" },
+    "reservationId": { "$ref": "#/$defs/id" },
+    "matchId": { "$ref": "#/$defs/id" },
+    "outcome": { "enum": ["extracted", "defeated", "abandoned"] },
+    "loot": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/stack" }
+    },
+    "ratingDelta": { "type": "integer", "minimum": -500, "maximum": 500 },
+    "resultObjectKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^match\\.result\\.[A-Za-z0-9_.:-]+\\.json$"
+    },
+    "resultObjectSha256": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "issuedAtMs": { "type": "integer", "minimum": 0 }
+  },
+  "dependentRequired": {
+    "resultObjectKey": ["resultObjectSha256"],
+    "resultObjectSha256": ["resultObjectKey"]
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "stack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["itemId", "quantity"],
+      "properties": {
+        "itemId": { "$ref": "#/$defs/id" },
+        "quantity": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    }
+  }
+}

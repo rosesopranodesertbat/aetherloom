@@ -1,0 +1,27 @@
+[package]
+name = "aetherloom-dedicated"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "One-match authoritative dedicated process for Aetherloom"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "aetherloom-dedicated"
+path = "src/main.rs"
+
+[dependencies]
+aetherloom-core = { path = "../../crates/aetherloom-core", features = ["std"] }
+aetherloom-protocol = { path = "../../crates/aetherloom-protocol", features = ["std"] }
+aetherloom-quic = { path = "../../crates/aetherloom-quic" }
+aetherloom-server = { path = "../../crates/aetherloom-server" }
+
+[dev-dependencies]
+aetherloom-client = { path = "../../crates/aetherloom-client", features = ["std"] }
+quinn = { version = "=0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "=0.13.2"
+rustls = { version = "=0.23.31", default-features = false, features = ["ring", "std"] }
+tokio = { version = "=1.47.1", features = ["macros", "net", "rt-multi-thread", "time"] }

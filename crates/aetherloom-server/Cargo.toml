@@ -1,0 +1,12 @@
+[package]
+name = "aetherloom-server"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-neutral server runtime foundations for Aetherloom"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aetherloom-protocol = { path = "../aetherloom-protocol", features = ["std"] }

@@ -35,9 +35,11 @@ const RIVAL_HUNT_RANGE: f32 = 540.0;
 const RIVAL_STANDOFF: f32 = 130.0;
 /// Rivals only bother possessing an orb they are nearly on top of.
 const RIVAL_CLAIM_RANGE: f32 = 190.0;
-/// AI casts bypass the player's cooldown table, so Claim is throttled by hand;
-/// ungated it fires every frame and hoovers the map instantly.
-const RIVAL_CLAIM_CHANCE_PER_FRAME: f32 = 0.015;
+/// AI casts bypass the player's cooldown table, so Claim is throttled by a
+/// time-based rate rather than a frame-dependent probability.
+const RIVAL_CLAIM_ATTEMPTS_PER_SECOND: f32 = 0.9;
+const CARPET_TRAIL_PUFFS_PER_SECOND: f32 = 33.0;
+const RIVAL_TRAIL_PUFFS_PER_SECOND: f32 = 30.0;
 
 impl World {
     // ---- the player --------------------------------------------------------
@@ -45,7 +47,7 @@ impl World {
         self.steer_player(dt);
         self.integrate_player(dt);
         self.expire_player_buffs(dt);
-        self.trail_player();
+        self.trail_player(dt);
     }
 
     fn steer_player(&mut self, dt: f32) {
@@ -126,13 +128,13 @@ impl World {
         }
     }
 
-    fn trail_player(&mut self) {
-        if !self.rng.chance(0.55) {
+    fn trail_player(&mut self, dt: f32) {
+        if !self.cosmetic_rng.chance(CARPET_TRAIL_PUFFS_PER_SECOND * dt) {
             return;
         }
-        let jitter_x = self.rng.range(-4.0, 4.0);
-        let jitter_z = self.rng.range(-4.0, 4.0);
-        let drift = self.rng.range(-2.0, 2.0);
+        let jitter_x = self.cosmetic_rng.range(-4.0, 4.0);
+        let jitter_z = self.cosmetic_rng.range(-4.0, 4.0);
+        let drift = self.cosmetic_rng.range(-2.0, 2.0);
         self.spawn_particle(
             [
                 self.wizards.pos_x[PLAYER] + jitter_x,
@@ -230,8 +232,8 @@ impl World {
         if fleet >= cap {
             return;
         }
-        let offset_x = self.rng.range(-BALLOON_SPAWN_SPREAD, BALLOON_SPAWN_SPREAD);
-        let offset_z = self.rng.range(-BALLOON_SPAWN_SPREAD, BALLOON_SPAWN_SPREAD);
+        let offset_x = self.environment_rng.range(-BALLOON_SPAWN_SPREAD, BALLOON_SPAWN_SPREAD);
+        let offset_z = self.environment_rng.range(-BALLOON_SPAWN_SPREAD, BALLOON_SPAWN_SPREAD);
         self.spawn_creature(
             CreatureKind::Balloon,
             self.castles.pos_x[wizard] + offset_x,
@@ -254,7 +256,7 @@ impl World {
         }
         self.wizards.plan_remaining[wizard] -= dt;
         self.choose_rival_plan(wizard);
-        let destination = self.pursue_plan(wizard);
+        let destination = self.pursue_plan(wizard, dt);
         self.wizards.cast_cooldown[wizard] -= dt;
         self.steer_rival(wizard, destination, dt);
     }
@@ -280,7 +282,7 @@ impl World {
         if self.wizards.plan_remaining[wizard] > 0.0 {
             return;
         }
-        self.wizards.plan_remaining[wizard] = self.rng.range(1.6, 3.4);
+        self.wizards.plan_remaining[wizard] = self.ai_rng.range(1.6, 3.4);
         let to_player = length_sq3(
             self.wizards.pos_x[PLAYER] - self.wizards.pos_x[wizard],
             self.wizards.pos_y[PLAYER] - self.wizards.pos_y[wizard],
@@ -292,7 +294,7 @@ impl World {
         let plan = if self.wizards.alive[PLAYER]
             && to_player < RIVAL_DUEL_RANGE * RIVAL_DUEL_RANGE
             && self.wizards.mana[wizard] > 26.0
-            && self.rng.chance(0.24 + self.session.realm as f32 * 0.06)
+            && self.ai_rng.chance(0.24 + self.session.realm as f32 * 0.06)
         {
             RivalPlan::DuelPlayer
         } else if self.wizards.mana[wizard] > self.mana_cap(wizard) * 0.8 {
@@ -304,14 +306,14 @@ impl World {
     }
 
     /// Returns where the rival wants to be, casting along the way.
-    fn pursue_plan(&mut self, wizard: usize) -> [f32; 3] {
+    fn pursue_plan(&mut self, wizard: usize, dt: f32) -> [f32; 3] {
         let home = [
             self.castles.pos_x[wizard],
             self.castles.pos_y[wizard] + 34.0,
             self.castles.pos_z[wizard],
         ];
         match self.wizards.plan[wizard] {
-            RivalPlan::GatherMana => self.gather_mana(wizard).unwrap_or(home),
+            RivalPlan::GatherMana => self.gather_mana(wizard, dt).unwrap_or(home),
             RivalPlan::DuelPlayer if self.wizards.alive[PLAYER] => self.duel_player(wizard),
             RivalPlan::Retreat => {
                 if self.wizards.health[wizard] < 70.0
@@ -330,7 +332,7 @@ impl World {
         }
     }
 
-    fn gather_mana(&mut self, wizard: usize) -> Option<[f32; 3]> {
+    fn gather_mana(&mut self, wizard: usize, dt: f32) -> Option<[f32; 3]> {
         if let Some((orb, dist_sq)) = self.nearest_unclaimed_orb(wizard) {
             let destination = [
                 self.orbs.pos_x[orb],
@@ -338,7 +340,7 @@ impl World {
                 self.orbs.pos_z[orb],
             ];
             if dist_sq < RIVAL_CLAIM_RANGE * RIVAL_CLAIM_RANGE
-                && self.rng.chance(RIVAL_CLAIM_CHANCE_PER_FRAME)
+                && self.ai_rng.chance(RIVAL_CLAIM_ATTEMPTS_PER_SECOND * dt)
             {
                 self.cast(wizard, Spell::Claim);
             }
@@ -360,7 +362,7 @@ impl World {
                 self.creatures.pos_z[creature],
             ];
             self.aim_and_fire(wizard, at, false);
-            self.wizards.cast_cooldown[wizard] = self.rng.range(0.5, 1.1);
+            self.wizards.cast_cooldown[wizard] = self.ai_rng.range(0.5, 1.1);
         }
         Some(destination)
     }
@@ -428,21 +430,21 @@ impl World {
         {
             return destination;
         }
-        let roll = self.rng.unit();
+        let roll = self.ai_rng.unit();
         let realm = self.session.realm;
         if roll < 0.16 && self.wizards.mana[wizard] > 26.0 && realm >= 3 {
             self.aim_at(wizard, player_at);
             self.cast(wizard, Spell::Crater);
-            self.wizards.cast_cooldown[wizard] = self.rng.range(2.4, 4.0);
+            self.wizards.cast_cooldown[wizard] = self.ai_rng.range(2.4, 4.0);
         } else if roll < 0.36 && self.wizards.mana[wizard] > 12.0 && realm >= 2 {
             self.aim_at(wizard, player_at);
             self.cast(wizard, Spell::ChainLightning);
-            self.wizards.cast_cooldown[wizard] = self.rng.range(1.4, 2.6);
+            self.wizards.cast_cooldown[wizard] = self.ai_rng.range(1.4, 2.6);
         } else {
             self.aim_and_fire(wizard, player_at, true);
             // later realms fire faster
             self.wizards.cast_cooldown[wizard] =
-                self.rng.range(0.42, 0.9) + (9.0 - realm as f32) * 0.11;
+                self.ai_rng.range(0.42, 0.9) + (9.0 - realm as f32) * 0.11;
         }
         destination
     }
@@ -470,8 +472,8 @@ impl World {
         }
         self.aim_at(wizard, aim);
         let spread = max(0.13 - self.session.realm as f32 * 0.013, 0.015);
-        let yaw_error = self.rng.range(-spread, spread);
-        let pitch_error = self.rng.range(-spread, spread);
+        let yaw_error = self.combat_rng.range(-spread, spread);
+        let pitch_error = self.combat_rng.range(-spread, spread);
         self.wizards.yaw[wizard] += yaw_error;
         self.wizards.pitch[wizard] += pitch_error * 0.6;
         self.cast(wizard, Spell::Firebolt);
@@ -524,10 +526,10 @@ impl World {
         if self.wizards.plan[wizard] != RivalPlan::DuelPlayer {
             self.wizards.yaw[wizard] = atan2(offset[0], offset[2]);
         }
-        if self.rng.chance(0.5) {
-            let jitter_x = self.rng.range(-4.0, 4.0);
-            let jitter_z = self.rng.range(-4.0, 4.0);
-            let drift = self.rng.range(-2.0, 2.0);
+        if self.cosmetic_rng.chance(RIVAL_TRAIL_PUFFS_PER_SECOND * dt) {
+            let jitter_x = self.cosmetic_rng.range(-4.0, 4.0);
+            let jitter_z = self.cosmetic_rng.range(-4.0, 4.0);
+            let drift = self.cosmetic_rng.range(-2.0, 2.0);
             self.spawn_particle(
                 [
                     self.wizards.pos_x[wizard] + jitter_x,

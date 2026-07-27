@@ -324,12 +324,12 @@ impl World {
             Faction::of_wizard(wizard),
         );
         for _ in 0..VOLCANO_EMBER_COUNT {
-            let angle = self.rng.range(0.0, core::f32::consts::TAU);
-            let spread = self.rng.range(20.0, 70.0);
-            let vertical = self.rng.range(40.0, 105.0);
-            let life = self.rng.range(1.4, 3.0);
-            let size = self.rng.range(4.0, 9.0);
-            let heat = self.rng.range(0.25, 0.6);
+            let angle = self.cosmetic_rng.range(0.0, core::f32::consts::TAU);
+            let spread = self.cosmetic_rng.range(20.0, 70.0);
+            let vertical = self.cosmetic_rng.range(40.0, 105.0);
+            let life = self.cosmetic_rng.range(1.4, 3.0);
+            let size = self.cosmetic_rng.range(4.0, 9.0);
+            let heat = self.cosmetic_rng.range(0.25, 0.6);
             let ground = self.height_at(x, z);
             self.spawn_particle(
                 [x, ground + 30.0, z],
@@ -400,11 +400,11 @@ impl World {
         let at = self.position_of(wizard);
         for _ in 0..30 {
             let offset = [
-                self.rng.range(-8.0, 8.0),
-                self.rng.range(-6.0, 6.0),
-                self.rng.range(-8.0, 8.0),
+                self.cosmetic_rng.range(-8.0, 8.0),
+                self.cosmetic_rng.range(-6.0, 6.0),
+                self.cosmetic_rng.range(-8.0, 8.0),
             ];
-            let rise = self.rng.range(6.0, 20.0);
+            let rise = self.cosmetic_rng.range(6.0, 20.0);
             self.spawn_particle(
                 [at[0] + offset[0], at[1] + offset[1], at[2] + offset[2]],
                 [0.0, rise, 0.0],
@@ -447,9 +447,9 @@ impl World {
             let orb_at = [self.orbs.pos_x[i], self.orbs.pos_y[i], self.orbs.pos_z[i]];
             for _ in 0..7 {
                 let drift = [
-                    self.rng.range(-9.0, 9.0),
-                    self.rng.range(2.0, 12.0),
-                    self.rng.range(-9.0, 9.0),
+                    self.cosmetic_rng.range(-9.0, 9.0),
+                    self.cosmetic_rng.range(2.0, 12.0),
+                    self.cosmetic_rng.range(-9.0, 9.0),
                 ];
                 self.spawn_particle(orb_at, drift, 0.55, 2.0, [0.75, 0.9, 1.0], 0.0, 1.2);
             }

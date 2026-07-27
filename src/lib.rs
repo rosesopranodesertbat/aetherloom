@@ -8,7 +8,7 @@
 // and the JS side instantiates with an empty import object, so anything that
 // emitted an import would fail to instantiate at all.
 // ============================================================================
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 // No unsafe blocks anywhere in this crate. The only exemptions are the
 // `#[no_mangle]` attributes below, which modern Rust classes as unsafe because
 // an unmangled symbol can collide at link time — unavoidable for a module that
@@ -25,10 +25,13 @@ mod types;
 mod wizards;
 mod world;
 
-use core::panic::PanicInfo;
 use types::*;
 use world::*;
 
+#[cfg(target_arch = "wasm32")]
+use core::panic::PanicInfo;
+
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn on_panic(_: &PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
@@ -40,9 +43,9 @@ fn on_panic(_: &PanicInfo) -> ! {
 /// export takes it once and passes `&mut World` down.
 static WORLD: spin::Mutex<World> = spin::Mutex::new(World::new());
 
-/// Longest frame the simulation will integrate in one go. A tab that was
-/// backgrounded for a minute must not teleport everything through terrain.
-const MAX_TIMESTEP: f32 = 0.05;
+/// Competitive and offline gameplay share one immutable authoritative rate.
+pub const AUTHORITATIVE_HZ: u32 = 128;
+pub const FIXED_TIMESTEP: f32 = 1.0 / AUTHORITATIVE_HZ as f32;
 
 // ============================================================================
 // ABI — flat and C-like on purpose, so the core stays replaceable. `game.js`
@@ -59,8 +62,43 @@ pub extern "C" fn init(seed: u32, realm: i32) {
 #[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn step(dt: f32) {
+    // Compatibility ABI: callers may still pass the old frame delta, but the
+    // authoritative simulation never integrates caller-controlled time.
+    let _ = dt;
     let world = &mut *WORLD.lock();
-    world.advance(math::min(dt, MAX_TIMESTEP));
+    world.advance(FIXED_TIMESTEP);
+}
+
+/// Advances exactly one authoritative tick without rebuilding presentation
+/// buffers. The web client can run several catch-up ticks and extract once.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn advanceTick() {
+    WORLD.lock().advance_tick(FIXED_TIMESTEP);
+}
+
+/// Extracts renderer/HUD/minimap buffers from the latest authoritative state.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn extractFrame() {
+    WORLD.lock().extract_presentation();
+}
+
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn authoritativeHz() -> i32 {
+    AUTHORITATIVE_HZ as i32
+}
+
+/// Low 32 bits are enough for more than a year of continuous 128 Hz play.
+#[allow(unsafe_code)]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn simulationTick() -> u32 {
+    WORLD.lock().session.tick as u32
 }
 
 #[allow(unsafe_code)]
@@ -412,4 +450,15 @@ pub extern "C" fn minimapRaster(side: i32) -> usize {
     let world = &mut *WORLD.lock();
     world.rasterise_minimap(side.max(1) as usize);
     world.minimap.pixels.as_ptr() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn compatibility_tick_rate_matches_the_network_protocol() {
+        assert_eq!(
+            super::AUTHORITATIVE_HZ,
+            aetherloom_protocol::AUTHORITATIVE_HZ
+        );
+    }
 }

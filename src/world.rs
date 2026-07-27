@@ -74,8 +74,9 @@ pub const RIVAL_GROUND_CLEARANCE: f32 = 16.0;
 pub const RESPAWN_DELAY: f32 = 14.0;
 
 // ---- a deterministic xorshift ----------------------------------------------
-/// The whole realm is generated from this, so its call order is load-bearing:
-/// two runs that draw in a different order produce different worlds.
+/// One deterministic random stream. The world owns independent instances for
+/// generation, AI, combat, environment, and presentation so unrelated changes
+/// cannot perturb authoritative replay outcomes.
 pub struct Rng {
     state: u32,
 }
@@ -121,6 +122,16 @@ impl Rng {
     pub fn state(&self) -> u32 {
         self.state
     }
+}
+
+/// Derive independent, non-zero xorshift seeds from one world seed.
+pub fn stream_seed(seed: u32, stream: u32) -> u32 {
+    let mut value = seed ^ stream.wrapping_mul(0x9e37_79b9);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^ (value >> 16)
 }
 
 // ---- terrain ---------------------------------------------------------------
@@ -331,6 +342,8 @@ pub struct SpellState {
 pub struct Session {
     pub realm: i32,
     pub outcome: Outcome,
+    /// Monotonic authoritative tick within this realm.
+    pub tick: u64,
     pub elapsed: f32,
     pub screen_shake: f32,
     pub kills: f32,
@@ -340,7 +353,11 @@ pub struct Session {
 
 // ---- everything ------------------------------------------------------------
 pub struct World {
-    pub rng: Rng,
+    pub generation_rng: Rng,
+    pub ai_rng: Rng,
+    pub combat_rng: Rng,
+    pub environment_rng: Rng,
+    pub cosmetic_rng: Rng,
     pub terrain: Terrain,
     pub creatures: Creatures,
     pub projectiles: Projectiles,
@@ -363,8 +380,8 @@ pub struct World {
 
 /// Build the complete layered contact effect without touching world state.
 ///
-/// The caller supplies the RNG. Gameplay passes the realm generator so the
-/// historical draw budget stays unchanged; previews pass a local fixed seed.
+/// The caller supplies a presentation-only RNG. Gameplay uses its cosmetic
+/// stream and previews use a local fixed seed, so neither can perturb combat.
 pub(crate) fn build_fireball_impact_particles(
     rng: &mut Rng,
     position: [f32; 3],
@@ -372,10 +389,7 @@ pub(crate) fn build_fireball_impact_particles(
     kind: ProjectileKind,
     output: &mut [ParticleSpec; MAX_FIREBALL_IMPACT_PARTICLES],
 ) -> usize {
-    // Each stochastic particle below consumes exactly five RNG draws.
-    // Keeping 22 for Firebolt and 14 for DragonFire matches their former
-    // generic bursts, so richer visuals do not perturb later simulation
-    // randomness.
+    // Each stochastic particle below consumes exactly five cosmetic draws.
     let (shell_count, ember_count, smoke_count) = match kind {
         ProjectileKind::Firebolt => (12, 6, 4),
         ProjectileKind::DragonFire => (8, 4, 2),
@@ -522,7 +536,11 @@ impl World {
     /// than being emitted as multi-megabyte initialised data in the wasm.
     pub const fn new() -> World {
         World {
-            rng: Rng::new(),
+            generation_rng: Rng::new(),
+            ai_rng: Rng::new(),
+            combat_rng: Rng::new(),
+            environment_rng: Rng::new(),
+            cosmetic_rng: Rng::new(),
             terrain: Terrain {
                 height: [0.0; (GRID_WIDTH * GRID_WIDTH) as usize],
                 dirty_first_row: 0,
@@ -659,6 +677,7 @@ impl World {
             session: Session {
                 realm: 0,
                 outcome: Outcome::InProgress,
+                tick: 0,
                 elapsed: 0.0,
                 screen_shake: 0.0,
                 kills: 0.0,
@@ -755,12 +774,12 @@ impl World {
         const BURST_GRAVITY: f32 = -14.0;
         const BURST_DRAG: f32 = 1.6;
         for _ in 0..count {
-            let angle = self.rng.range(0.0, core::f32::consts::TAU);
-            let vertical = self.rng.range(-1.0, 1.0);
-            let magnitude = speed * self.rng.range(0.3, 1.0);
+            let angle = self.cosmetic_rng.range(0.0, core::f32::consts::TAU);
+            let vertical = self.cosmetic_rng.range(-1.0, 1.0);
+            let magnitude = speed * self.cosmetic_rng.range(0.3, 1.0);
             let horizontal = sqrt(1.0 - vertical * vertical);
-            let life_jitter = life * self.rng.range(0.6, 1.2);
-            let size_jitter = size * self.rng.range(0.6, 1.4);
+            let life_jitter = life * self.cosmetic_rng.range(0.6, 1.2);
+            let size_jitter = size * self.cosmetic_rng.range(0.6, 1.4);
             self.spawn_particle(
                 position,
                 [
@@ -789,7 +808,7 @@ impl World {
     ) {
         let mut particles = [ParticleSpec::ZERO; MAX_FIREBALL_IMPACT_PARTICLES];
         let count = build_fireball_impact_particles(
-            &mut self.rng,
+            &mut self.cosmetic_rng,
             position,
             incoming,
             kind,
@@ -822,17 +841,17 @@ impl World {
             // widest wobble in the middle of the span, tapering to the ends
             let jitter = MAX_JITTER * sin(t * core::f32::consts::PI);
             let offset = [
-                self.rng.range(-jitter, jitter),
-                self.rng.range(-jitter, jitter),
-                self.rng.range(-jitter, jitter),
+                self.cosmetic_rng.range(-jitter, jitter),
+                self.cosmetic_rng.range(-jitter, jitter),
+                self.cosmetic_rng.range(-jitter, jitter),
             ];
             let drift = [
-                self.rng.range(-3.0, 3.0),
-                self.rng.range(-3.0, 3.0),
-                self.rng.range(-3.0, 3.0),
+                self.cosmetic_rng.range(-3.0, 3.0),
+                self.cosmetic_rng.range(-3.0, 3.0),
+                self.cosmetic_rng.range(-3.0, 3.0),
             ];
-            let life = self.rng.range(0.14, 0.34);
-            let size = self.rng.range(2.0, 4.2);
+            let life = self.cosmetic_rng.range(0.14, 0.34);
+            let size = self.cosmetic_rng.range(2.0, 4.2);
             self.spawn_particle(
                 [
                     from[0] + delta[0] * t + offset[0],
@@ -860,15 +879,15 @@ impl World {
         let spread = length3(away[0], away[1], away[2]) + 0.001;
         let push = [away[0] / spread, away[1] / spread, away[2] / spread];
         for _ in 0..sparks {
-            let speed = self.rng.range(16.0, 46.0) * weight;
+            let speed = self.cosmetic_rng.range(16.0, 46.0) * weight;
             let scatter = [
-                self.rng.range(-0.55, 0.55),
-                self.rng.range(-0.35, 0.75),
-                self.rng.range(-0.55, 0.55),
+                self.cosmetic_rng.range(-0.55, 0.55),
+                self.cosmetic_rng.range(-0.35, 0.75),
+                self.cosmetic_rng.range(-0.55, 0.55),
             ];
-            let life = self.rng.range(0.18, 0.42);
-            let size = self.rng.range(1.2, 2.6) * weight;
-            let heat = self.rng.range(0.55, 1.0);
+            let life = self.cosmetic_rng.range(0.18, 0.42);
+            let size = self.cosmetic_rng.range(1.2, 2.6) * weight;
+            let heat = self.cosmetic_rng.range(0.55, 1.0);
             self.spawn_particle(
                 at,
                 [
@@ -885,11 +904,11 @@ impl World {
         }
         for _ in 0..3 {
             let drift = [
-                self.rng.range(-14.0, 14.0),
-                self.rng.range(6.0, 22.0),
-                self.rng.range(-14.0, 14.0),
+                self.cosmetic_rng.range(-14.0, 14.0),
+                self.cosmetic_rng.range(6.0, 22.0),
+                self.cosmetic_rng.range(-14.0, 14.0),
             ];
-            let life = self.rng.range(0.35, 0.7);
+            let life = self.cosmetic_rng.range(0.35, 0.7);
             self.spawn_particle(at, drift, life, 1.8 * weight, [0.22, 0.15, 0.12], -58.0, 1.1);
         }
     }
@@ -917,6 +936,8 @@ impl World {
     /// close neighbours, so a grove goes up rather than a single tree.
     pub fn update_fires(&mut self, dt: f32) {
         const SPREAD_RADIUS: f32 = 46.0;
+        const FLAME_PUFFS_PER_SECOND: f32 = 33.0;
+        const SMOKE_PUFFS_PER_SECOND: f32 = 10.8;
         /// Chance per second that a burning tree lights its neighbours.
         const SPREAD_CHANCE: f32 = 0.35;
         for i in 0..self.scenery.count {
@@ -928,13 +949,13 @@ impl World {
             let z = self.scenery.pos_z[i];
             let scale = self.scenery.scale[i];
             let ground = self.height_at(x, z);
-            if self.rng.chance(0.55) {
-                let jitter_x = self.rng.range(-4.0, 4.0) * scale;
-                let jitter_z = self.rng.range(-4.0, 4.0) * scale;
-                let rise = self.rng.range(14.0, 40.0);
-                let life = self.rng.range(0.4, 0.9);
-                let size = self.rng.range(2.5, 5.5) * scale;
-                let heat = self.rng.range(0.3, 0.75);
+            if self.cosmetic_rng.chance(FLAME_PUFFS_PER_SECOND * dt) {
+                let jitter_x = self.cosmetic_rng.range(-4.0, 4.0) * scale;
+                let jitter_z = self.cosmetic_rng.range(-4.0, 4.0) * scale;
+                let rise = self.cosmetic_rng.range(14.0, 40.0);
+                let life = self.cosmetic_rng.range(0.4, 0.9);
+                let size = self.cosmetic_rng.range(2.5, 5.5) * scale;
+                let heat = self.cosmetic_rng.range(0.3, 0.75);
                 self.spawn_particle(
                     [x + jitter_x, ground + 10.0 * scale, z + jitter_z],
                     [0.0, rise, 0.0],
@@ -945,10 +966,10 @@ impl World {
                     0.9,
                 );
             }
-            if self.rng.chance(0.18) {
-                let jitter_x = self.rng.range(-5.0, 5.0) * scale;
-                let jitter_z = self.rng.range(-5.0, 5.0) * scale;
-                let rise = self.rng.range(10.0, 26.0);
+            if self.cosmetic_rng.chance(SMOKE_PUFFS_PER_SECOND * dt) {
+                let jitter_x = self.cosmetic_rng.range(-5.0, 5.0) * scale;
+                let jitter_z = self.cosmetic_rng.range(-5.0, 5.0) * scale;
+                let rise = self.cosmetic_rng.range(10.0, 26.0);
                 self.spawn_particle(
                     [x + jitter_x, ground + 18.0 * scale, z + jitter_z],
                     [0.0, rise, 0.0],
@@ -959,7 +980,7 @@ impl World {
                     0.7,
                 );
             }
-            if self.rng.chance(SPREAD_CHANCE * dt) {
+            if self.environment_rng.chance(SPREAD_CHANCE * dt) {
                 self.ignite_scenery([x, ground, z], SPREAD_RADIUS);
             }
             if self.scenery.burn_remaining[i] <= 0.0 {
@@ -985,7 +1006,7 @@ impl World {
 
     // ---- orbs --------------------------------------------------------------
     pub fn spawn_orb(&mut self, position: [f32; 3], amount: f32) {
-        let phase = self.rng.range(0.0, core::f32::consts::TAU);
+        let phase = self.environment_rng.range(0.0, core::f32::consts::TAU);
         let orbs = &mut self.orbs;
         for i in 0..MAX_ORBS {
             if orbs.alive[i] {
@@ -1011,9 +1032,9 @@ impl World {
         while remaining > DUST_THRESHOLD {
             let chunk = min(remaining, MAX_PER_ORB);
             let offset = [
-                self.rng.range(-9.0, 9.0),
-                self.rng.range(2.0, 9.0),
-                self.rng.range(-9.0, 9.0),
+                self.combat_rng.range(-9.0, 9.0),
+                self.combat_rng.range(2.0, 9.0),
+                self.combat_rng.range(-9.0, 9.0),
             ];
             self.spawn_orb(
                 [
@@ -1036,9 +1057,9 @@ impl World {
         faction: Faction,
     ) -> Option<usize> {
         let ground = self.height_at(x, z);
-        let facing = self.rng.range(0.0, core::f32::consts::TAU);
-        let timer = self.rng.range(0.0, 3.0);
-        let phase = self.rng.range(0.0, core::f32::consts::TAU);
+        let facing = self.environment_rng.range(0.0, core::f32::consts::TAU);
+        let timer = self.environment_rng.range(0.0, 3.0);
+        let phase = self.environment_rng.range(0.0, core::f32::consts::TAU);
         let c = &mut self.creatures;
         for i in 0..MAX_CREATURES {
             if c.alive[i] {

@@ -157,9 +157,38 @@ const step = (n, setup) => {
     for (const cb of cbs) cb(t);
   }
 };
+const stepMs = (milliseconds) => {
+  t += milliseconds;
+  const cbs = rafCbs; rafCbs = [];
+  for (const cb of cbs) cb(t);
+};
 step(3);                                   // title screen frames
 g.el.title.classList.remove('show');       // "begin"
 console.log('entering play...');
+
+// A hitch longer than the old 100 ms clamp must survive the per-frame
+// 32-tick catch-up bound. A 500 ms gap is exactly 64 authoritative ticks:
+// process 32 now, retain 32, then drain them on a zero-elapsed render.
+{
+  const before = g.sim.simulationTick();
+  stepMs(500);
+  const afterFirst = g.sim.simulationTick();
+  if (afterFirst - before !== 32) {
+    note(`500ms hitch first frame advanced ${afterFirst - before} ticks, expected bounded 32`);
+  }
+  if (g.acc < 31 * g.tickDt) {
+    note(`500ms hitch discarded backlog: retained ${g.acc.toFixed(6)}s`);
+  }
+  stepMs(0);
+  const afterDrain = g.sim.simulationTick();
+  if (afterDrain - before !== 64) {
+    note(`500ms hitch recovered ${afterDrain - before} ticks, expected all 64`);
+  }
+  if (g.acc >= g.tickDt) {
+    note(`500ms hitch left ${g.acc.toFixed(6)}s after bounded drain`);
+  }
+}
+
 step(240, (i) => {
   g.keys.clear();
   g.keys.add('w'); if (i % 40 < 12) g.keys.add(' ');

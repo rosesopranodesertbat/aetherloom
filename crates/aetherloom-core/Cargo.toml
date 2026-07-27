@@ -1,0 +1,18 @@
+[package]
+name = "aetherloom-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Deterministic, platform-neutral authoritative simulation core for Aetherloom"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+std = ["aetherloom-protocol/std"]
+
+[dependencies]
+aetherloom-protocol = { path = "../aetherloom-protocol" }
+

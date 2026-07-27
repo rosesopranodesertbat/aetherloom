@@ -1,0 +1,17 @@
+[package]
+name = "aetherloom-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Platform-neutral deterministic wire protocol for Aetherloom multiplayer"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+

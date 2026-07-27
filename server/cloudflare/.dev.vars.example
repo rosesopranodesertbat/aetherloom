@@ -1,0 +1,8 @@
+# Copy this file to .dev.vars and replace every placeholder locally.
+# Generate independent random 32-byte base64url keys for each key set.
+PLAYER_TICKET_KEYS_JSON='{"local-player-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+JOIN_TICKET_KEYS_JSON='{"local-join-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+SERVICE_TICKET_KEYS_JSON='{"local-service-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+RESULT_TICKET_KEYS_JSON='{"local-result-host-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+ACTIVE_JOIN_TICKET_KID='local-join-v1'
+ACTIVE_SERVICE_TICKET_KID='local-service-v1'

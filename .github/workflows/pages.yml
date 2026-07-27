@@ -31,6 +31,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Install Cloudflare control-plane toolchain
+        run: npm ci --prefix server/cloudflare
+      - name: Type-check Cloudflare control plane
+        run: npm test --prefix server/cloudflare
+      - name: Check portable Rust crates for WebAssembly
+        run: |
+          cargo check -p aetherloom-protocol --target wasm32-unknown-unknown
+          cargo check -p aetherloom-core --target wasm32-unknown-unknown
+          cargo check -p aetherloom-client --target wasm32-unknown-unknown
+      - name: Validate console vendor C boundary
+        run: clang -std=c11 -Wall -Wextra -Werror -x c-header -fsyntax-only crates/aetherloom-client/include/aetherloom_client.h
       # `npm test` builds the Rust core first, then exercises that exact wasm.
       - run: npm test
       - name: Verify model gallery assets

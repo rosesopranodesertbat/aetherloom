@@ -1,0 +1,18 @@
+{
+  "name": "@aetherloom/cloudflare-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "test": "npm run validate && npm run check",
+    "types": "wrangler types --env-interface CloudflareBindings",
+    "validate": "node scripts/validate.mjs && node --test scripts/*.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260727.1",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.60.0"
+  }
+}

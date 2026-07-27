@@ -110,13 +110,17 @@ impl World {
     }
 
     fn hatch_from_nest(&mut self, nest: usize) {
-        let mut roll = self.rng.below(4);
+        let mut roll = self.environment_rng.below(4);
         if roll == 4 {
             roll = 1;
         }
         let kind = CreatureKind::from_index(roll);
-        let offset_x = self.rng.range(-NEST_HATCH_SPREAD, NEST_HATCH_SPREAD);
-        let offset_z = self.rng.range(-NEST_HATCH_SPREAD, NEST_HATCH_SPREAD);
+        let offset_x = self
+            .environment_rng
+            .range(-NEST_HATCH_SPREAD, NEST_HATCH_SPREAD);
+        let offset_z = self
+            .environment_rng
+            .range(-NEST_HATCH_SPREAD, NEST_HATCH_SPREAD);
         let at = [
             self.creatures.pos_x[nest],
             self.creatures.pos_y[nest],
@@ -265,9 +269,9 @@ impl World {
         ];
         for _ in 0..10 {
             let drift = [
-                self.rng.range(-10.0, 10.0),
-                self.rng.range(4.0, 20.0),
-                self.rng.range(-10.0, 10.0),
+                self.cosmetic_rng.range(-10.0, 10.0),
+                self.cosmetic_rng.range(4.0, 20.0),
+                self.cosmetic_rng.range(-10.0, 10.0),
             ];
             self.spawn_particle(at, drift, 0.7, 2.4, [0.5, 0.8, 1.0], 0.0, 1.5);
         }
@@ -504,9 +508,9 @@ impl World {
             return;
         }
         self.creatures.attack_cooldown[index] = if is_dragon {
-            self.rng.range(1.1, 2.0)
+            self.ai_rng.range(1.1, 2.0)
         } else {
-            self.rng.range(1.6, 3.0)
+            self.ai_rng.range(1.6, 3.0)
         };
         let speed = if is_dragon {
             DRAGON_BOLT_SPEED
@@ -521,9 +525,11 @@ impl World {
             self.creatures.pos_z[index],
         ];
         for _ in 0..volley {
-            let jitter_x = self.rng.range(-BOLT_SPREAD, BOLT_SPREAD);
-            let jitter_y = self.rng.range(-BOLT_VERTICAL_SPREAD, BOLT_VERTICAL_SPREAD);
-            let jitter_z = self.rng.range(-BOLT_SPREAD, BOLT_SPREAD);
+            let jitter_x = self.combat_rng.range(-BOLT_SPREAD, BOLT_SPREAD);
+            let jitter_y = self
+                .combat_rng
+                .range(-BOLT_VERTICAL_SPREAD, BOLT_VERTICAL_SPREAD);
+            let jitter_z = self.combat_rng.range(-BOLT_SPREAD, BOLT_SPREAD);
             self.spawn_projectile(
                 if is_dragon {
                     ProjectileKind::DragonFire
@@ -666,8 +672,9 @@ impl World {
     fn wander(&mut self, index: usize, dt: f32) {
         self.creatures.timer[index] -= dt;
         if self.creatures.timer[index] <= 0.0 {
-            self.creatures.timer[index] = self.rng.range(2.0, 5.0);
-            self.creatures.facing[index] = self.rng.range(0.0, core::f32::consts::TAU);
+            self.creatures.timer[index] = self.ai_rng.range(2.0, 5.0);
+            self.creatures.facing[index] =
+                self.ai_rng.range(0.0, core::f32::consts::TAU);
         }
         let kind = self.creatures.kind[index];
         let drift = kind.move_speed() * WANDER_SPEED_FRACTION;
@@ -763,14 +770,21 @@ impl World {
             self.projectiles.pos_y[index] += self.projectiles.vel_y[index] * dt;
             self.projectiles.pos_z[index] += self.projectiles.vel_z[index] * dt;
             self.projectiles.life[index] -= dt;
-            self.spawn_projectile_trail(index);
+            self.spawn_projectile_trail(index, dt);
             if self.projectile_has_landed(index) {
                 self.detonate_projectile(index);
             }
         }
     }
 
-    fn spawn_projectile_trail(&mut self, index: usize) {
+    fn spawn_projectile_trail(&mut self, index: usize, dt: f32) {
+        const TRAIL_BATCHES_PER_SECOND: f32 = 60.0;
+        if !self
+            .cosmetic_rng
+            .chance(TRAIL_BATCHES_PER_SECOND * dt)
+        {
+            return;
+        }
         let kind = self.projectiles.kind[index];
         let colour = kind.trail_colour();
         let is_meteor = kind == ProjectileKind::Meteor;
@@ -787,14 +801,14 @@ impl World {
         ];
         for _ in 0..puffs {
             let jitter = [
-                self.rng.range(-2.0, 2.0),
-                self.rng.range(-2.0, 2.0),
-                self.rng.range(-2.0, 2.0),
+                self.cosmetic_rng.range(-2.0, 2.0),
+                self.cosmetic_rng.range(-2.0, 2.0),
+                self.cosmetic_rng.range(-2.0, 2.0),
             ];
             let drift = [
-                self.rng.range(-6.0, 6.0),
-                self.rng.range(-2.0, 10.0),
-                self.rng.range(-6.0, 6.0),
+                self.cosmetic_rng.range(-6.0, 6.0),
+                self.cosmetic_rng.range(-2.0, 10.0),
+                self.cosmetic_rng.range(-6.0, 6.0),
             ];
             self.spawn_particle(
                 [at[0] + jitter[0], at[1] + jitter[1], at[2] + jitter[2]],
@@ -937,23 +951,19 @@ impl World {
         const ORB_HOVER: f32 = 5.0;
         const ORB_BOB: f32 = 1.6;
         const ORB_SETTLE_RATE: f32 = 0.8;
-        /// Sparkles shed per second. Emitted here rather than while drawing:
-        /// the draw pass runs inside `step`, so a random draw taken there
-        /// shifts this generator's whole sequence, and a draw taken only for
-        /// orbs near the camera makes the simulation depend on where the
-        /// player is looking.
+        /// Sparkles shed per second from the presentation-only random stream.
         const ORB_SPARKS_PER_SECOND: f32 = 6.0;
         for i in 0..MAX_ORBS {
             if !self.orbs.alive[i] || self.orbs.carried_by[i].is_some() {
                 continue;
             }
             self.orbs.bob_phase[i] += dt * 2.4;
-            if self.rng.chance(ORB_SPARKS_PER_SECOND * dt) {
+            if self.cosmetic_rng.chance(ORB_SPARKS_PER_SECOND * dt) {
                 let at = [self.orbs.pos_x[i], self.orbs.pos_y[i], self.orbs.pos_z[i]];
                 let drift = [
-                    self.rng.range(-3.0, 3.0),
-                    self.rng.range(3.0, 9.0),
-                    self.rng.range(-3.0, 3.0),
+                    self.cosmetic_rng.range(-3.0, 3.0),
+                    self.cosmetic_rng.range(3.0, 9.0),
+                    self.cosmetic_rng.range(-3.0, 3.0),
                 ];
                 self.spawn_particle(at, drift, 0.8, 1.8, [0.45, 0.8, 1.0], 0.0, 1.2);
             }

@@ -7,8 +7,10 @@
     "build": "node build.mjs",
     "serve": "node serve.mjs",
     "test": "npm run build && npm run test:run",
-    "test:run": "npm run test:models && npm run test:contracts && node test/balance-sim-test.mjs && node test/headless-render-test.mjs",
+    "test:run": "npm run test:rust && npm run test:models && npm run test:contracts && node test/balance-sim-test.mjs && node test/headless-render-test.mjs && npm run test:cloudflare",
+    "test:rust": "node scripts/test-rust-workspace.mjs",
     "test:models": "node test/model-preview-test.mjs",
-    "test:contracts": "node test/combat-render-contract-test.mjs"
+    "test:contracts": "node test/combat-render-contract-test.mjs",
+    "test:cloudflare": "npm test --prefix server/cloudflare"
   }
 }
