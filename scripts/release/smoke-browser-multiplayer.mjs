@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import {
   decodeSnapshotFrame,
   encodeInputFrame,
+  nextPacedDeadline,
 } from "../../site/multiplayer.js";
 import {
   mintHmacTicket,
@@ -106,7 +107,7 @@ async function join() {
 function open(joined) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(joined.webSocketUrl, [
-      "aetherloom.v1",
+      "aetherloom.v2",
       `aetherloom.auth.${joined.ticket}`,
     ]);
     socket.binaryType = "arraybuffer";
@@ -118,7 +119,7 @@ function open(joined) {
       "open",
       () => {
         clearTimeout(timeout);
-        if (socket.protocol !== "aetherloom.v1") {
+        if (socket.protocol !== "aetherloom.v2") {
           socket.close();
           reject(new Error("multiplayer WebSocket selected the wrong protocol"));
           return;
@@ -184,13 +185,21 @@ function observe(socket) {
 function startInput(socket, yaw, observer) {
   let sequence = 1;
   let cast = false;
+  let moveVertical = 0;
+  let pitch = 0;
+  let timer;
+  let stopped = false;
+  const interval = 1_000 / 64;
+  let deadline = performance.now() + interval;
   const send = () => {
     socket.send(
       encodeInputFrame({
         sequence,
         moveX: 0,
         moveY: 0,
+        moveVertical,
         yaw,
+        pitch,
         cast,
         clientClockMs: Date.now() & 0xffff,
         snapshotAck: observer.snapshots.at(-1)?.snapshotSeq ?? 0,
@@ -200,13 +209,27 @@ function startInput(socket, yaw, observer) {
     sequence = sequence === 0xffff_ffff ? 1 : sequence + 1;
   };
   send();
-  const timer = setInterval(send, 1_000 / 64);
+  const pace = () => {
+    if (stopped) return;
+    const now = performance.now();
+    if (now >= deadline) {
+      send();
+      deadline = nextPacedDeadline(deadline, now, interval);
+    }
+    timer = setTimeout(pace, Math.max(1, deadline - performance.now()));
+  };
+  timer = setTimeout(pace, interval);
   return {
     cast() {
       cast = true;
     },
+    fly(vertical, lookPitch = pitch) {
+      moveVertical = vertical;
+      pitch = lookPitch;
+    },
     stop() {
-      clearInterval(timer);
+      stopped = true;
+      clearTimeout(timer);
     },
   };
 }
@@ -270,6 +293,54 @@ try {
   ) {
     throw new Error("multiplayer clients disagreed on authoritative damage");
   }
+  const flightInput = firstJoin.slot === 0 ? firstInput : secondInput;
+  const flightObserver = firstJoin.slot === 0 ? firstObserver : secondObserver;
+  flightInput.fly(127);
+  const climbed = await flightObserver.waitFor((snapshot) =>
+    (snapshot.players.find((player) => player.slot === 0)?.ycm ?? 0) >= 64);
+  const climbedY = climbed.players.find((player) => player.slot === 0)?.ycm ?? 0;
+  flightInput.fly(-127);
+  const descended = await flightObserver.waitFor((snapshot) => {
+    const y = snapshot.players.find((player) => player.slot === 0)?.ycm;
+    return y !== undefined && y < climbedY;
+  });
+  flightInput.fly(0);
+  const descendedY = descended.players.find((player) => player.slot === 0)?.ycm;
+  if (descendedY === undefined || descendedY >= climbedY) {
+    throw new Error("authoritative multiplayer altitude did not descend");
+  }
+  await flightObserver.waitFor(
+    (snapshot) => snapshot.tick >= firstDamage.tick + 64,
+  );
+  const compactPitch = 63;
+  const expectedPitch = Math.round((compactPitch * 16_384) / 127);
+  flightInput.fly(0, compactPitch);
+  flightInput.cast();
+  const [firstPitched, secondPitched] = await Promise.all([
+    firstObserver.waitFor((snapshot) =>
+      snapshot.projectiles.some(
+        (projectile) =>
+          projectile.owner === 0 &&
+          projectile.pitch === expectedPitch,
+      )),
+    secondObserver.waitFor((snapshot) =>
+      snapshot.projectiles.some(
+        (projectile) =>
+          projectile.owner === 0 &&
+          projectile.pitch === expectedPitch,
+      )),
+  ]);
+  flightInput.fly(0, 0);
+  if (
+    !firstPitched.projectiles.some(
+      (projectile) => projectile.owner === 0 && projectile.pitch === expectedPitch,
+    ) ||
+    !secondPitched.projectiles.some(
+      (projectile) => projectile.owner === 0 && projectile.pitch === expectedPitch,
+    )
+  ) {
+    throw new Error("multiplayer clients disagreed on authoritative projectile pitch");
+  }
   console.log(
     JSON.stringify({
       status: "ok",
@@ -280,6 +351,9 @@ try {
       inputHz: 64,
       snapshotHz: 32,
       targetHealth: health,
+      climbedY,
+      descendedY,
+      pitchedProjectilePitch: expectedPitch,
       bothClientsObservedDamage: true,
       buildHash: expectedBuild,
     }),

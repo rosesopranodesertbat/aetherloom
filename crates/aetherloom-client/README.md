@@ -6,8 +6,8 @@ authoritative core and a browser, desktop, or proprietary console host.
 Implemented here:
 
 - variable-rate frame orchestration over fixed 128 Hz prediction;
-- protocol-ready input mapping with controller deadzones and controller-only UI
-  navigation;
+- protocol-ready three-axis flight input mapping with controller deadzones and
+  controller-only UI navigation;
 - tick-rate controller look integration, so turn rate is independent of render
   cadence;
 - explicit prediction-backlog resynchronization instead of client time
@@ -35,8 +35,8 @@ Implemented here:
 - identity, entitlement, storage, achievement, suspend/resume, and device-loss
   lifecycle boundaries;
 - account-scoped online saves that cannot alias the offline campaign namespace;
-- a versioned `repr(C)` vendor data boundary and matching
-  `include/aetherloom_client.h` for console/static-library adapters.
+- a version-2 `repr(C)` vendor data boundary, including continuous lift, and
+  matching `include/aetherloom_client.h` for console/static-library adapters.
 
 This is an integration boundary, not a fake platform implementation. It does
 not contain a QUIC stack, console SDK, renderer, audio engine, or platform

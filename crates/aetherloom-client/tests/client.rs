@@ -1,7 +1,7 @@
 use std::vec::Vec;
 
 use aetherloom_client::vendor::{
-    VendorApiHeader, VendorClientApiV1, AETHERLOOM_CLIENT_ABI_VERSION,
+    VendorApiHeader, VendorClientApiV1, VendorInputState, AETHERLOOM_CLIENT_ABI_VERSION,
 };
 use aetherloom_client::{
     select_capabilities, CapabilityError, CapabilityTier, ClientFrameOrchestrator,
@@ -132,17 +132,20 @@ fn controller_only_mapping_ignores_keyboard_and_supports_edge_navigation() {
     let mut mapper = InputMapper::new(InputDeviceMode::ControllerOnly, 0.2);
     let keyboard = KeyboardMouseInput {
         move_left: true,
+        move_up: true,
         accept: true,
         ..KeyboardMouseInput::default()
     };
     let controller = ControllerInput {
         left_stick: [1.0, 0.0],
+        vertical_axis: -1.0,
         buttons: ControllerButtons::ACCEPT,
         ..ControllerInput::default()
     };
 
     let (mapped, first_navigation) = mapper.map(Some(keyboard), Some(controller));
     assert_eq!(mapped.move_x, 2_047);
+    assert_eq!(mapped.move_vertical, -2_047);
     assert_eq!(
         first_navigation.events,
         vec![NavigationEvent::Right, NavigationEvent::Accept]
@@ -165,11 +168,13 @@ fn controller_deadzone_suppresses_drift() {
     let input = ControllerInput {
         left_stick: [0.2, -0.2],
         right_stick: [0.2, 0.2],
+        vertical_axis: 0.2,
         ..ControllerInput::default()
     };
     let (mapped, navigation) = mapper.map(None, Some(input));
     assert_eq!(mapped.move_x, 0);
     assert_eq!(mapped.move_y, 0);
+    assert_eq!(mapped.move_vertical, 0);
     assert_eq!(mapped.controller_yaw_per_tick, 0);
     assert_eq!(mapped.controller_pitch_per_tick, 0);
     assert!(navigation.events.is_empty());
@@ -474,13 +479,14 @@ fn local_prediction_updates_before_the_next_render_frame() {
             7_812_500,
             MappedInput {
                 move_x: 2_047,
+                move_vertical: 2_047,
                 ..MappedInput::default()
             },
             &mut replica,
         )
         .unwrap();
     assert_eq!(cadence.commands.len(), 1);
-    assert_eq!(replica.predicted_position_cm(), Some([108, 0, 200]));
+    assert_eq!(replica.predicted_position_cm(), Some([108, 5, 200]));
 }
 
 #[test]
@@ -627,7 +633,7 @@ fn transport_markers_expose_required_cadences() {
 #[test]
 fn input_batch_scheduler_emits_native_redundancy_and_browser_64_hz_batches() {
     fn input(tick: u64, sequence: u32) -> aetherloom_client::PlayerCommand {
-        aetherloom_client::PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, None)
+        aetherloom_client::PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, 0, None)
             .unwrap()
     }
 
@@ -688,7 +694,7 @@ fn input_batch_scheduler_emits_native_redundancy_and_browser_64_hz_batches() {
 #[test]
 fn invalid_redundant_input_does_not_corrupt_the_batch_scheduler() {
     fn input(tick: u64, sequence: u32) -> aetherloom_client::PlayerCommand {
-        aetherloom_client::PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, None)
+        aetherloom_client::PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, 0, None)
             .unwrap()
     }
 
@@ -742,8 +748,12 @@ fn c_header_and_rust_boundary_share_the_version_contract() {
     );
 
     let c_header = include_str!("../include/aetherloom_client.h");
-    assert!(c_header.contains("#define AETHERLOOM_CLIENT_ABI_VERSION 1u"));
+    assert!(c_header.contains("#define AETHERLOOM_CLIENT_ABI_VERSION 2u"));
+    assert!(c_header.contains("int16_t move_vertical;"));
     assert!(c_header.contains("AetherloomVendorClientApiV1"));
+    assert_eq!(core::mem::size_of::<VendorInputState>(), 18);
+    assert_eq!(core::mem::offset_of!(VendorInputState, move_vertical), 8);
+    assert_eq!(core::mem::offset_of!(VendorInputState, look_yaw), 10);
 }
 
 #[test]

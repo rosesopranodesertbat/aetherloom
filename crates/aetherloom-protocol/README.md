@@ -8,7 +8,8 @@ targets with an allocator.
 
 - Authoritative gameplay runs at `AUTHORITATIVE_HZ` (128 Hz).
 - IDs are typed and validated; entity IDs include a non-zero generation.
-- Player input is quantized, bounded, and tagged with a tick and sequence.
+- Player input has bounded planar and continuous vertical axes, quantized and
+  tagged with a tick and sequence.
 - Input datagrams contain no player or account identity. The authenticated
   transport connection supplies the authoritative `PeerId -> PlayerId`
   binding.

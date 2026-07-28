@@ -23,6 +23,7 @@ interface WorkerMatchExports extends WebAssembly.Exports {
     player: number,
     moveX: number,
     moveY: number,
+    moveVertical: number,
     lookYaw: number,
     lookPitch: number,
     actionFlags: number,
@@ -34,8 +35,9 @@ interface WorkerMatchExports extends WebAssembly.Exports {
 }
 
 const SNAPSHOT_MAGIC = 0x314d4c41;
+const EXPECTED_WORKER_ABI = 2;
 const HEADER_WORDS = 16;
-const PLAYER_WORDS = 15;
+const PLAYER_WORDS = 16;
 const PROJECTILE_WORDS = 15;
 const EVENT_WORDS = 13;
 
@@ -46,7 +48,7 @@ export class BrowserMatchSimulation {
     const instance = new WebAssembly.Instance(module, {});
     this.exports = validateExports(instance.exports);
     if (
-      this.exports.worker_match_abi_version() !== 1 ||
+      this.exports.worker_match_abi_version() !== EXPECTED_WORKER_ABI ||
       this.exports.worker_match_authoritative_hz() !== 128 ||
       this.exports.worker_match_max_players() !== 8
     ) {
@@ -83,7 +85,9 @@ export class BrowserMatchSimulation {
     slot: number,
     moveX: number,
     moveY: number,
+    moveVertical: number,
     yaw: number,
+    pitch: number,
     cast: boolean,
   ): void {
     this.check(
@@ -91,8 +95,9 @@ export class BrowserMatchSimulation {
         slot,
         moveX,
         moveY,
+        moveVertical,
         yaw,
-        0,
+        pitch,
         cast ? 1 << 2 : 0,
         cast ? 0 : -1,
       ),
@@ -121,7 +126,7 @@ export class BrowserMatchSimulation {
     const words = new Int32Array(this.exports.memory.buffer, pointer, length);
     if (
       words[0] !== SNAPSHOT_MAGIC ||
-      words[1] !== 1 ||
+      words[1] !== EXPECTED_WORKER_ABI ||
       words[2] !== length ||
       words[5] !== 128 ||
       words[7] !== PLAYER_WORDS ||
@@ -165,9 +170,10 @@ export class BrowserMatchSimulation {
         velocityYCmPerTick: requiredWord(words, at + 9),
         velocityZCmPerTick: requiredWord(words, at + 10),
         yaw: requiredWord(words, at + 11) & 0xffff,
-        health: requiredWord(words, at + 12),
-        cooldownTicks: requiredWord(words, at + 13),
-        outcome: requiredWord(words, at + 14),
+        pitch: requiredWord(words, at + 12),
+        health: requiredWord(words, at + 13),
+        cooldownTicks: requiredWord(words, at + 14),
+        outcome: requiredWord(words, at + 15),
       });
     }
 

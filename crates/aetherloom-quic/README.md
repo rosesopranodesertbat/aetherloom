@@ -15,7 +15,7 @@ The transport publishes one ordered `ConnectionEvent::Authenticated` before it
 starts gameplay readers and one `ConnectionEvent::Disconnected` when that QUIC
 connection closes. A dedicated runtime must drain lifecycle events before
 polling gameplay ingress. This makes the authenticated peer binding the source
-of identity authority. Protocol version 2 input datagrams contain no account,
+of identity authority. Protocol version 3 input datagrams contain no account,
 player, or team identity field.
 
 Gameplay datagrams are capped at 1,200 bytes. Reliable messages are encoded on

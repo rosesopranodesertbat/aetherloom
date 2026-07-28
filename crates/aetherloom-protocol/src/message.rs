@@ -3,11 +3,12 @@ use alloc::vec::Vec;
 
 use crate::codec::{Reader, Writer};
 use crate::{
-    EntityId, InputBatch, PlayerId, ProtocolError, SnapshotId, TeamId, ValidationError, MAX_PLAYERS,
+    EntityId, InputBatch, PlayerId, ProtocolError, SnapshotId, TeamId, ValidationError,
+    MAX_LOOK_PITCH, MAX_PLAYERS,
 };
 
 pub const PROTOCOL_MAGIC: [u8; 4] = *b"ALMP";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const HEADER_BYTES: usize = 60;
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const MAX_RELIABLE_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -131,6 +132,9 @@ impl EntityState {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.archetype == 0 {
             return Err(ValidationError::InvalidArchetype(self.archetype));
+        }
+        if !(-MAX_LOOK_PITCH..=MAX_LOOK_PITCH).contains(&self.pitch) {
+            return Err(ValidationError::LookPitchOutOfRange(self.pitch));
         }
         Ok(())
     }

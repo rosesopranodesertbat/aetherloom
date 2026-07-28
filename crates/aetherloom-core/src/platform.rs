@@ -12,6 +12,7 @@ pub struct PresentationPlayer {
     pub entity_id: Option<EntityId>,
     pub position_cm: [i32; 3],
     pub yaw: u16,
+    pub pitch: i16,
     pub health: u16,
     pub outcome: PlayerOutcome,
 }
@@ -22,6 +23,7 @@ pub struct PresentationEntity {
     pub kind: EntityKind,
     pub position_cm: [i32; 3],
     pub yaw: u16,
+    pub pitch: i16,
     pub health: u16,
 }
 
@@ -72,6 +74,7 @@ impl PresentationWorld {
                 entity_id: player.entity_id,
                 position_cm: player.position_cm,
                 yaw: player.yaw,
+                pitch: player.pitch,
                 health: player.health,
                 outcome: player.outcome,
             })
@@ -84,6 +87,7 @@ impl PresentationWorld {
                 kind: entity.kind,
                 position_cm: entity.position_cm,
                 yaw: entity.yaw,
+                pitch: entity.pitch,
                 health: entity.health,
             })
             .collect();
@@ -130,4 +134,3 @@ pub trait PlatformServices {
 
     fn is_suspended(&self) -> bool;
 }
-

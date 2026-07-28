@@ -6,14 +6,17 @@ use aetherloom_protocol::{
 };
 
 use crate::entity::EntityKind;
-use crate::state::MatchState;
+use crate::state::{
+    MatchState, PLAYER_MAX_ALTITUDE_CM, PLAYER_MIN_ALTITUDE_CM,
+    PLAYER_PLANAR_SPEED_CM_PER_TICK, PLAYER_VERTICAL_SPEED_CM_PER_TICK,
+};
 use crate::terrain::ChunkCoord;
 
 pub const MIN_INTERPOLATION_DELAY_TICKS: u8 = 2;
 pub const MAX_INTERPOLATION_DELAY_TICKS: u8 = 6;
 pub const MAX_PENDING_PREDICTION_COMMANDS: usize = 256;
 pub const MAX_INTERPOLATION_SAMPLES: usize = 8;
-// Wire sizes from protocol v2. Keeping the budget here prevents replication
+// Wire sizes from protocol v3. Keeping the budget here prevents replication
 // history from acknowledging updates that a 1,200-byte datagram cannot carry.
 const DELTA_FIXED_BYTES: usize = HEADER_BYTES + 18;
 const DELTA_ENTITY_BYTES: usize = 40;
@@ -163,9 +166,11 @@ impl MatchState {
             .map(|entity| {
                 let dx =
                     i128::from(entity.position_cm[0]) - i128::from(viewer_entity.position_cm[0]);
+                let dy =
+                    i128::from(entity.position_cm[1]) - i128::from(viewer_entity.position_cm[1]);
                 let dz =
                     i128::from(entity.position_cm[2]) - i128::from(viewer_entity.position_cm[2]);
-                let distance_squared = dx * dx + dz * dz;
+                let distance_squared = dx * dx + dy * dy + dz * dz;
                 let interest = if entity.id == viewer_entity_id
                     || distance_squared <= 2_000_i128.pow(2)
                 {
@@ -640,10 +645,20 @@ fn interpolate_axis(from: i32, to: i32, numerator: u128, denominator: u128) -> i
 }
 
 fn apply_predicted_movement(position: &mut [i32; 3], command: &PlayerCommand) {
-    position[0] =
-        position[0].saturating_add(command.move_x() as i32 * 8 / 2_047);
-    position[2] =
-        position[2].saturating_add(command.move_y() as i32 * 8 / 2_047);
+    position[0] = position[0].saturating_add(
+        command.move_x() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+            / i32::from(aetherloom_protocol::MAX_MOVE_AXIS),
+    );
+    position[1] = position[1]
+        .saturating_add(
+            command.move_vertical() as i32 * PLAYER_VERTICAL_SPEED_CM_PER_TICK
+                / i32::from(aetherloom_protocol::MAX_MOVE_AXIS),
+        )
+        .clamp(PLAYER_MIN_ALTITUDE_CM, PLAYER_MAX_ALTITUDE_CM);
+    position[2] = position[2].saturating_add(
+        command.move_y() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+            / i32::from(aetherloom_protocol::MAX_MOVE_AXIS),
+    );
 }
 
 fn sequence_is_newer(received: u32, previous: u32) -> bool {

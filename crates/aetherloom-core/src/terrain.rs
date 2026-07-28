@@ -63,6 +63,15 @@ pub(crate) fn world_to_chunk_cell(position_cm: [i32; 3]) -> (ChunkCoord, u8, u8)
     )
 }
 
+pub(crate) fn height_cm_at(chunks: &[TerrainChunk], position_cm: [i32; 3]) -> i32 {
+    let (coord, cell_x, cell_y) = world_to_chunk_cell(position_cm);
+    let Ok(chunk_index) = chunks.binary_search_by_key(&coord, |chunk| chunk.coord) else {
+        return 0;
+    };
+    let cell_index = cell_y as usize * TERRAIN_CHUNK_SIDE + cell_x as usize;
+    i32::from(chunks[chunk_index].heights_cm[cell_index])
+}
+
 pub(crate) fn deform(
     chunks: &mut Vec<TerrainChunk>,
     max_chunks: u32,

@@ -11,9 +11,9 @@ use aetherloom_protocol::MAX_SPELL_ID;
 
 pub const BRIDGE_MAX_PLAYERS: usize = 8;
 pub const SNAPSHOT_MAGIC: i32 = 0x314d_4c41;
-pub const SNAPSHOT_ABI_VERSION: i32 = 1;
+pub const SNAPSHOT_ABI_VERSION: i32 = 2;
 pub const SNAPSHOT_HEADER_WORDS: usize = 16;
-pub const SNAPSHOT_PLAYER_WORDS: usize = 15;
+pub const SNAPSHOT_PLAYER_WORDS: usize = 16;
 pub const SNAPSHOT_PROJECTILE_WORDS: usize = 15;
 pub const SNAPSHOT_EVENT_WORDS: usize = 13;
 pub const INPUT_HOLD_TICKS: u8 = 2;
@@ -87,6 +87,7 @@ impl BridgeError {
 struct LatestInput {
     move_x: i16,
     move_y: i16,
+    move_vertical: i16,
     look_yaw: u16,
     look_pitch: i16,
     action_flags: u16,
@@ -94,12 +95,13 @@ struct LatestInput {
 }
 
 impl LatestInput {
-    const fn neutral(look_yaw: u16) -> Self {
+    const fn neutral(look_yaw: u16, look_pitch: i16) -> Self {
         Self {
             move_x: 0,
             move_y: 0,
+            move_vertical: 0,
             look_yaw,
-            look_pitch: 0,
+            look_pitch,
             action_flags: 0,
             requested_spell: None,
         }
@@ -111,6 +113,7 @@ impl LatestInput {
             sequence,
             self.move_x,
             self.move_y,
+            self.move_vertical,
             self.look_yaw,
             self.look_pitch,
             self.action_flags,
@@ -139,7 +142,7 @@ impl WorkerMatch {
         .map_err(BridgeError::from_core)?;
         let mut instance = Self {
             state: MatchState::new(config, WorldSeed::new(seed)),
-            latest_inputs: [LatestInput::neutral(0); BRIDGE_MAX_PLAYERS],
+            latest_inputs: [LatestInput::neutral(0, 0); BRIDGE_MAX_PLAYERS],
             input_ticks_remaining: [0; BRIDGE_MAX_PLAYERS],
             last_events: Vec::with_capacity(MAX_LAST_TICK_EVENTS),
             snapshot: Vec::with_capacity(SNAPSHOT_CAPACITY_WORDS),
@@ -160,7 +163,7 @@ impl WorkerMatch {
         self.state
             .add_player_at_spawn(player, team, controller, spawn)
             .map_err(BridgeError::from_core)?;
-        self.latest_inputs[player.index()] = LatestInput::neutral(spawn.yaw());
+        self.latest_inputs[player.index()] = LatestInput::neutral(spawn.yaw(), 0);
         self.input_ticks_remaining[player.index()] = 0;
         self.rebuild_snapshot();
         Ok(())
@@ -178,7 +181,7 @@ impl WorkerMatch {
         self.state
             .remove_player(player)
             .map_err(BridgeError::from_core)?;
-        self.latest_inputs[player.index()] = LatestInput::neutral(0);
+        self.latest_inputs[player.index()] = LatestInput::neutral(0, 0);
         self.input_ticks_remaining[player.index()] = 0;
         self.rebuild_snapshot();
         Ok(())
@@ -190,16 +193,16 @@ impl WorkerMatch {
         controller: Controller,
     ) -> Result<(), BridgeError> {
         let player = bridge_player_id(raw_player)?;
-        let yaw = self
+        let (yaw, pitch) = self
             .state
             .player(player)
             .filter(|state| state.controller != Controller::Empty)
-            .map(|state| state.yaw)
+            .map(|state| (state.yaw, state.pitch))
             .ok_or(BridgeError::SlotEmpty)?;
         self.state
             .set_controller(player, controller)
             .map_err(BridgeError::from_core)?;
-        self.latest_inputs[player.index()] = LatestInput::neutral(yaw);
+        self.latest_inputs[player.index()] = LatestInput::neutral(yaw, pitch);
         self.input_ticks_remaining[player.index()] = 0;
         self.rebuild_snapshot();
         Ok(())
@@ -212,7 +215,7 @@ impl WorkerMatch {
             .reset_player_at_spawn(player, spawn)
             .map_err(BridgeError::from_core)?;
         self.state.clear_projectiles();
-        self.latest_inputs[player.index()] = LatestInput::neutral(spawn.yaw());
+        self.latest_inputs[player.index()] = LatestInput::neutral(spawn.yaw(), 0);
         self.input_ticks_remaining[player.index()] = 0;
         self.rebuild_snapshot();
         Ok(())
@@ -220,13 +223,13 @@ impl WorkerMatch {
 
     fn clear_input(&mut self, raw_player: i32) -> Result<(), BridgeError> {
         let player = bridge_player_id(raw_player)?;
-        let yaw = self
+        let (yaw, pitch) = self
             .state
             .player(player)
             .filter(|state| state.controller != Controller::Empty)
-            .map(|state| state.yaw)
+            .map(|state| (state.yaw, state.pitch))
             .ok_or(BridgeError::SlotEmpty)?;
-        self.latest_inputs[player.index()] = LatestInput::neutral(yaw);
+        self.latest_inputs[player.index()] = LatestInput::neutral(yaw, pitch);
         self.input_ticks_remaining[player.index()] = 0;
         Ok(())
     }
@@ -237,6 +240,7 @@ impl WorkerMatch {
         raw_player: i32,
         move_x: i32,
         move_y: i32,
+        move_vertical: i32,
         look_yaw: i32,
         look_pitch: i32,
         action_flags: i32,
@@ -255,6 +259,8 @@ impl WorkerMatch {
         let input = LatestInput {
             move_x: i16::try_from(move_x).map_err(|_| BridgeError::InvalidInput)?,
             move_y: i16::try_from(move_y).map_err(|_| BridgeError::InvalidInput)?,
+            move_vertical: i16::try_from(move_vertical)
+                .map_err(|_| BridgeError::InvalidInput)?,
             look_yaw: u16::try_from(look_yaw).map_err(|_| BridgeError::InvalidInput)?,
             look_pitch: i16::try_from(look_pitch).map_err(|_| BridgeError::InvalidInput)?,
             action_flags: u16::try_from(action_flags).map_err(|_| BridgeError::InvalidInput)?,
@@ -281,7 +287,7 @@ impl WorkerMatch {
             let player_index = player.index();
             let sequence = next_sequence(player_state.last_accepted_sequence());
             let input = if self.input_ticks_remaining[player_index] == 0 {
-                LatestInput::neutral(player_state.yaw)
+                LatestInput::neutral(player_state.yaw, player_state.pitch)
             } else {
                 self.input_ticks_remaining[player_index] -= 1;
                 self.latest_inputs[player_index]
@@ -324,6 +330,7 @@ impl WorkerMatch {
             snapshot.push(i32::from(player.velocity_cm_per_tick[1]));
             snapshot.push(i32::from(player.velocity_cm_per_tick[2]));
             snapshot.push(i32::from(player.yaw));
+            snapshot.push(i32::from(player.pitch));
             snapshot.push(i32::from(player.health));
             snapshot.push(i32::from(player.cooldown_ticks));
             snapshot.push(player.outcome as i32);
@@ -545,6 +552,7 @@ pub extern "C" fn worker_match_submit_input(
     player: i32,
     move_x: i32,
     move_y: i32,
+    move_vertical: i32,
     look_yaw: i32,
     look_pitch: i32,
     action_flags: i32,
@@ -555,6 +563,7 @@ pub extern "C" fn worker_match_submit_input(
             player,
             move_x,
             move_y,
+            move_vertical,
             look_yaw,
             look_pitch,
             action_flags,
@@ -623,10 +632,10 @@ mod tests {
         let mut instance = WorkerMatch::new(8).unwrap();
         instance.add_player(0, 0, Controller::Human).unwrap();
         instance
-            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, -1)
+            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, 0, -1)
             .unwrap();
         assert_eq!(
-            instance.submit_input(0, i32::from(MAX_MOVE_AXIS) + 1, 0, 0, 0, 0, -1),
+            instance.submit_input(0, i32::from(MAX_MOVE_AXIS) + 1, 0, 0, 0, 0, 0, -1),
             Err(BridgeError::InvalidInput)
         );
 
@@ -644,13 +653,46 @@ mod tests {
         assert_eq!(player.last_accepted_sequence(), Some(3));
 
         instance
-            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, -1)
+            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, 0, -1)
             .unwrap();
         instance.clear_input(0).unwrap();
         instance.advance_tick().unwrap();
         let player = instance.state.player(PlayerId::new(0).unwrap()).unwrap();
         assert_eq!(player.position_cm, stationary);
         assert_eq!(player.last_accepted_sequence(), Some(4));
+    }
+
+    #[test]
+    fn vertical_input_and_pitch_reach_the_version_two_player_snapshot() {
+        let mut instance = WorkerMatch::new(12).unwrap();
+        instance.add_player(0, 0, Controller::Human).unwrap();
+        instance
+            .submit_input(
+                0,
+                0,
+                0,
+                i32::from(MAX_MOVE_AXIS),
+                1_234,
+                2_345,
+                0,
+                -1,
+            )
+            .unwrap();
+
+        instance.advance_tick().unwrap();
+        let offset = instance.snapshot[12] as usize;
+        assert_eq!(instance.snapshot[7], 16);
+        assert_eq!(instance.snapshot[offset + 6], 5);
+        assert_eq!(instance.snapshot[offset + 9], 5);
+        assert_eq!(instance.snapshot[offset + 11], 1_234);
+        assert_eq!(instance.snapshot[offset + 12], 2_345);
+
+        instance.advance_tick().unwrap();
+        instance.advance_tick().unwrap();
+        let player = instance.state.player(PlayerId::new(0).unwrap()).unwrap();
+        assert_eq!(player.pitch, 2_345);
+        assert_eq!(player.position_cm[1], 10);
+        assert_eq!(player.velocity_cm_per_tick[1], 0);
     }
 
     #[test]
@@ -687,7 +729,7 @@ mod tests {
         instance.add_player(0, 0, Controller::Human).unwrap();
         instance.add_player(1, 1, Controller::Human).unwrap();
         instance
-            .submit_input(0, 0, 0, 0, 0, i32::from(ACTION_CAST), 0)
+            .submit_input(0, 0, 0, 0, 0, 0, i32::from(ACTION_CAST), 0)
             .unwrap();
 
         let mut saw_damage = false;
@@ -722,7 +764,7 @@ mod tests {
         let mut instance = WorkerMatch::new(11).unwrap();
         instance.add_player(0, 0, Controller::Human).unwrap();
         instance
-            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, -1)
+            .submit_input(0, i32::from(MAX_MOVE_AXIS), 0, 0, 0, 0, 0, -1)
             .unwrap();
         instance.advance_tick().unwrap();
         assert_ne!(
@@ -735,7 +777,7 @@ mod tests {
         );
 
         instance
-            .submit_input(0, 0, 0, 0, 0, i32::from(ACTION_CAST), 0)
+            .submit_input(0, 0, 0, 0, 0, 0, i32::from(ACTION_CAST), 0)
             .unwrap();
         instance.advance_tick().unwrap();
         assert!(instance

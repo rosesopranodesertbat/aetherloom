@@ -204,7 +204,7 @@ async fn verified_ticket_claims_enter_the_match_once_and_own_identity() {
     // The input payload has no account/player identity field. The transport's
     // authenticated PeerId binding supplies the player when commands enter the
     // match.
-    let command = PlayerCommand::new(0, 1, 0, 0, 0, 0, 0, None).expect("command");
+    let command = PlayerCommand::new(0, 1, 0, 0, 0, 0, 0, 0, None).expect("command");
     let batch = InputBatch::new(vec![command]).expect("batch");
     let envelope = MessageEnvelope::new(
         EnvelopeMetadata::new(build.content_build_hash(), build.match_epoch(), 1, 0, 0),

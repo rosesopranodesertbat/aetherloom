@@ -17,6 +17,7 @@ fn command(tick: u64, sequence: u32) -> PlayerCommand {
         sequence,
         1_024,
         -512,
+        256,
         49_152,
         -4_096,
         ACTION_CAST,
@@ -86,28 +87,45 @@ fn entity_generation_prevents_slot_aliasing() {
 }
 
 #[test]
+fn replicated_entity_pitch_uses_the_command_pitch_contract() {
+    let mut state = entity(1);
+    state.pitch = 16_385;
+    assert_eq!(
+        state.validate(),
+        Err(ValidationError::LookPitchOutOfRange(16_385))
+    );
+}
+
+#[test]
 fn player_command_rejects_out_of_range_quantized_fields() {
     assert_eq!(
-        PlayerCommand::new(1, 0, 0, 0, 0, 0, 0, None),
+        PlayerCommand::new(1, 0, 0, 0, 0, 0, 0, 0, None),
         Err(ValidationError::ZeroCommandSequence)
     );
     assert!(matches!(
-        PlayerCommand::new(1, 1, 2_048, 0, 0, 0, 0, None),
+        PlayerCommand::new(1, 1, 2_048, 0, 0, 0, 0, 0, None),
         Err(ValidationError::MoveAxisOutOfRange {
             axis: "move_x",
             value: 2_048
         })
     ));
+    assert!(matches!(
+        PlayerCommand::new(1, 1, 0, 0, -2_048, 0, 0, 0, None),
+        Err(ValidationError::MoveAxisOutOfRange {
+            axis: "move_vertical",
+            value: -2_048
+        })
+    ));
     assert_eq!(
-        PlayerCommand::new(1, 1, 0, 0, 0, 16_385, 0, None),
+        PlayerCommand::new(1, 1, 0, 0, 0, 0, 16_385, 0, None),
         Err(ValidationError::LookPitchOutOfRange(16_385))
     );
     assert_eq!(
-        PlayerCommand::new(1, 1, 0, 0, 0, 0, 0x8000, None),
+        PlayerCommand::new(1, 1, 0, 0, 0, 0, 0, 0x8000, None),
         Err(ValidationError::UnsupportedActionFlags(0x8000))
     );
     assert_eq!(
-        PlayerCommand::new(1, 1, 0, 0, 0, 0, 0, Some(32)),
+        PlayerCommand::new(1, 1, 0, 0, 0, 0, 0, 0, Some(32)),
         Err(ValidationError::SpellOutOfRange(32))
     );
 }
@@ -193,7 +211,7 @@ fn input_datagram_contains_commands_but_no_identity_claim() {
     let bytes = input_envelope(vec![command(10, 20)])
         .encode_datagram()
         .unwrap();
-    const ENCODED_COMMAND_BYTES: usize = 23;
+    const ENCODED_COMMAND_BYTES: usize = 25;
     assert_eq!(bytes.len(), HEADER_BYTES + 1 + ENCODED_COMMAND_BYTES);
     assert_eq!(bytes[HEADER_BYTES], 1, "first payload byte is command count");
 }
@@ -255,7 +273,7 @@ fn decoder_rejects_duplicate_redundant_commands() {
         .encode_datagram()
         .unwrap();
     let first_sequence_offset = HEADER_BYTES + 1 + 8;
-    let command_bytes = 23;
+    let command_bytes = 25;
     let second_sequence_offset = first_sequence_offset + command_bytes;
     let sequence = bytes[first_sequence_offset..first_sequence_offset + 4].to_vec();
     bytes[second_sequence_offset..second_sequence_offset + 4].copy_from_slice(&sequence);

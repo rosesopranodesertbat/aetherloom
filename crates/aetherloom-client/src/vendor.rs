@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 use core::mem::size_of;
 
-pub const AETHERLOOM_CLIENT_ABI_VERSION: u32 = 1;
+pub const AETHERLOOM_CLIENT_ABI_VERSION: u32 = 2;
 
 pub const VENDOR_RESULT_OK: u32 = 0;
 pub const VENDOR_RESULT_UNAVAILABLE: u32 = 1;
@@ -121,11 +121,12 @@ pub struct VendorInputState {
     pub action_flags: u16,
     pub move_x: i16,
     pub move_y: i16,
+    pub move_vertical: i16,
     pub look_yaw: u16,
     pub look_pitch: i16,
     pub requested_spell: u8,
     pub input_device: u8,
-    pub reserved: [u8; 4],
+    pub reserved: [u8; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

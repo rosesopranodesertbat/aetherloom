@@ -25,18 +25,19 @@ pub const ALLOWED_ACTION_FLAGS: u16 = ACTION_PRIMARY
 
 /// A deterministic, compact input sample for one authoritative tick.
 ///
-/// Movement axes use signed 12-bit precision in an `i16`. Yaw spans the full
-/// `u16` circle. Pitch is clamped to half that range. The constructor prevents
-/// invalid values from entering normal application code; decoding validates
-/// untrusted values again. Sequence zero is reserved for "no input
-/// acknowledged" in snapshot messages, and wraparound therefore advances from
-/// `u32::MAX` to one.
+/// The two planar movement axes and continuous vertical lift axis use signed
+/// 12-bit precision in an `i16`. Yaw spans the full `u16` circle. Pitch is
+/// clamped to half that range. The constructor prevents invalid values from
+/// entering normal application code; decoding validates untrusted values
+/// again. Sequence zero is reserved for "no input acknowledged" in snapshot
+/// messages, and wraparound therefore advances from `u32::MAX` to one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerCommand {
     target_tick: u64,
     sequence: u32,
     move_x: i16,
     move_y: i16,
+    move_vertical: i16,
     look_yaw: u16,
     look_pitch: i16,
     action_flags: u16,
@@ -50,6 +51,7 @@ impl PlayerCommand {
         sequence: u32,
         move_x: i16,
         move_y: i16,
+        move_vertical: i16,
         look_yaw: u16,
         look_pitch: i16,
         action_flags: u16,
@@ -60,6 +62,7 @@ impl PlayerCommand {
             sequence,
             move_x,
             move_y,
+            move_vertical,
             look_yaw,
             look_pitch,
             action_flags,
@@ -75,6 +78,7 @@ impl PlayerCommand {
         }
         validate_axis("move_x", self.move_x)?;
         validate_axis("move_y", self.move_y)?;
+        validate_axis("move_vertical", self.move_vertical)?;
         if !(-MAX_LOOK_PITCH..=MAX_LOOK_PITCH).contains(&self.look_pitch) {
             return Err(ValidationError::LookPitchOutOfRange(self.look_pitch));
         }
@@ -106,6 +110,10 @@ impl PlayerCommand {
         self.move_y
     }
 
+    pub const fn move_vertical(&self) -> i16 {
+        self.move_vertical
+    }
+
     pub const fn look_yaw(&self) -> u16 {
         self.look_yaw
     }
@@ -128,6 +136,7 @@ impl PlayerCommand {
         writer.u32(self.sequence);
         writer.i16(self.move_x);
         writer.i16(self.move_y);
+        writer.i16(self.move_vertical);
         writer.u16(self.look_yaw);
         writer.i16(self.look_pitch);
         writer.u16(self.action_flags);
@@ -140,6 +149,7 @@ impl PlayerCommand {
         let sequence = reader.u32()?;
         let move_x = reader.i16()?;
         let move_y = reader.i16()?;
+        let move_vertical = reader.i16()?;
         let look_yaw = reader.u16()?;
         let look_pitch = reader.i16()?;
         let action_flags = reader.u16()?;
@@ -152,6 +162,7 @@ impl PlayerCommand {
             sequence,
             move_x,
             move_y,
+            move_vertical,
             look_yaw,
             look_pitch,
             action_flags,

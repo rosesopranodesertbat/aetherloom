@@ -1453,7 +1453,7 @@ where
             let Some(entity) = current.get(entity_id) else {
                 continue;
             };
-            let distance_squared = horizontal_distance_squared(viewer_position, entity.position_cm);
+            let distance_squared = spatial_distance_squared(viewer_position, entity.position_cm);
             let interest = classify_interest(
                 self.state
                     .player(viewer)
@@ -2035,9 +2035,9 @@ fn wire_entity(entity: &Entity) -> EntityState {
 }
 
 fn encode_tick_record(commands: &CommandSet) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(16 + commands.len() * 25);
+    let mut bytes = Vec::with_capacity(18 + commands.len() * 27);
     bytes.extend_from_slice(b"ALTR");
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&commands.tick().to_le_bytes());
     bytes.extend_from_slice(&(commands.len() as u16).to_le_bytes());
@@ -2047,6 +2047,7 @@ fn encode_tick_record(commands: &CommandSet) -> Vec<u8> {
         bytes.extend_from_slice(&command.sequence().to_le_bytes());
         bytes.extend_from_slice(&command.move_x().to_le_bytes());
         bytes.extend_from_slice(&command.move_y().to_le_bytes());
+        bytes.extend_from_slice(&command.move_vertical().to_le_bytes());
         bytes.extend_from_slice(&command.look_yaw().to_le_bytes());
         bytes.extend_from_slice(&command.look_pitch().to_le_bytes());
         bytes.extend_from_slice(&command.action_flags().to_le_bytes());
@@ -2090,10 +2091,11 @@ fn record_deferred(
     }
 }
 
-fn horizontal_distance_squared(first: [i32; 3], second: [i32; 3]) -> i128 {
+fn spatial_distance_squared(first: [i32; 3], second: [i32; 3]) -> i128 {
     let dx = i128::from(first[0]) - i128::from(second[0]);
+    let dy = i128::from(first[1]) - i128::from(second[1]);
     let dz = i128::from(first[2]) - i128::from(second[2]);
-    dx * dx + dz * dz
+    dx * dx + dy * dy + dz * dz
 }
 
 fn sequence_is_newer(candidate: u32, previous: u32) -> bool {
@@ -2202,7 +2204,7 @@ mod tests {
     }
 
     fn test_command(tick: u64, sequence: u32) -> PlayerCommand {
-        PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, None).expect("valid command")
+        PlayerCommand::new(tick, sequence, 0, 0, 0, 0, 0, 0, None).expect("valid command")
     }
 
     fn test_admission_scope() -> crate::MatchAdmissionScope {
@@ -2261,7 +2263,17 @@ mod tests {
             let player_id = PlayerId::new(raw).expect("player");
             runtime.pending_commands.entry(0).or_default().insert(
                 player_id,
-                PlayerCommand::new(0, 1, 0, 0, 0, 0, aetherloom_protocol::ACTION_EXTRACT, None)
+                PlayerCommand::new(
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    aetherloom_protocol::ACTION_EXTRACT,
+                    None,
+                )
                     .expect("extract command"),
             );
         }
@@ -2628,7 +2640,10 @@ mod tests {
     #[test]
     fn full_width_positions_cannot_overflow_replication_distance() {
         let distance =
-            horizontal_distance_squared([i32::MIN, 0, i32::MIN], [i32::MAX, 0, i32::MAX]);
+            spatial_distance_squared(
+                [i32::MIN, i32::MIN, i32::MIN],
+                [i32::MAX, i32::MAX, i32::MAX],
+            );
         assert_eq!(
             classify_interest(None, EntityId::new(0, 1).expect("entity"), distance),
             WireInterest::Distant

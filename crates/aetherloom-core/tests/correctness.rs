@@ -7,7 +7,7 @@ use aetherloom_core::{
     MAX_INTERPOLATION_SAMPLES, MAX_PENDING_PREDICTION_COMMANDS,
     MAX_REWIND_TICKS, MIN_INTERPOLATION_DELAY_TICKS, POSE_HISTORY_TICKS,
 };
-use aetherloom_protocol::ACTION_CAST;
+use aetherloom_protocol::{ACTION_CAST, MAX_LOOK_PITCH, MAX_MOVE_AXIS};
 use std::collections::BTreeSet;
 
 fn config() -> MatchConfig {
@@ -36,6 +36,32 @@ fn command(
         move_y,
         0,
         0,
+        0,
+        if cast { ACTION_CAST } else { 0 },
+        cast.then_some(0),
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_3d(
+    tick: u64,
+    sequence: u32,
+    move_x: i16,
+    move_y: i16,
+    move_vertical: i16,
+    yaw: u16,
+    pitch: i16,
+    cast: bool,
+) -> PlayerCommand {
+    PlayerCommand::new(
+        tick,
+        sequence,
+        move_x,
+        move_y,
+        move_vertical,
+        yaw,
+        pitch,
         if cast { ACTION_CAST } else { 0 },
         cast.then_some(0),
     )
@@ -46,6 +72,304 @@ fn commands(tick: u64, id: PlayerId, command: PlayerCommand) -> CommandSet {
     let mut set = CommandSet::new(tick);
     set.insert(id, command).unwrap();
     set
+}
+
+#[test]
+fn vertical_flight_and_pitch_cross_every_authoritative_boundary() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0F0));
+    let entity_id = state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 0, 0], 0),
+        )
+        .unwrap();
+    state
+        .advance_tick(commands(
+            0,
+            player(0),
+            command_3d(0, 1, 0, 0, MAX_MOVE_AXIS, 1_234, 4_096, false),
+        ))
+        .unwrap();
+
+    let player_state = state.player(player(0)).unwrap();
+    assert_eq!(player_state.position_cm, [0, 5, 0]);
+    assert_eq!(player_state.velocity_cm_per_tick, [0, 5, 0]);
+    assert_eq!(player_state.yaw, 1_234);
+    assert_eq!(player_state.pitch, 4_096);
+    let entity = state.entities().get(entity_id).unwrap();
+    assert_eq!(entity.position_cm, player_state.position_cm);
+    assert_eq!(entity.pitch, player_state.pitch);
+    let pose = state
+        .pose_history()
+        .last()
+        .unwrap()
+        .poses
+        .iter()
+        .find(|pose| pose.entity_id == entity_id)
+        .unwrap();
+    assert_eq!(pose.pitch, 4_096);
+
+    let presentation = PresentationWorld::new(1).extract(&state, player(0), 0.5);
+    assert_eq!(presentation.players[0].pitch, 4_096);
+    assert_eq!(
+        presentation
+            .entities
+            .iter()
+            .find(|entity| entity.id == entity_id)
+            .unwrap()
+            .pitch,
+        4_096
+    );
+    let snapshot = state.replicate(player(0), SnapshotId::NONE).unwrap();
+    assert_eq!(
+        snapshot
+            .entities
+            .iter()
+            .find(|entity| entity.entity_id == entity_id)
+            .unwrap()
+            .pitch,
+        4_096
+    );
+
+    let restored = MatchState::restore(state.checkpoint()).unwrap();
+    let restored_player = restored.player(player(0)).unwrap();
+    assert_eq!(restored_player.position_cm, [0, 5, 0]);
+    assert_eq!(restored_player.pitch, 4_096);
+    assert_eq!(
+        restored.pose_history().last().unwrap().poses[0].pitch,
+        4_096
+    );
+
+    state
+        .advance_tick(commands(
+            1,
+            player(0),
+            command_3d(1, 2, 0, 0, -MAX_MOVE_AXIS, 1_234, 4_096, false),
+        ))
+        .unwrap();
+    assert_eq!(state.player(player(0)).unwrap().position_cm[1], 0);
+    assert_eq!(
+        state.player(player(0)).unwrap().velocity_cm_per_tick[1],
+        -5
+    );
+    state
+        .advance_tick(commands(
+            2,
+            player(0),
+            command_3d(2, 3, 0, 0, -MAX_MOVE_AXIS, 1_234, 4_096, false),
+        ))
+        .unwrap();
+    assert_eq!(state.player(player(0)).unwrap().position_cm[1], 0);
+    assert_eq!(state.player(player(0)).unwrap().velocity_cm_per_tick[1], 0);
+}
+
+#[test]
+fn projectile_aim_is_fine_grained_three_dimensional_and_speed_normalized() {
+    fn projectile(yaw: u16, pitch: i16) -> Entity {
+        let mut state = MatchState::new(config(), WorldSeed::new(0xD0F1));
+        state
+            .add_player_at_spawn(
+                player(0),
+                team(0),
+                Controller::Human,
+                PlayerSpawn::new([0, 100, 0], 0),
+            )
+            .unwrap();
+        state
+            .advance_tick(commands(
+                0,
+                player(0),
+                command_3d(0, 1, 0, 0, 0, yaw, pitch, true),
+            ))
+            .unwrap();
+        let projectile = state
+            .entities()
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Projectile)
+            .unwrap()
+            .to_owned();
+        projectile
+    }
+
+    fn velocity(yaw: u16, pitch: i16) -> [i16; 3] {
+        projectile(yaw, pitch).velocity_cm_per_tick
+    }
+
+    fn displacement_after_ticks(yaw: u16, pitch: i16, ticks: u64) -> [i32; 3] {
+        let mut state = MatchState::new(config(), WorldSeed::new(0xD0F2));
+        state
+            .add_player_at_spawn(
+                player(0),
+                team(0),
+                Controller::Human,
+                PlayerSpawn::new([0, 500, 0], 0),
+            )
+            .unwrap();
+        state
+            .advance_tick(commands(
+                0,
+                player(0),
+                command_3d(0, 1, 0, 0, 0, yaw, pitch, true),
+            ))
+            .unwrap();
+        let first = state
+            .entities()
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Projectile)
+            .unwrap()
+            .to_owned();
+        let origin = [
+            first.position_cm[0] - i32::from(first.velocity_cm_per_tick[0]),
+            first.position_cm[1] - i32::from(first.velocity_cm_per_tick[1]),
+            first.position_cm[2] - i32::from(first.velocity_cm_per_tick[2]),
+        ];
+        for tick in 1..ticks {
+            state.advance_tick(CommandSet::new(tick)).unwrap();
+        }
+        let final_position = state
+            .entities()
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Projectile)
+            .unwrap()
+            .position_cm;
+        [
+            final_position[0] - origin[0],
+            final_position[1] - origin[1],
+            final_position[2] - origin[2],
+        ]
+    }
+
+    assert_eq!(velocity(0, 0), [20, 0, 0]);
+    assert_eq!(velocity(4_096, 0), [18, 0, 8]);
+    assert_eq!(velocity(8_192, 0), [14, 0, 14]);
+    assert_eq!(velocity(16_384, 0), [0, 0, 20]);
+    assert_eq!(velocity(0, 8_192), [14, 14, 0]);
+    assert_eq!(velocity(8_192, 8_192), [10, 14, 10]);
+    assert_eq!(
+        projectile(4_096, 0).position_cm,
+        [31, 123, 13],
+        "the muzzle offset must use the fine aim ray, not rounded velocity"
+    );
+    assert_eq!(
+        projectile(8_192, 8_192).position_cm,
+        [17, 137, 17],
+        "the first authoritative projectile sample must remain on the camera ray"
+    );
+
+    for (yaw, pitch) in [
+        (0, 0),
+        (4_096, 0),
+        (8_192, 0),
+        (16_384, 0),
+        (0, 8_192),
+        (8_192, 8_192),
+        (32_768, -8_192),
+    ] {
+        let displacement = displacement_after_ticks(yaw, pitch, 20);
+        let distance_squared: i32 = displacement
+            .iter()
+            .map(|component| i32::from(*component).pow(2))
+            .sum();
+        assert!(
+            (159_000..=161_000).contains(&distance_squared),
+            "{yaw}/{pitch} produced {displacement:?} with squared distance {distance_squared}"
+        );
+    }
+}
+
+#[test]
+fn pitched_projectiles_deform_only_when_they_contact_terrain() {
+    let mut downward = MatchState::new(config(), WorldSeed::new(0xD0F3));
+    downward
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 0, 0], 0),
+        )
+        .unwrap();
+    let first = downward
+        .advance_tick(commands(
+            0,
+            player(0),
+            command_3d(0, 1, 0, 0, 0, 0, -MAX_LOOK_PITCH, true),
+        ))
+        .unwrap();
+    assert!(first.terrain.is_empty());
+    assert!(downward
+        .entities()
+        .iter()
+        .any(|entity| entity.kind == EntityKind::Projectile));
+    let impact = downward.advance_tick(CommandSet::new(1)).unwrap();
+    assert_eq!(impact.terrain.len(), 1);
+    assert!(impact
+        .events
+        .iter()
+        .any(|event| event.kind == aetherloom_core::TickEventKind::TerrainDeformed));
+    assert!(downward
+        .entities()
+        .iter()
+        .all(|entity| entity.kind != EntityKind::Projectile));
+
+    let mut upward = MatchState::new(config(), WorldSeed::new(0xD0F4));
+    upward
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 0, 0], 0),
+        )
+        .unwrap();
+    let opening = upward
+        .advance_tick(commands(
+            0,
+            player(0),
+            command_3d(0, 1, 0, 0, 0, 0, MAX_LOOK_PITCH, true),
+        ))
+        .unwrap();
+    assert!(opening.terrain.is_empty());
+    for tick in 1..32 {
+        let events = upward.advance_tick(CommandSet::new(tick)).unwrap();
+        assert!(events.terrain.is_empty());
+    }
+    assert!(upward.terrain().is_empty());
+    assert!(upward
+        .entities()
+        .iter()
+        .all(|entity| entity.kind != EntityKind::Projectile));
+}
+
+#[test]
+fn midflight_checkpoint_restores_the_fixed_point_projectile_phase() {
+    let mut uninterrupted = MatchState::new(config(), WorldSeed::new(0xD0F5));
+    uninterrupted
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 500, 0], 0),
+        )
+        .unwrap();
+    uninterrupted
+        .advance_tick(commands(
+            0,
+            player(0),
+            command_3d(0, 1, 0, 0, 0, 8_738, -8_192, true),
+        ))
+        .unwrap();
+    for tick in 1..6 {
+        uninterrupted.advance_tick(CommandSet::new(tick)).unwrap();
+    }
+    let mut restored = MatchState::restore(uninterrupted.checkpoint()).unwrap();
+
+    for tick in 6..20 {
+        let expected = uninterrupted.advance_tick(CommandSet::new(tick)).unwrap();
+        let actual = restored.advance_tick(CommandSet::new(tick)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(restored.authoritative_hash(), uninterrupted.authoritative_hash());
+    }
 }
 
 #[test]
@@ -703,9 +1027,9 @@ fn checkpoint_rejects_conflicting_player_and_entity_authority() {
         .add_player(player(0), team(0), Controller::Human)
         .unwrap();
     let mut encoded = state.checkpoint().encode();
-    // Checkpoint v1: the first player's health follows the fixed 20-byte
-    // envelope and 107 bytes of authoritative payload fields.
-    encoded[127..129].copy_from_slice(&50_u16.to_le_bytes());
+    // Checkpoint v2: the first player's health follows the fixed 20-byte
+    // envelope and 109 bytes of authoritative payload fields.
+    encoded[129..131].copy_from_slice(&50_u16.to_le_bytes());
     let checksum = checksum64(&encoded[20..]);
     encoded[12..20].copy_from_slice(&checksum.to_le_bytes());
 
@@ -732,10 +1056,10 @@ fn checkpoint_rejects_ghost_or_out_of_range_entity_owners() {
         .unwrap();
     let encoded = state.checkpoint().encode();
     // With two occupied entity slots, the second dense entity begins at byte
-    // 723 in checkpoint v1. An owner beyond this match's eight slots could
+    // 739 in checkpoint v2. An owner beyond this match's eight slots could
     // later index the player array during damage attribution.
     let mut out_of_range_owner = encoded.clone();
-    out_of_range_owner[732..734].copy_from_slice(&127_u16.to_le_bytes());
+    out_of_range_owner[748..750].copy_from_slice(&127_u16.to_le_bytes());
     let checksum = checksum64(&out_of_range_owner[20..]);
     out_of_range_owner[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&out_of_range_owner).is_err());
@@ -743,7 +1067,7 @@ fn checkpoint_rejects_ghost_or_out_of_range_entity_owners() {
     // Turning that projectile into another player used to create an unowned
     // ghost outside the player-slot authority mapping.
     let mut ghost_player = encoded;
-    ghost_player[731] = EntityKind::Player as u8;
+    ghost_player[747] = EntityKind::Player as u8;
     let checksum = checksum64(&ghost_player[20..]);
     ghost_player[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&ghost_player).is_err());
@@ -767,13 +1091,13 @@ fn checkpoint_rejects_noncanonical_and_inconsistent_sequence_state() {
     let encoded = state.checkpoint().encode();
 
     let mut absent_but_nonzero = encoded.clone();
-    absent_but_nonzero[157..161].copy_from_slice(&1_u32.to_le_bytes());
+    absent_but_nonzero[159..163].copy_from_slice(&1_u32.to_le_bytes());
     let checksum = checksum64(&absent_but_nonzero[20..]);
     absent_but_nonzero[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&absent_but_nonzero).is_err());
 
     let mut inconsistent_bot_next = encoded;
-    inconsistent_bot_next[161..165].copy_from_slice(&2_u32.to_le_bytes());
+    inconsistent_bot_next[163..167].copy_from_slice(&2_u32.to_le_bytes());
     let checksum = checksum64(&inconsistent_bot_next[20..]);
     inconsistent_bot_next[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&inconsistent_bot_next).is_err());

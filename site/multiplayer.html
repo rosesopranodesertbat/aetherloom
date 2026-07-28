@@ -334,7 +334,7 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   gap: 5px;
   pointer-events: auto;
 }
-.touch-pad button, .touch-fire {
+.touch-pad button, .touch-fire, .touch-altitude button {
   border: 1px solid rgba(242, 213, 128, .46);
   background: rgba(8, 13, 35, .72);
   color: #fff0bd;
@@ -346,7 +346,10 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
 .touch-pad button[data-key="a"] { grid-column: 1; grid-row: 2; }
 .touch-pad button[data-key="s"] { grid-column: 2; grid-row: 2; }
 .touch-pad button[data-key="d"] { grid-column: 3; grid-row: 2; }
-.touch-pad button.active, .touch-fire.active { background: rgba(229, 167, 60, .78); color: #140e26; }
+.touch-pad button.active, .touch-fire.active, .touch-altitude button.active {
+  background: rgba(229, 167, 60, .78);
+  color: #140e26;
+}
 .touch-fire {
   width: 82px;
   height: 82px;
@@ -365,6 +368,17 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   text-transform: uppercase;
   text-shadow: 0 2px 5px #000;
   pointer-events: none;
+}
+.touch-altitude {
+  display: grid;
+  grid-template-columns: repeat(2, 48px);
+  gap: 7px;
+  pointer-events: auto;
+}
+.touch-altitude button {
+  width: 48px;
+  height: 38px;
+  font-size: 17px;
 }
 #boot {
   position: fixed;
@@ -461,7 +475,7 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
 </main>
 
 <div class="crosshair" aria-hidden="true"></div>
-<div class="controls-hint"><kbd>W A S D</kbd> fly &nbsp; <kbd>Mouse</kbd> aim &nbsp; <kbd>Click</kbd> fireball &nbsp; controller supported</div>
+<div class="controls-hint"><kbd>W A S D</kbd> fly &nbsp; <kbd>Space</kbd> climb &nbsp; <kbd>Shift</kbd> dive &nbsp; <kbd>Mouse</kbd> aim &nbsp; <kbd>Click</kbd> fireball</div>
 
 <div class="touch-controls" aria-label="Touch flight controls">
   <div class="touch-pad">
@@ -472,6 +486,10 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   </div>
   <div class="touch-actions">
     <span>Drag sky to aim</span>
+    <div class="touch-altitude" aria-label="Altitude controls">
+      <button type="button" data-key="ascend" aria-label="Climb">▲</button>
+      <button type="button" data-key="descend" aria-label="Dive">▼</button>
+    </div>
     <button class="touch-fire" id="touchFire" type="button">Cast</button>
   </div>
 </div>

@@ -300,13 +300,20 @@ export function ticketFromRequest(request: Request, allowWebSocketProtocol = fal
   throw new ApiError(401, "missing_ticket", "A signed bearer ticket is required.");
 }
 
-export function publicWebSocketProtocol(request: Request): string {
+export function publicWebSocketProtocol(
+  request: Request,
+  requiredProtocol = "aetherloom.v1",
+): string {
   const protocols = request.headers
     .get("sec-websocket-protocol")
     ?.split(",")
     .map((protocol) => protocol.trim()) ?? [];
-  if (!protocols.includes("aetherloom.v1")) {
-    throw new ApiError(400, "missing_websocket_protocol", "WebSocket protocol aetherloom.v1 is required.");
+  if (!protocols.includes(requiredProtocol)) {
+    throw new ApiError(
+      400,
+      "missing_websocket_protocol",
+      `WebSocket protocol ${requiredProtocol} is required.`,
+    );
   }
-  return "aetherloom.v1";
+  return requiredProtocol;
 }

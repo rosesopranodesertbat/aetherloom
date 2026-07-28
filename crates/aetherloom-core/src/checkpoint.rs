@@ -13,7 +13,7 @@ use crate::state::{
 use crate::terrain::{validate_chunks, ChunkCoord, TerrainChunk, TERRAIN_CELLS};
 
 pub const CHECKPOINT_MAGIC: [u8; 4] = *b"ALCP";
-pub const CHECKPOINT_VERSION: u16 = 1;
+pub const CHECKPOINT_VERSION: u16 = 2;
 const HEADER_BYTES: usize = 20;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 const NONE_U16: u16 = u16::MAX;
@@ -144,6 +144,7 @@ pub(crate) fn encode_authoritative_payload(
             writer.i16(value);
         }
         writer.u16(player.yaw);
+        writer.i16(player.pitch);
         writer.u16(player.health);
         writer.u16(player.cooldown_ticks);
         for value in player.inventory.loadout {
@@ -184,6 +185,7 @@ pub(crate) fn encode_authoritative_payload(
                 writer.i32(value);
             }
             writer.u16(pose.yaw);
+            writer.i16(pose.pitch);
             writer.u16(pose.health);
         }
     }
@@ -261,6 +263,12 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
         let position_cm = [reader.i32()?, reader.i32()?, reader.i32()?];
         let velocity_cm_per_tick = [reader.i16()?, reader.i16()?, reader.i16()?];
         let yaw = reader.u16()?;
+        let pitch = reader.i16()?;
+        if !(-aetherloom_protocol::MAX_LOOK_PITCH..=aetherloom_protocol::MAX_LOOK_PITCH)
+            .contains(&pitch)
+        {
+            return Err(CheckpointError::InvalidValue("player pitch"));
+        }
         let health = reader.u16()?;
         let cooldown_ticks = reader.u16()?;
         let mut loadout = [0_u16; 4];
@@ -307,6 +315,7 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
             position_cm,
             velocity_cm_per_tick,
             yaw,
+            pitch,
             health,
             cooldown_ticks,
             inventory,
@@ -386,6 +395,7 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
                 || entity.position_cm != player.position_cm
                 || entity.velocity_cm_per_tick != player.velocity_cm_per_tick
                 || entity.yaw != player.yaw
+                || entity.pitch != player.pitch
                 || entity.health != player.health
             {
                 return Err(CheckpointError::InvalidEntity);
@@ -418,10 +428,19 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
                 return Err(CheckpointError::InvalidValue("pose entity order"));
             }
             previous_id = Some(entity_id);
+            let position_cm = [reader.i32()?, reader.i32()?, reader.i32()?];
+            let yaw = reader.u16()?;
+            let pitch = reader.i16()?;
+            if !(-aetherloom_protocol::MAX_LOOK_PITCH..=aetherloom_protocol::MAX_LOOK_PITCH)
+                .contains(&pitch)
+            {
+                return Err(CheckpointError::InvalidValue("pose pitch"));
+            }
             poses.push(Pose {
                 entity_id,
-                position_cm: [reader.i32()?, reader.i32()?, reader.i32()?],
-                yaw: reader.u16()?,
+                position_cm,
+                yaw,
+                pitch,
                 health: reader.u16()?,
             });
         }
@@ -518,15 +537,24 @@ fn decode_entity(reader: &mut Reader<'_>) -> Result<Entity, CheckpointError> {
     } else {
         Some(TeamId::new(team_raw).map_err(|_| CheckpointError::InvalidEntity)?)
     };
+    let position_cm = [reader.i32()?, reader.i32()?, reader.i32()?];
+    let velocity_cm_per_tick = [reader.i16()?, reader.i16()?, reader.i16()?];
+    let yaw = reader.u16()?;
+    let pitch = reader.i16()?;
+    if !(-aetherloom_protocol::MAX_LOOK_PITCH..=aetherloom_protocol::MAX_LOOK_PITCH)
+        .contains(&pitch)
+    {
+        return Err(CheckpointError::InvalidEntity);
+    }
     Ok(Entity {
         id,
         kind,
         owner,
         team,
-        position_cm: [reader.i32()?, reader.i32()?, reader.i32()?],
-        velocity_cm_per_tick: [reader.i16()?, reader.i16()?, reader.i16()?],
-        yaw: reader.u16()?,
-        pitch: reader.i16()?,
+        position_cm,
+        velocity_cm_per_tick,
+        yaw,
+        pitch,
         health: reader.u16()?,
         flags: reader.u16()?,
         lifetime_ticks: reader.u16()?,

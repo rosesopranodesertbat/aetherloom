@@ -56,7 +56,7 @@ with SQLite storage. D1's ordered schema changes are in `migrations/`.
 - Join admission is signed with Ed25519. Only the control plane receives the
   PKCS#8 private key; WSS gateways and dedicated match hosts receive raw public
   keys and therefore cannot mint admission.
-- Browser WebSockets carry `aetherloom.v1` and
+- Browser WebSockets carry `aetherloom.v2` and
   `aetherloom.auth.<join-ticket>` in `Sec-WebSocket-Protocol`; the gateway strips
   the auth pseudo-protocol before forwarding.
 - Internal requests require a short-lived service ticket and an operation

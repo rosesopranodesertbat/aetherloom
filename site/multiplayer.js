@@ -6,21 +6,21 @@
 import { Renderer } from './engine.js';
 
 export const DEFAULT_CONTROL_PLANE = 'https://aetherloom-control-plane-staging.calum-maciver.workers.dev';
-export const INPUT_FRAME_BYTES = 20;
+export const INPUT_FRAME_BYTES = 22;
 export const SNAPSHOT_HEADER_BYTES = 24;
-export const PLAYER_RECORD_BYTES = 24;
-export const PROJECTILE_RECORD_BYTES = 16;
-export const EVENT_RECORD_BYTES = 16;
+export const PLAYER_RECORD_BYTES = 30;
+export const PROJECTILE_RECORD_BYTES = 24;
+export const EVENT_RECORD_BYTES = 20;
 export const DAMAGE_EVENT_TYPE = 4;
 export const MAX_SNAPSHOT_FRAME_BYTES = 1_200;
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const INPUT_MESSAGE_TYPE = 1;
 const SNAPSHOT_MESSAGE_TYPE = 2;
+const INPUT_ACTION_CAST = 1;
 const INSTANCE_STRIDE = 14;
 const PARTICLE_STRIDE = 8;
 const PREVIEW_Y = 512;
-const PLAYER_SCENE = 20;
 const RIVAL_SCENE = 21;
 const FIREBOLT_SCENE = 25;
 const MAX_PLAYERS = 128;
@@ -29,8 +29,17 @@ const MAX_EVENTS = 255;
 const WORLD_UNITS_PER_CM = 0.1;
 const CARPET_CLEARANCE = 34;
 const PROJECTILE_CLEARANCE = 39;
-const PREDICTION_SPEED = 102.4;
-const MAX_PREDICTION_SECONDS = 0.12;
+const INPUT_INTERVAL_MS = 1_000 / 64;
+const CORE_MOVE_AXIS = 2_047;
+const INPUT_HOLD_TICKS = 2;
+const PLAYER_PLANAR_SPEED_CM_PER_TICK = 8;
+const PLAYER_VERTICAL_SPEED_CM_PER_TICK = 5;
+const MAX_PREDICTION_HISTORY = 256;
+const MAX_PITCH = 16_384;
+const PLAYER_MIN_ALTITUDE_CM = 0;
+const PLAYER_MAX_ALTITUDE_CM = 4_300;
+const MAX_RECONCILIATION_OFFSET = 96;
+const RECONCILIATION_DECAY_MS = 105;
 const MAX_IMPACTS = 32;
 const MAX_SEEN_EVENTS = 512;
 
@@ -73,7 +82,9 @@ export function encodeInputFrame({
   sequence,
   moveX = 0,
   moveY = 0,
+  moveVertical = 0,
   yaw = 0,
+  pitch = 0,
   cast = false,
   clientClockMs = 0,
   snapshotAck = 0,
@@ -81,7 +92,9 @@ export function encodeInputFrame({
   integerIn(sequence, 1, 0xffff_ffff, 'sequence');
   integerIn(moveX, -127, 127, 'moveX');
   integerIn(moveY, -127, 127, 'moveY');
+  integerIn(moveVertical, -127, 127, 'moveVertical');
   integerIn(yaw, 0, 0xffff, 'yaw');
+  integerIn(pitch, -127, 127, 'pitch');
   integerIn(clientClockMs, 0, 0xffff, 'clientClockMs');
   integerIn(snapshotAck, 0, 0xffff_ffff, 'snapshotAck');
   const bytes = new Uint8Array(INPUT_FRAME_BYTES);
@@ -92,11 +105,13 @@ export function encodeInputFrame({
   view.setUint32(4, sequence, true);
   view.setInt8(8, moveX);
   view.setInt8(9, moveY);
-  view.setUint16(10, yaw, true);
-  view.setUint8(12, cast ? 1 : 0);
-  view.setUint8(13, 0);
-  view.setUint16(14, clientClockMs, true);
-  view.setUint32(16, snapshotAck, true);
+  view.setInt8(10, moveVertical);
+  view.setInt8(11, pitch);
+  view.setUint16(12, yaw, true);
+  view.setUint8(14, cast ? INPUT_ACTION_CAST : 0);
+  view.setUint8(15, 0);
+  view.setUint16(16, clientClockMs, true);
+  view.setUint32(18, snapshotAck, true);
   return bytes;
 }
 
@@ -122,6 +137,7 @@ export function decodeSnapshotFrame(payload) {
   const playerCount = view.getUint8(15);
   const projectileCount = view.getUint8(16);
   const eventCount = view.getUint8(17);
+  protocolAssert((view.getUint16(18, true) & ~0b11) === 0, 'reserved_bits', 'Snapshot match flags contain unknown bits.');
   protocolAssert(playerCount <= MAX_PLAYERS, 'too_many_players', 'Snapshot player count exceeds the client limit.');
   protocolAssert(projectileCount <= MAX_PROJECTILES, 'too_many_projectiles', 'Snapshot projectile count exceeds the client limit.');
   protocolAssert(eventCount <= MAX_EVENTS, 'too_many_events', 'Snapshot event count exceeds the client limit.');
@@ -130,11 +146,6 @@ export function decodeSnapshotFrame(payload) {
     + projectileCount * PROJECTILE_RECORD_BYTES
     + eventCount * EVENT_RECORD_BYTES;
   protocolAssert(expectedLength === bytes.byteLength, 'record_length_mismatch', 'Snapshot record counts do not match its length.');
-  protocolAssert(view.getUint16(20, true) === 0, 'reserved_bits', 'Snapshot reserved field is not zero.');
-  // The documented fields occupy 22 bytes; the fixed 24-byte header keeps two
-  // extension bytes. They must remain zero until a later protocol version.
-  protocolAssert(view.getUint16(22, true) === 0, 'reserved_bits', 'Snapshot extension field is not zero.');
-
   const players = [];
   const projectiles = [];
   const events = [];
@@ -146,23 +157,35 @@ export function decodeSnapshotFrame(payload) {
 
   for (let index = 0; index < playerCount; index += 1, offset += PLAYER_RECORD_BYTES) {
     const slot = view.getUint8(offset);
-    const entity = view.getUint32(offset + 20, true);
+    const entity = view.getUint32(offset + 26, true);
+    const status = view.getUint8(offset + 2);
+    const flags = view.getUint8(offset + 3);
+    const pitch = view.getInt16(offset + 18, true);
     rejectDuplicate(slots, slot, 'player slot');
     rejectDuplicate(playerEntities, entity, 'player entity');
-    const health = view.getUint16(offset + 14, true);
-    const maxHealth = view.getUint16(offset + 16, true);
+    protocolAssert(status >= 1 && status <= 5, 'invalid_status', 'Player status is out of range.');
+    protocolAssert((flags & ~0b111) === 0, 'reserved_bits', 'Player flags contain unknown bits.');
+    protocolAssert(
+      pitch >= -MAX_PITCH && pitch <= MAX_PITCH,
+      'input_out_of_range',
+      'Player pitch is out of range.',
+    );
+    const health = view.getUint16(offset + 20, true);
+    const maxHealth = view.getUint16(offset + 22, true);
     protocolAssert(maxHealth === 0 || health <= maxHealth, 'invalid_health', 'Player health exceeds maximum health.');
     players.push({
       slot,
       team: view.getUint8(offset + 1),
-      status: view.getUint8(offset + 2),
-      flags: view.getUint8(offset + 3),
+      status,
+      flags,
       xcm: view.getInt32(offset + 4, true),
-      zcm: view.getInt32(offset + 8, true),
-      yaw: view.getUint16(offset + 12, true),
+      ycm: view.getInt32(offset + 8, true),
+      zcm: view.getInt32(offset + 12, true),
+      yaw: view.getUint16(offset + 16, true),
+      pitch,
       health,
       maxHealth,
-      score: view.getUint16(offset + 18, true),
+      score: view.getUint16(offset + 24, true),
       entity,
     });
   }
@@ -175,13 +198,22 @@ export function decodeSnapshotFrame(payload) {
   for (let index = 0; index < projectileCount; index += 1, offset += PROJECTILE_RECORD_BYTES) {
     protocolAssert(view.getUint8(offset + 5) === 0, 'reserved_bits', 'Projectile reserved field is not zero.');
     const entity = view.getUint32(offset, true);
+    const pitch = view.getInt16(offset + 22, true);
     rejectDuplicate(projectileEntities, entity, 'projectile entity');
+    protocolAssert(
+      pitch >= -MAX_PITCH && pitch <= MAX_PITCH,
+      'input_out_of_range',
+      'Projectile pitch is out of range.',
+    );
     projectiles.push({
       entity,
       owner: view.getUint8(offset + 4),
       ttl: view.getUint16(offset + 6, true),
       xcm: view.getInt32(offset + 8, true),
-      zcm: view.getInt32(offset + 12, true),
+      ycm: view.getInt32(offset + 12, true),
+      zcm: view.getInt32(offset + 16, true),
+      yaw: view.getUint16(offset + 20, true),
+      pitch,
     });
   }
 
@@ -195,7 +227,8 @@ export function decodeSnapshotFrame(payload) {
       actor: view.getUint8(offset + 5),
       target: view.getUint8(offset + 6),
       xcm: view.getInt32(offset + 8, true),
-      zcm: view.getInt32(offset + 12, true),
+      ycm: view.getInt32(offset + 12, true),
+      zcm: view.getInt32(offset + 16, true),
     });
   }
 
@@ -211,6 +244,7 @@ export function decodeSnapshotFrame(payload) {
     projectileCount,
     eventCount,
     matchFlags: view.getUint16(18, true),
+    acknowledgedInputSequence: view.getUint32(20, true),
     players,
     projectiles,
     events,
@@ -257,33 +291,222 @@ export function movementToWorld(moveX, moveY, yaw) {
   const radians = wireYawToCoreRadians(yaw);
   const strafe = moveX / 127;
   const forward = moveY / 127;
-  const worldX = clamp(Math.round((Math.cos(radians) * forward + Math.sin(radians) * strafe) * 127), -127, 127);
-  const worldZ = clamp(Math.round((Math.sin(radians) * forward - Math.cos(radians) * strafe) * 127), -127, 127);
+  const worldX = clamp(Math.round((Math.cos(radians) * forward - Math.sin(radians) * strafe) * 127), -127, 127);
+  const worldZ = clamp(Math.round((Math.sin(radians) * forward + Math.cos(radians) * strafe) * 127), -127, 127);
   return {
     x: worldX === 0 ? 0 : worldX,
     y: worldZ === 0 ? 0 : worldZ,
   };
 }
 
-function appendTemplate(destination, instanceCount, template, templateOrigin, worldPosition, yaw) {
+export function wirePitchToRadians(pitch) {
+  protocolAssert(
+    Number.isFinite(pitch) && pitch >= -MAX_PITCH && pitch <= MAX_PITCH,
+    'input_out_of_range',
+    'pitch is out of range.',
+  );
+  return pitch / MAX_PITCH * Math.PI * 0.5;
+}
+
+export function firstPersonCamera(viewer) {
+  protocolAssert(
+    viewer &&
+    [viewer.x, viewer.y, viewer.z, viewer.yaw, viewer.pitch].every(Number.isFinite),
+    'invalid_camera',
+    'First-person viewer pose is invalid.',
+  );
+  const yaw = wireYawToCoreRadians(viewer.yaw);
+  const pitch = wirePitchToRadians(viewer.pitch);
+  const level = Math.cos(pitch);
+  const forwardX = Math.cos(yaw) * level;
+  const forwardY = Math.sin(pitch);
+  const forwardZ = Math.sin(yaw) * level;
+  const eyeX = viewer.x + forwardX * 1.4;
+  const eyeY = viewer.y + 7.3;
+  const eyeZ = viewer.z + forwardZ * 1.4;
+  // Keep a stable camera basis even at the exact vertical pitch limits.
+  const upX = -Math.cos(yaw) * Math.sin(pitch);
+  const upY = Math.cos(pitch);
+  const upZ = -Math.sin(yaw) * Math.sin(pitch);
+  return {
+    ex: eyeX,
+    ey: eyeY,
+    ez: eyeZ,
+    cx: eyeX + forwardX * 80,
+    cy: eyeY + forwardY * 80,
+    cz: eyeZ + forwardZ * 80,
+    ux: upX,
+    uy: upY,
+    uz: upZ,
+  };
+}
+
+export function pendingInputDisplacement(history, time) {
+  protocolAssert(Array.isArray(history) && Number.isFinite(time), 'invalid_prediction', 'Prediction inputs are invalid.');
+  const displacement = { x: 0, y: 0, z: 0 };
+  for (const input of history) {
+    protocolAssert(
+      input &&
+      [input.sentAt, input.x, input.y, input.z].every(Number.isFinite),
+      'invalid_prediction',
+      'Prediction history contains an invalid sample.',
+    );
+    const amount = clamp((time - input.sentAt) / INPUT_INTERVAL_MS, 0, 1);
+    displacement.x += predictedBrowserAxisDisplacement(
+      input.x,
+      PLAYER_PLANAR_SPEED_CM_PER_TICK,
+    ) * amount;
+    displacement.y += predictedBrowserAxisDisplacement(
+      input.y,
+      PLAYER_VERTICAL_SPEED_CM_PER_TICK,
+    ) * amount;
+    displacement.z += predictedBrowserAxisDisplacement(
+      input.z,
+      PLAYER_PLANAR_SPEED_CM_PER_TICK,
+    ) * amount;
+  }
+  return displacement;
+}
+
+export function predictedBrowserAxisDisplacement(compactAxis, speedCmPerTick) {
+  integerIn(compactAxis, -127, 127, 'compactAxis');
+  protocolAssert(
+    Number.isInteger(speedCmPerTick) && speedCmPerTick >= 0,
+    'invalid_prediction',
+    'Prediction speed is invalid.',
+  );
+  // Mirror the host's int8 -> i16 rounding and Rust's signed integer division
+  // (truncation toward zero) before applying the two-tick browser hold.
+  const coreAxis = Math.round(compactAxis * CORE_MOVE_AXIS / 127);
+  const velocityCmPerTick = Math.trunc(coreAxis * speedCmPerTick / CORE_MOVE_AXIS);
+  return velocityCmPerTick * INPUT_HOLD_TICKS * WORLD_UNITS_PER_CM;
+}
+
+export function predictViewerPosition(target, displacement, heightAt) {
+  protocolAssert(
+    target &&
+    displacement &&
+    [
+      target.x,
+      target.y,
+      target.z,
+      target.altitudeCm,
+      displacement.x,
+      displacement.y,
+      displacement.z,
+    ]
+      .every(Number.isFinite) &&
+    typeof heightAt === 'function',
+    'invalid_prediction',
+    'Predicted viewer position is invalid.',
+  );
+  const x = target.x + displacement.x;
+  const z = target.z + displacement.z;
+  const groundDelta = heightAt(x, z) - heightAt(target.x, target.z);
+  protocolAssert(Number.isFinite(groundDelta), 'invalid_prediction', 'Predicted terrain height is invalid.');
+  const authoritativeAltitude = target.altitudeCm * WORLD_UNITS_PER_CM;
+  const predictedAltitude = clamp(
+    authoritativeAltitude + displacement.y,
+    PLAYER_MIN_ALTITUDE_CM * WORLD_UNITS_PER_CM,
+    PLAYER_MAX_ALTITUDE_CM * WORLD_UNITS_PER_CM,
+  );
+  return {
+    ...target,
+    x,
+    y: target.y + (predictedAltitude - authoritativeAltitude) + groundDelta,
+    z,
+    altitudeCm: predictedAltitude / WORLD_UNITS_PER_CM,
+  };
+}
+
+export function bilinearHeight(heights, width, cellSize, worldSize, x, z) {
+  protocolAssert(
+    heights instanceof Float32Array &&
+    Number.isInteger(width) &&
+    width >= 2 &&
+    heights.length >= width * width &&
+    Number.isFinite(cellSize) &&
+    cellSize > 0 &&
+    Number.isFinite(worldSize) &&
+    worldSize > 0 &&
+    Number.isFinite(x) &&
+    Number.isFinite(z),
+    'invalid_terrain',
+    'Terrain sampling inputs are invalid.',
+  );
+  if (x < 0 || z < 0 || x >= worldSize || z >= worldSize) return 0;
+  const gridX = clamp(x / cellSize, 0, width - 1);
+  const gridZ = clamp(z / cellSize, 0, width - 1);
+  const x0 = Math.floor(gridX);
+  const z0 = Math.floor(gridZ);
+  const x1 = Math.min(x0 + 1, width - 1);
+  const z1 = Math.min(z0 + 1, width - 1);
+  const amountX = gridX - x0;
+  const amountZ = gridZ - z0;
+  const top = heights[z0 * width + x0]
+    + (heights[z0 * width + x1] - heights[z0 * width + x0]) * amountX;
+  const bottom = heights[z1 * width + x0]
+    + (heights[z1 * width + x1] - heights[z1 * width + x0]) * amountX;
+  return top + (bottom - top) * amountZ;
+}
+
+export function nextPacedDeadline(previousDeadline, now, interval) {
+  protocolAssert(
+    Number.isFinite(previousDeadline) && Number.isFinite(now) && Number.isFinite(interval) && interval > 0,
+    'invalid_pacer',
+    'Input pacing values must be finite and positive.',
+  );
+  const scheduled = previousDeadline + interval;
+  return scheduled <= now ? now + interval : scheduled;
+}
+
+export function socketCloseMessage(code, reason = '') {
+  const safeReasons = new Map([
+    ['sustained input flood', 'The match rejected a sustained input flood. Reload before trying again.'],
+    ['join ticket replayed', 'This one-time match ticket was already used. Join the room again.'],
+  ]);
+  if (code === 1008 && safeReasons.has(reason)) return safeReasons.get(reason);
+  return new Map([
+    [1002, 'The match protocol was rejected. Reload after the client and server builds match.'],
+    [1003, 'The match rejected the binary input format.'],
+    [1008, 'The match rejected this connection for a policy reason. Join again; if it repeats, report the room code.'],
+    [4003, 'This 15-minute staging session ended. Choose Join to start a new test session.'],
+    [4001, 'This room session was opened in another tab. Join here again to take it over.'],
+  ]).get(code) ?? null;
+}
+
+function appendTemplate(
+  destination,
+  instanceCount,
+  template,
+  templateOrigin,
+  worldPosition,
+  yaw,
+  pitch = 0,
+) {
   const templateCount = template.length / INSTANCE_STRIDE;
   const capacity = destination.length / INSTANCE_STRIDE;
   if (instanceCount + templateCount > capacity) return instanceCount;
   const sine = Math.sin(yaw);
   const cosine = Math.cos(yaw);
+  const pitchSine = Math.sin(pitch);
+  const pitchCosine = Math.cos(pitch);
   for (let index = 0; index < templateCount; index += 1) {
     const source = index * INSTANCE_STRIDE;
     const target = (instanceCount + index) * INSTANCE_STRIDE;
     const localX = template[source] - templateOrigin[0];
     const localY = template[source + 1] - templateOrigin[1];
     const localZ = template[source + 2] - templateOrigin[2];
-    destination[target] = worldPosition[0] + localX * cosine + localZ * sine;
-    destination[target + 1] = worldPosition[1] + localY;
-    destination[target + 2] = worldPosition[2] - localX * sine + localZ * cosine;
+    const pitchedY = localY * pitchCosine + localZ * pitchSine;
+    const pitchedZ = -localY * pitchSine + localZ * pitchCosine;
+    destination[target] = worldPosition[0] + localX * cosine + pitchedZ * sine;
+    destination[target + 1] = worldPosition[1] + pitchedY;
+    destination[target + 2] = worldPosition[2] - localX * sine + pitchedZ * cosine;
     for (let field = 3; field < INSTANCE_STRIDE; field += 1) {
       destination[target + field] = template[source + field];
     }
     destination[target + 9] = template[source + 9] + yaw;
+    destination[target + 10] = template[source + 10] - pitch;
   }
   return instanceCount + templateCount;
 }
@@ -297,7 +520,7 @@ export function composeTemplate(template, templateOrigin, worldPosition, yaw) {
     'Template transform is invalid.',
   );
   const result = new Float32Array(template.length);
-  appendTemplate(result, 0, template, templateOrigin, worldPosition, yaw);
+  appendTemplate(result, 0, template, templateOrigin, worldPosition, yaw, 0);
   return result;
 }
 
@@ -363,8 +586,10 @@ export function wireYawToRenderRadians(yaw) {
   return Math.PI * 0.5 - wireYawToCoreRadians(yaw);
 }
 
-function coreRadiansToWireYaw(radians) {
-  return (Math.round(radians / (Math.PI * 2) * 0x1_0000) % 0x1_0000 + 0x1_0000) & 0xffff;
+export function yawAfterLookDelta(yaw, delta) {
+  integerIn(yaw, 0, 0xffff, 'yaw');
+  protocolAssert(Number.isFinite(delta), 'invalid_input', 'look delta must be finite.');
+  return (yaw + Math.round(delta) + 0x1_0000) & 0xffff;
 }
 
 function interpolateYaw(from, to, amount) {
@@ -406,6 +631,7 @@ function sampleTrack(track, time, duration) {
     y: track.previous.y + (track.target.y - track.previous.y) * amount,
     z: track.previous.z + (track.target.z - track.previous.z) * amount,
     yaw: interpolateYaw(track.previous.yaw, track.target.yaw, amount),
+    pitch: track.previous.pitch + (track.target.pitch - track.previous.pitch) * amount,
   };
 }
 
@@ -422,7 +648,6 @@ class MultiplayerApp {
     this.templateOrigin = [this.worldCenter, PREVIEW_Y, this.worldCenter];
     this.heights = new Float32Array(sim.memory.buffer, sim.heightPtr(), this.terrainWidth ** 2);
     this.templates = {
-      player: this.copyPreviewTemplate(PLAYER_SCENE),
       rival: this.copyPreviewTemplate(RIVAL_SCENE),
       firebolt: this.copyPreviewTemplate(FIREBOLT_SCENE),
     };
@@ -439,10 +664,14 @@ class MultiplayerApp {
     this.touchKeys = new Set();
     this.sequence = 1;
     this.yaw = 0;
+    this.pitch = 0;
     this.yawInitialized = false;
     this.castPulse = false;
     this.gamepadCastHeld = false;
-    this.latestInput = { x: 0, y: 0 };
+    this.latestInput = { x: 0, y: 0, vertical: 0 };
+    this.inputHistory = [];
+    this.acknowledgedInputSequence = 0;
+    this.reconciliation = { x: 0, y: 0, z: 0, from: nowMs() };
     this.touchAim = null;
     this.sentClocks = new Map();
     this.ws = null;
@@ -450,6 +679,7 @@ class MultiplayerApp {
     this.reconnectAttempt = 0;
     this.reconnectTimer = null;
     this.inputTimer = null;
+    this.inputDeadline = 0;
     this.joinedRoom = null;
     this.joinSlot = null;
     this.latestSnapshot = null;
@@ -458,7 +688,8 @@ class MultiplayerApp {
     this.protocolFailures = 0;
     this.lastError = null;
     this.interpolationMs = 1_000 / 32;
-    this.lastFrameAt = nowMs();
+    this.snapshotJitterMs = 0;
+    this.lastSnapshotAt = null;
     this.bindControls();
   }
 
@@ -488,20 +719,24 @@ class MultiplayerApp {
   }
 
   heightAt(x, z) {
-    if (x < 0 || z < 0 || x >= this.worldSize || z >= this.worldSize) return 0;
-    const column = clamp(Math.round(x / this.cellSize), 0, this.terrainWidth - 1);
-    const row = clamp(Math.round(z / this.cellSize), 0, this.terrainWidth - 1);
-    return this.heights[row * this.terrainWidth + column];
+    return bilinearHeight(
+      this.heights,
+      this.terrainWidth,
+      this.cellSize,
+      this.worldSize,
+      x,
+      z,
+    );
   }
 
-  worldPosition(xcm, zcm, clearance) {
+  worldPosition(xcm, ycm, zcm, clearance) {
     // The legacy render world uses decimetre-scale units: the 20-unit carpet
     // is roughly two metres long. The authoritative service speaks integer cm.
     // Do not clamp: the authoritative core has no arena clamp, so doing so in
     // presentation would make the visible player diverge from the server.
     const x = this.worldCenter + xcm * WORLD_UNITS_PER_CM;
     const z = this.worldCenter + zcm * WORLD_UNITS_PER_CM;
-    return { x, y: this.heightAt(x, z) + clearance, z };
+    return { x, y: this.heightAt(x, z) + clearance + ycm * WORLD_UNITS_PER_CM, z };
   }
 
   setConnection(state, message) {
@@ -597,6 +832,10 @@ class MultiplayerApp {
       this.setArenaRoom(room);
       this.latestSnapshot = null;
       this.latestSnapshotSeq = null;
+      this.sequence = 1;
+      this.inputHistory.length = 0;
+      this.acknowledgedInputSequence = 0;
+      this.reconciliation = { x: 0, y: 0, z: 0, from: nowMs() };
       this.playerTracks.clear();
       this.projectileTracks.clear();
       this.impacts.length = 0;
@@ -641,14 +880,20 @@ class MultiplayerApp {
     // room may restart its sequence counter while preserving the match.
     this.latestSnapshotSeq = null;
     this.yawInitialized = false;
+    this.inputHistory.length = 0;
+    this.acknowledgedInputSequence = 0;
+    this.reconciliation = { x: 0, y: 0, z: 0, from: nowMs() };
     this.seenEvents.clear();
     this.seenEventOrder.length = 0;
     this.rtt = null;
+    this.snapshotJitterMs = 0;
+    this.lastSnapshotAt = null;
+    this.interpolationMs = 1_000 / joined.snapshotHz;
     this.sentClocks.clear();
     let socket;
     try {
       socket = new WebSocket(joined.webSocketUrl, [
-        'aetherloom.v1',
+        'aetherloom.v2',
         `aetherloom.auth.${joined.ticket}`,
       ]);
     } catch (error) {
@@ -679,7 +924,7 @@ class MultiplayerApp {
         socket.close(1000, 'superseded');
         return;
       }
-      if (socket.protocol !== 'aetherloom.v1') {
+      if (socket.protocol !== 'aetherloom.v2') {
         socket.close(1002, 'subprotocol mismatch');
         return;
       }
@@ -715,12 +960,10 @@ class MultiplayerApp {
       if (generation !== this.joinGeneration || this.ws !== socket) return;
       this.ws = null;
       this.stopInput();
-      const terminal = new Map([
-        [1002, 'The match protocol was rejected. Reload after the client and server builds match.'],
-        [1003, 'The match rejected the binary input format.'],
-        [1008, 'The match closed this connection for a policy violation.'],
-        [4001, 'This room session was opened in another tab. Join here again to take it over.'],
-      ]).get(event.code);
+      if (event.code === 4003 && this.joinedRoom) {
+        this.clearResumeToken(this.joinedRoom);
+      }
+      const terminal = socketCloseMessage(event.code, event.reason);
       if (terminal) {
         this.ui.lobby.classList.remove('joined');
         this.ui.leave.hidden = true;
@@ -756,6 +999,8 @@ class MultiplayerApp {
     this.ws = null;
     this.latestSnapshot = null;
     this.latestSnapshotSeq = null;
+    this.inputHistory.length = 0;
+    this.acknowledgedInputSequence = 0;
     this.playerTracks.clear();
     this.projectileTracks.clear();
     this.impacts.length = 0;
@@ -774,13 +1019,25 @@ class MultiplayerApp {
 
   startInput(rate) {
     this.stopInput();
+    const interval = 1_000 / rate;
     this.sendInput();
-    this.inputTimer = setInterval(() => this.sendInput(), 1_000 / rate);
+    this.inputDeadline = nowMs() + interval;
+    const pace = () => {
+      if (this.inputTimer === null) return;
+      const now = nowMs();
+      if (now >= this.inputDeadline) {
+        this.sendInput();
+        this.inputDeadline = nextPacedDeadline(this.inputDeadline, now, interval);
+      }
+      this.inputTimer = setTimeout(pace, Math.max(1, this.inputDeadline - nowMs()));
+    };
+    this.inputTimer = setTimeout(pace, interval);
   }
 
   stopInput() {
-    clearInterval(this.inputTimer);
+    clearTimeout(this.inputTimer);
     this.inputTimer = null;
+    this.inputDeadline = 0;
   }
 
   sampleInput() {
@@ -788,6 +1045,14 @@ class MultiplayerApp {
       - (this.keys.has('a') || this.keys.has('arrowleft') || this.touchKeys.has('a') ? 1 : 0);
     let vertical = (this.keys.has('w') || this.keys.has('arrowup') || this.touchKeys.has('w') ? 1 : 0)
       - (this.keys.has('s') || this.keys.has('arrowdown') || this.touchKeys.has('s') ? 1 : 0);
+    let altitude = (this.keys.has(' ') || this.touchKeys.has('ascend') ? 1 : 0)
+      - (
+        this.keys.has('shift') ||
+        this.keys.has('control') ||
+        this.touchKeys.has('descend')
+          ? 1
+          : 0
+      );
     const pads = navigator.getGamepads?.() || [];
     const pad = Array.from(pads).find(Boolean);
     if (pad) {
@@ -798,8 +1063,16 @@ class MultiplayerApp {
         horizontal = padX;
         vertical = padY;
       }
-      this.yaw = (this.yaw - Math.round(dead(pad.axes[2] || 0) * 780) + 0x1_0000) & 0xffff;
-      const held = Boolean(pad.buttons[0]?.pressed || pad.buttons[7]?.pressed);
+      this.yaw = yawAfterLookDelta(this.yaw, dead(pad.axes[2] || 0) * 780);
+      this.pitch = clamp(
+        this.pitch - Math.round(dead(pad.axes[3] || 0) * 620),
+        -MAX_PITCH,
+        MAX_PITCH,
+      );
+      const controllerAltitude = Number(Boolean(pad.buttons[0]?.pressed))
+        - Number(Boolean(pad.buttons[1]?.pressed));
+      if (controllerAltitude !== 0) altitude = controllerAltitude;
+      const held = Boolean(pad.buttons[7]?.pressed);
       if (held && !this.gamepadCastHeld) this.castPulse = true;
       this.gamepadCastHeld = held;
     } else {
@@ -813,6 +1086,7 @@ class MultiplayerApp {
     return {
       x: clamp(Math.round(horizontal * 127), -127, 127),
       y: clamp(Math.round(vertical * 127), -127, 127),
+      vertical: clamp(Math.round(altitude * 127), -127, 127),
     };
   }
 
@@ -820,6 +1094,7 @@ class MultiplayerApp {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const localMovement = this.sampleInput();
     const movement = movementToWorld(localMovement.x, localMovement.y, this.yaw);
+    movement.vertical = localMovement.vertical;
     this.latestInput = movement;
     const cast = this.castPulse;
     this.castPulse = false;
@@ -829,12 +1104,24 @@ class MultiplayerApp {
       sequence: this.sequence,
       moveX: movement.x,
       moveY: movement.y,
+      moveVertical: movement.vertical,
       yaw: this.yaw,
+      pitch: clamp(Math.round(this.pitch / MAX_PITCH * 127), -127, 127),
       cast,
       clientClockMs: sentClock,
       snapshotAck: this.latestSnapshotSeq ?? 0,
     });
     this.sentClocks.set(sentClock, sentAt);
+    this.inputHistory.push({
+      sequence: this.sequence,
+      sentAt,
+      x: movement.x,
+      y: movement.vertical,
+      z: movement.y,
+    });
+    if (this.inputHistory.length > MAX_PREDICTION_HISTORY) {
+      this.inputHistory.splice(0, this.inputHistory.length - MAX_PREDICTION_HISTORY);
+    }
     for (const [value, recordedAt] of this.sentClocks) {
       if (sentAt - recordedAt > 10_000) this.sentClocks.delete(value);
     }
@@ -855,15 +1142,35 @@ class MultiplayerApp {
     }
     if (!isNewerSequence(snapshot.snapshotSeq, this.latestSnapshotSeq)) return;
     const receivedAt = nowMs();
+    const previousViewer = this.predictedViewer(receivedAt);
+    if (this.lastSnapshotAt !== null) {
+      const observedInterval = receivedAt - this.lastSnapshotAt;
+      const deviation = Math.abs(observedInterval - 1_000 / 32);
+      this.snapshotJitterMs = this.snapshotJitterMs * 0.82 + deviation * 0.18;
+      this.interpolationMs = clamp(
+        1_000 / 32 + this.snapshotJitterMs * 1.5,
+        1_000 / 32,
+        1_000 * 6 / 128,
+      );
+    }
+    this.lastSnapshotAt = receivedAt;
     this.latestSnapshotSeq = snapshot.snapshotSeq;
     this.latestSnapshot = snapshot;
+    this.acknowledgedInputSequence = snapshot.acknowledgedInputSequence;
+    if (this.acknowledgedInputSequence !== 0) {
+      this.inputHistory = this.inputHistory.filter((entry) =>
+        isNewerSequence(entry.sequence, this.acknowledgedInputSequence));
+    }
 
     for (const player of snapshot.players) {
-      const target = this.worldPosition(player.xcm, player.zcm, CARPET_CLEARANCE);
+      const target = this.worldPosition(player.xcm, player.ycm, player.zcm, CARPET_CLEARANCE);
       target.yaw = player.yaw;
+      target.pitch = player.pitch;
+      target.altitudeCm = player.ycm;
       this.updateTrack(this.playerTracks, player.slot, target, receivedAt);
       if (player.slot === snapshot.viewerSlot && !this.yawInitialized) {
         this.yaw = player.yaw;
+        this.pitch = player.pitch;
         this.yawInitialized = true;
       }
     }
@@ -871,17 +1178,14 @@ class MultiplayerApp {
     for (const slot of this.playerTracks.keys()) if (!liveSlots.has(slot)) this.playerTracks.delete(slot);
 
     for (const projectile of snapshot.projectiles) {
-      const target = this.worldPosition(projectile.xcm, projectile.zcm, PROJECTILE_CLEARANCE);
-      const previous = this.projectileTracks.get(projectile.entity)?.target;
-      if (previous && Math.hypot(target.x - previous.x, target.z - previous.z) > 0.001) {
-        target.yaw = coreRadiansToWireYaw(Math.atan2(
-          target.z - previous.z,
-          target.x - previous.x,
-        ));
-      } else {
-        const owner = snapshot.players.find((player) => player.slot === projectile.owner);
-        target.yaw = owner ? owner.yaw : 0;
-      }
+      const target = this.worldPosition(
+        projectile.xcm,
+        projectile.ycm,
+        projectile.zcm,
+        PROJECTILE_CLEARANCE,
+      );
+      target.yaw = projectile.yaw;
+      target.pitch = projectile.pitch;
       this.updateTrack(this.projectileTracks, projectile.entity, target, receivedAt);
     }
     const liveProjectiles = new Set(snapshot.projectiles.map((projectile) => projectile.entity));
@@ -899,6 +1203,28 @@ class MultiplayerApp {
       if (event.type === DAMAGE_EVENT_TYPE) this.spawnImpact(event, receivedAt);
     }
 
+    const reconciledViewer = this.rawPredictedViewer(receivedAt);
+    if (previousViewer && reconciledViewer) {
+      this.reconciliation = {
+        x: clamp(
+          previousViewer.x - reconciledViewer.x,
+          -MAX_RECONCILIATION_OFFSET,
+          MAX_RECONCILIATION_OFFSET,
+        ),
+        y: clamp(
+          previousViewer.y - reconciledViewer.y,
+          -MAX_RECONCILIATION_OFFSET,
+          MAX_RECONCILIATION_OFFSET,
+        ),
+        z: clamp(
+          previousViewer.z - reconciledViewer.z,
+          -MAX_RECONCILIATION_OFFSET,
+          MAX_RECONCILIATION_OFFSET,
+        ),
+        from: receivedAt,
+      };
+    }
+
     const echoedAt = snapshot.echoClock === 0 ? undefined : this.sentClocks.get(snapshot.echoClock);
     if (echoedAt !== undefined) {
       this.sentClocks.delete(snapshot.echoClock);
@@ -911,48 +1237,63 @@ class MultiplayerApp {
   }
 
   spawnImpact(event, time) {
-    const at = this.worldPosition(event.xcm, event.zcm, CARPET_CLEARANCE);
+    const at = this.worldPosition(event.xcm, event.ycm, event.zcm, CARPET_CLEARANCE);
     this.impacts.push({ eventId: event.eventId, at, bornAt: time });
     if (this.impacts.length > MAX_IMPACTS) this.impacts.splice(0, this.impacts.length - MAX_IMPACTS);
   }
 
-  predictedViewer(time) {
+  rawPredictedViewer(time) {
     if (!this.latestSnapshot) return null;
     const slot = this.latestSnapshot.viewerSlot;
     const track = this.playerTracks.get(slot);
-    const sampled = sampleTrack(track, time, this.interpolationMs);
-    if (!sampled) return null;
-    const elapsed = clamp((time - track.from) / 1_000, 0, MAX_PREDICTION_SECONDS);
-    const movement = this.latestInput || { x: 0, y: 0 };
-    let worldX = movement.x / 127;
-    let worldZ = movement.y / 127;
-    const length = Math.hypot(worldX, worldZ);
-    if (length > 1) {
-      worldX /= length;
-      worldZ /= length;
-    }
-    sampled.x += worldX * PREDICTION_SPEED * elapsed;
-    sampled.z += worldZ * PREDICTION_SPEED * elapsed;
-    sampled.y = this.heightAt(sampled.x, sampled.z) + CARPET_CLEARANCE;
-    sampled.yaw = this.yaw;
-    return sampled;
+    if (!track) return null;
+    const displacement = pendingInputDisplacement(this.inputHistory, time);
+    const predicted = predictViewerPosition(
+      track.target,
+      displacement,
+      (x, z) => this.heightAt(x, z),
+    );
+    predicted.yaw = this.yaw;
+    predicted.pitch = this.pitch;
+    return predicted;
+  }
+
+  reconciliationAt(time) {
+    const amount = Math.exp(-(time - this.reconciliation.from) / RECONCILIATION_DECAY_MS);
+    return {
+      x: this.reconciliation.x * amount,
+      y: this.reconciliation.y * amount,
+      z: this.reconciliation.z * amount,
+    };
+  }
+
+  predictedViewer(time) {
+    const predicted = this.rawPredictedViewer(time);
+    if (!predicted) return null;
+    const correction = this.reconciliationAt(time);
+    predicted.x += correction.x;
+    predicted.y += correction.y;
+    predicted.z += correction.z;
+    return predicted;
   }
 
   composeInstances(time) {
     let count = 0;
     if (this.latestSnapshot) {
       for (const player of this.latestSnapshot.players) {
-        const position = player.slot === this.latestSnapshot.viewerSlot
-          ? this.predictedViewer(time)
-          : sampleTrack(this.playerTracks.get(player.slot), time, this.interpolationMs);
+        // First-person presentation never submits the local carpet/rider to the
+        // world pass. Remote players remain ordinary authoritative instances.
+        if (player.slot === this.latestSnapshot.viewerSlot) continue;
+        const position = sampleTrack(this.playerTracks.get(player.slot), time, this.interpolationMs);
         if (!position) continue;
         count = appendTemplate(
           this.instances,
           count,
-          player.slot === this.latestSnapshot.viewerSlot ? this.templates.player : this.templates.rival,
+          this.templates.rival,
           this.templateOrigin,
           [position.x, position.y, position.z],
           wireYawToRenderRadians(position.yaw),
+          wirePitchToRadians(position.pitch),
         );
       }
       for (const projectile of this.latestSnapshot.projectiles) {
@@ -965,6 +1306,7 @@ class MultiplayerApp {
           this.templateOrigin,
           [position.x, position.y, position.z],
           wireYawToRenderRadians(position.yaw),
+          wirePitchToRadians(position.pitch),
         );
       }
     }
@@ -1037,20 +1379,7 @@ class MultiplayerApp {
         uz: 0,
       };
     }
-    const yaw = wireYawToCoreRadians(viewer.yaw);
-    const forwardX = Math.cos(yaw);
-    const forwardZ = Math.sin(yaw);
-    return {
-      ex: viewer.x - forwardX * 58,
-      ey: viewer.y + 34,
-      ez: viewer.z - forwardZ * 58,
-      cx: viewer.x + forwardX * 13,
-      cy: viewer.y + 2,
-      cz: viewer.z + forwardZ * 13,
-      ux: 0,
-      uy: 1,
-      uz: 0,
-    };
+    return firstPersonCamera(viewer);
   }
 
   render(time) {
@@ -1063,7 +1392,7 @@ class MultiplayerApp {
       this.instances,
       this.instanceCount,
       {
-        fov: 1.05,
+        fov: 1.232,
         time: time / 1_000,
         sun: [0.53, 0.72, 0.38],
         sunI: 1,
@@ -1092,7 +1421,11 @@ class MultiplayerApp {
   }
 
   bindControls() {
-    const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+    const movementKeys = new Set([
+      'w', 'a', 's', 'd',
+      'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+      ' ', 'shift', 'control',
+    ]);
     addEventListener('keydown', (event) => {
       if (event.target instanceof HTMLInputElement) return;
       const key = event.key.toLowerCase();
@@ -1100,7 +1433,7 @@ class MultiplayerApp {
         this.keys.add(key);
         event.preventDefault();
       }
-      if ((key === ' ' || key === 'f') && !event.repeat) {
+      if (key === 'f' && !event.repeat) {
         this.castPulse = true;
         event.preventDefault();
       }
@@ -1121,7 +1454,12 @@ class MultiplayerApp {
     });
     document.addEventListener('mousemove', (event) => {
       if (document.pointerLockElement === this.ui.canvas) {
-        this.yaw = (this.yaw - Math.round(event.movementX * 70) + 0x1_0000) & 0xffff;
+        this.yaw = yawAfterLookDelta(this.yaw, event.movementX * 70);
+        this.pitch = clamp(
+          this.pitch - Math.round(event.movementY * 70),
+          -MAX_PITCH,
+          MAX_PITCH,
+        );
       }
     });
     this.ui.canvas.addEventListener('mousedown', (event) => {
@@ -1139,15 +1477,18 @@ class MultiplayerApp {
     this.ui.canvas.addEventListener('pointerdown', (event) => {
       if (event.pointerType === 'mouse' || document.body.dataset.connection !== 'connected') return;
       event.preventDefault();
-      this.touchAim = { id: event.pointerId, x: event.clientX };
+      this.touchAim = { id: event.pointerId, x: event.clientX, y: event.clientY };
       this.ui.canvas.setPointerCapture?.(event.pointerId);
     });
     this.ui.canvas.addEventListener('pointermove', (event) => {
       if (!this.touchAim || this.touchAim.id !== event.pointerId) return;
       event.preventDefault();
       const delta = event.clientX - this.touchAim.x;
+      const deltaY = event.clientY - this.touchAim.y;
       this.touchAim.x = event.clientX;
-      this.yaw = (this.yaw - Math.round(delta * 95) + 0x1_0000) & 0xffff;
+      this.touchAim.y = event.clientY;
+      this.yaw = yawAfterLookDelta(this.yaw, delta * 95);
+      this.pitch = clamp(this.pitch - Math.round(deltaY * 95), -MAX_PITCH, MAX_PITCH);
     });
     const finishTouchAim = (event) => {
       if (this.touchAim?.id === event.pointerId) this.touchAim = null;
@@ -1156,7 +1497,7 @@ class MultiplayerApp {
     this.ui.canvas.addEventListener('pointercancel', finishTouchAim);
     this.ui.canvas.addEventListener('lostpointercapture', finishTouchAim);
 
-    for (const button of document.querySelectorAll('.touch-pad button')) {
+    for (const button of document.querySelectorAll('.touch-controls button[data-key]')) {
       const key = button.dataset.key;
       const press = (event) => {
         event.preventDefault();
@@ -1200,7 +1541,11 @@ class MultiplayerApp {
       playerCount: this.latestSnapshot?.playerCount ?? 0,
       tick: this.latestSnapshot?.tick ?? null,
       snapshotSeq: this.latestSnapshotSeq,
+      acknowledgedInputSequence: this.acknowledgedInputSequence,
       rttMs: this.rtt === null ? null : Math.round(this.rtt),
+      yaw: this.yaw,
+      pitch: this.pitch,
+      viewer: this.predictedViewer(nowMs()),
       malformedFrames: this.protocolFailures,
       instanceCount: this.instanceCount,
       particleCount: this.particleCount,
@@ -1222,10 +1567,19 @@ const testApi = {
   encodeInputFrame,
   decodeSnapshotFrame,
   composeTemplate,
+  bilinearHeight,
+  firstPersonCamera,
   isNewerSequence,
+  movementToWorld,
+  nextPacedDeadline,
+  predictedBrowserAxisDisplacement,
+  predictViewerPosition,
+  socketCloseMessage,
   wrappedClockDelta,
   normalizeControlPlane,
   validateRoom,
+  wirePitchToRadians,
+  yawAfterLookDelta,
   snapshot: () => app?.publicState() || {
     ready: false,
     connection: 'booting',

@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define AETHERLOOM_CLIENT_ABI_VERSION 1u
+#define AETHERLOOM_CLIENT_ABI_VERSION 2u
 
 #define AETHERLOOM_VENDOR_RESULT_OK 0u
 #define AETHERLOOM_VENDOR_RESULT_UNAVAILABLE 1u
@@ -101,11 +101,12 @@ typedef struct AetherloomVendorInputState {
     uint16_t action_flags;
     int16_t move_x;
     int16_t move_y;
+    int16_t move_vertical;
     uint16_t look_yaw;
     int16_t look_pitch;
     uint8_t requested_spell;
     uint8_t input_device;
-    uint8_t reserved[4];
+    uint8_t reserved[2];
 } AetherloomVendorInputState;
 
 typedef struct AetherloomVendorPlatformEvent {

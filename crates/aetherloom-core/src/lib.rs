@@ -38,7 +38,8 @@ pub use state::{
     PlayerSpawn, PlayerState, Pose, PoseFrame, RewindError, RngState, RngStreams,
     TickEvent, TickEventKind, TickEvents, WorldSeed, MAX_MATCH_ENTITIES,
     MAX_MATCH_TERRAIN_CHUNKS, MAX_REWIND_TICKS, MAX_SNAPSHOT_HISTORY_CAPACITY,
-    POSE_HISTORY_TICKS,
+    PLAYER_MAX_ALTITUDE_CM, PLAYER_MIN_ALTITUDE_CM, PLAYER_PLANAR_SPEED_CM_PER_TICK,
+    PLAYER_VERTICAL_SPEED_CM_PER_TICK, POSE_HISTORY_TICKS,
 };
 pub use terrain::{
     ChunkCoord, TerrainChunk, TerrainDeformationEvent, TerrainError, CELL_WORLD_CM,

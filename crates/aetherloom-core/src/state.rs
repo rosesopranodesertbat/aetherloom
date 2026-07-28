@@ -3,7 +3,7 @@ use core::fmt;
 
 use aetherloom_protocol::{
     CommandSet, Controller, EntityId, PlayerCommand, PlayerId, TeamId, ValidationError,
-    ACTION_CAST, ACTION_EXTRACT, AUTHORITATIVE_HZ, MAX_PLAYERS,
+    ACTION_CAST, ACTION_EXTRACT, AUTHORITATIVE_HZ, MAX_MOVE_AXIS, MAX_PLAYERS,
 };
 
 use crate::codec::checksum64;
@@ -13,15 +13,21 @@ use crate::rng::{
     DeterministicRng, AI_STREAM, COMBAT_STREAM, ENVIRONMENT_STREAM, GENERATION_STREAM,
 };
 use crate::terrain::{
-    deform, world_to_chunk_cell, ChunkCoord, TerrainChunk, TerrainDeformationEvent, TerrainError,
+    deform, height_cm_at, world_to_chunk_cell, ChunkCoord, TerrainChunk,
+    TerrainDeformationEvent, TerrainError,
 };
 use crate::{AuthoritativeCheckpoint, CheckpointError, SnapshotId};
 
-const MAX_INPUT_SPEED_CM_PER_TICK: i32 = 8;
+pub const PLAYER_PLANAR_SPEED_CM_PER_TICK: i32 = 8;
+pub const PLAYER_VERTICAL_SPEED_CM_PER_TICK: i32 = 5;
+pub const PLAYER_MIN_ALTITUDE_CM: i32 = 0;
+pub const PLAYER_MAX_ALTITUDE_CM: i32 = 4_300;
 const PLAYER_HEALTH: u16 = 100;
 const CAST_COOLDOWN_TICKS: u16 = AUTHORITATIVE_HZ as u16 / 4;
 const PROJECTILE_LIFETIME_TICKS: u16 = AUTHORITATIVE_HZ as u16 / 4;
 const PROJECTILE_SPEED_CM_PER_TICK: i16 = 20;
+const PROJECTILE_MUZZLE_FORWARD_CM: i32 = 14;
+const PROJECTILE_MUZZLE_HEIGHT_CM: i32 = 23;
 const PROJECTILE_HIT_RADIUS_CM: i64 = 75;
 /// Hard allocation ceiling for any match configuration or decoded checkpoint.
 pub const MAX_MATCH_ENTITIES: u32 = 65_536;
@@ -191,6 +197,7 @@ pub struct PlayerState {
     pub position_cm: [i32; 3],
     pub velocity_cm_per_tick: [i16; 3],
     pub yaw: u16,
+    pub pitch: i16,
     pub health: u16,
     pub cooldown_ticks: u16,
     pub inventory: Inventory,
@@ -209,6 +216,7 @@ impl PlayerState {
             position_cm: [0; 3],
             velocity_cm_per_tick: [0; 3],
             yaw: 0,
+            pitch: 0,
             health: 0,
             cooldown_ticks: 0,
             inventory: Inventory::default(),
@@ -277,6 +285,7 @@ pub struct Pose {
     pub entity_id: EntityId,
     pub position_cm: [i32; 3],
     pub yaw: u16,
+    pub pitch: i16,
     pub health: u16,
 }
 
@@ -520,6 +529,7 @@ impl MatchState {
             position_cm: spawn.position_cm,
             velocity_cm_per_tick: [0; 3],
             yaw: spawn.yaw,
+            pitch: 0,
             health: PLAYER_HEALTH,
             cooldown_ticks: 0,
             inventory: Inventory::default(),
@@ -563,6 +573,7 @@ impl MatchState {
         player.position_cm = spawn.position_cm;
         player.velocity_cm_per_tick = [0; 3];
         player.yaw = spawn.yaw;
+        player.pitch = 0;
         player.health = PLAYER_HEALTH;
         player.cooldown_ticks = 0;
         player.outcome = PlayerOutcome::Active;
@@ -774,6 +785,7 @@ impl MatchState {
             player.bot_next_sequence,
             move_x,
             move_y,
+            0,
             look_yaw,
             0,
             if cast { ACTION_CAST } else { 0 },
@@ -802,13 +814,28 @@ impl MatchState {
             }
 
             let velocity_x =
-                command.move_x() as i32 * MAX_INPUT_SPEED_CM_PER_TICK / 2_047;
+                command.move_x() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+                    / i32::from(MAX_MOVE_AXIS);
             let velocity_z =
-                command.move_y() as i32 * MAX_INPUT_SPEED_CM_PER_TICK / 2_047;
-            player.velocity_cm_per_tick = [velocity_x as i16, 0, velocity_z as i16];
+                command.move_y() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+                    / i32::from(MAX_MOVE_AXIS);
+            let requested_velocity_y =
+                command.move_vertical() as i32 * PLAYER_VERTICAL_SPEED_CM_PER_TICK
+                    / i32::from(MAX_MOVE_AXIS);
+            let next_y = player.position_cm[1]
+                .saturating_add(requested_velocity_y)
+                .clamp(PLAYER_MIN_ALTITUDE_CM, PLAYER_MAX_ALTITUDE_CM);
+            let velocity_y = next_y - player.position_cm[1];
+            player.velocity_cm_per_tick = [
+                velocity_x as i16,
+                velocity_y as i16,
+                velocity_z as i16,
+            ];
             player.position_cm[0] = player.position_cm[0].saturating_add(velocity_x);
+            player.position_cm[1] = next_y;
             player.position_cm[2] = player.position_cm[2].saturating_add(velocity_z);
             player.yaw = command.look_yaw();
+            player.pitch = command.look_pitch();
             let position = player.position_cm;
             let source_entity = player.entity_id;
             let team = player.team;
@@ -838,20 +865,34 @@ impl MatchState {
                 entity.position_cm = position;
                 entity.velocity_cm_per_tick = self.players[index].velocity_cm_per_tick;
                 entity.yaw = command.look_yaw();
+                entity.pitch = command.look_pitch();
             }
         }
 
         if should_cast {
-            let direction = direction_from_yaw(command.look_yaw());
+            let direction =
+                projectile_direction_q30(command.look_yaw(), command.look_pitch());
+            let velocity = projectile_velocity(direction, 0);
             let mut projectile = Entity::new(EntityKind::Projectile);
             projectile.owner = Some(player_id);
             projectile.team = team;
-            projectile.position_cm = position;
-            projectile.velocity_cm_per_tick = [
-                direction[0] * PROJECTILE_SPEED_CM_PER_TICK,
-                0,
-                direction[1] * PROJECTILE_SPEED_CM_PER_TICK,
+            // This is the same ray as the first-person eye: the projectile
+            // renderer has 23 cm less vertical clearance than the camera, and
+            // the eye is 14 cm forward of the player's render origin.
+            projectile.position_cm = [
+                position[0].saturating_add(scale_projectile_direction(
+                    direction[0],
+                    PROJECTILE_MUZZLE_FORWARD_CM,
+                )),
+                position[1].saturating_add(PROJECTILE_MUZZLE_HEIGHT_CM),
+                position[2].saturating_add(scale_projectile_direction(
+                    direction[2],
+                    PROJECTILE_MUZZLE_FORWARD_CM,
+                )),
             ];
+            projectile.velocity_cm_per_tick = velocity;
+            projectile.yaw = command.look_yaw();
+            projectile.pitch = command.look_pitch();
             projectile.health = 1;
             projectile.lifetime_ticks = PROJECTILE_LIFETIME_TICKS;
             let projectile_id = self.entities.spawn(projectile)?;
@@ -896,11 +937,21 @@ impl MatchState {
             let Some(mut projectile) = self.entities.get(projectile_id).copied() else {
                 continue;
             };
+            let elapsed_ticks =
+                PROJECTILE_LIFETIME_TICKS.saturating_sub(projectile.lifetime_ticks);
+            let direction = projectile_direction_q30(projectile.yaw, projectile.pitch);
+            projectile.velocity_cm_per_tick =
+                projectile_velocity(direction, elapsed_ticks);
             for axis in 0..3 {
                 projectile.position_cm[axis] = projectile.position_cm[axis]
                     .saturating_add(projectile.velocity_cm_per_tick[axis] as i32);
             }
             projectile.lifetime_ticks = projectile.lifetime_ticks.saturating_sub(1);
+            let terrain_height_cm = height_cm_at(&self.terrain, projectile.position_cm);
+            let hit_terrain = projectile.position_cm[1] <= terrain_height_cm;
+            if hit_terrain {
+                projectile.position_cm[1] = terrain_height_cm;
+            }
             if let Some(authoritative) = self.entities.get_mut(projectile_id) {
                 *authoritative = projectile;
             }
@@ -934,7 +985,7 @@ impl MatchState {
                 let damage = 18 + (self.combat_rng.next_u64() % 5) as u16;
                 self.apply_damage(projectile.owner, target, damage, events);
             }
-            if hit_player.is_some() || expired {
+            if hit_player.is_some() || hit_terrain || expired {
                 let _ = self.entities.remove(projectile_id);
                 events.events.push(self.next_event(
                     TickEventKind::EntityDespawned,
@@ -942,7 +993,7 @@ impl MatchState {
                     Some(projectile_id),
                     [0; 4],
                 ));
-                if expired {
+                if hit_terrain && hit_player.is_none() {
                     let (coord, cell_x, cell_y) = world_to_chunk_cell(projectile.position_cm);
                     let delta = -(3 + (self.environment_rng.next_u64() % 5) as i16);
                     let deformation = deform(
@@ -1053,6 +1104,7 @@ impl MatchState {
                 entity_id: entity.id,
                 position_cm: entity.position_cm,
                 yaw: entity.yaw,
+                pitch: entity.pitch,
                 health: entity.health,
             })
             .collect();
@@ -1165,15 +1217,74 @@ fn next_command_sequence(previous: u32) -> u32 {
     }
 }
 
-fn direction_from_yaw(yaw: u16) -> [i16; 2] {
-    match ((yaw as u32 + 4_096) / 8_192) & 7 {
-        0 => [1, 0],
-        1 => [1, 1],
-        2 => [0, 1],
-        3 => [-1, 1],
-        4 => [-1, 0],
-        5 => [-1, -1],
-        6 => [0, -1],
-        _ => [1, -1],
+const CORDIC_GAIN_INVERSE_Q30: i64 = 652_032_874;
+const CORDIC_ATAN_TURN_UNITS: [i32; 15] = [
+    8_192, 4_836, 2_555, 1_297, 651, 326, 163, 81, 41, 20, 10, 5, 3, 1, 1,
+];
+
+/// Deterministic fixed-point sine/cosine in binary turn units, where 65,536 is
+/// one complete turn. CORDIC keeps authoritative aiming identical across
+/// native, console, and Wasm targets without relying on platform libm.
+fn sin_cos_turn_units(raw_angle: i32) -> (i64, i64) {
+    let mut angle = (raw_angle + 32_768).rem_euclid(65_536) - 32_768;
+    let sign = if angle > 16_384 {
+        angle -= 32_768;
+        -1_i64
+    } else if angle < -16_384 {
+        angle += 32_768;
+        -1_i64
+    } else {
+        1_i64
+    };
+    let mut x = CORDIC_GAIN_INVERSE_Q30;
+    let mut y = 0_i64;
+    let mut remaining = angle;
+    for (shift, step) in CORDIC_ATAN_TURN_UNITS.iter().copied().enumerate() {
+        let previous_x = x;
+        let previous_y = y;
+        if remaining >= 0 {
+            x = previous_x - (previous_y >> shift);
+            y = previous_y + (previous_x >> shift);
+            remaining -= step;
+        } else {
+            x = previous_x + (previous_y >> shift);
+            y = previous_y - (previous_x >> shift);
+            remaining += step;
+        }
     }
+    (y * sign, x * sign)
+}
+
+fn round_shift_q30(value: i128) -> i64 {
+    const HALF: i128 = 1_i128 << 29;
+    if value >= 0 {
+        ((value + HALF) >> 30) as i64
+    } else {
+        -(((-value + HALF) >> 30) as i64)
+    }
+}
+
+fn projectile_direction_q30(yaw: u16, pitch: i16) -> [i64; 3] {
+    let (sin_yaw, cos_yaw) = sin_cos_turn_units(i32::from(yaw));
+    let (sin_pitch, cos_pitch) = sin_cos_turn_units(i32::from(pitch));
+    let horizontal_x = round_shift_q30(i128::from(cos_yaw) * i128::from(cos_pitch));
+    let horizontal_z = round_shift_q30(i128::from(sin_yaw) * i128::from(cos_pitch));
+    [horizontal_x, sin_pitch, horizontal_z]
+}
+
+fn projectile_velocity(direction_q30: [i64; 3], elapsed_ticks: u16) -> [i16; 3] {
+    let before_distance =
+        i128::from(PROJECTILE_SPEED_CM_PER_TICK) * i128::from(elapsed_ticks);
+    let after_distance =
+        i128::from(PROJECTILE_SPEED_CM_PER_TICK)
+            * i128::from(u32::from(elapsed_ticks) + 1);
+    direction_q30.map(|component| {
+        let before = round_shift_q30(i128::from(component) * before_distance);
+        let after = round_shift_q30(i128::from(component) * after_distance);
+        (after - before) as i16
+    })
+}
+
+fn scale_projectile_direction(direction_q30: i64, distance_cm: i32) -> i32 {
+    round_shift_q30(i128::from(direction_q30) * i128::from(distance_cm)) as i32
 }

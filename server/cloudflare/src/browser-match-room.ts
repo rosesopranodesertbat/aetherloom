@@ -4,11 +4,16 @@ import { browserMatchModule } from "./browser-match-module.ts";
 import { BrowserMatchSimulation } from "./browser-match-runtime.ts";
 import {
   BROWSER_MATCH_BOT_TAKEOVER_MS,
+  BROWSER_MATCH_INPUT_TOKEN_CAPACITY,
   BROWSER_MATCH_MAX_FRAME_BYTES,
   BROWSER_MATCH_MAX_PLAYERS,
   BROWSER_MATCH_RECONNECT_MS,
   BROWSER_MATCH_SNAPSHOT_HZ,
   BROWSER_MATCH_TICK_HZ,
+  advanceBrowserTickSchedule,
+  consumeBrowserInputToken,
+  isBrowserInputComponent,
+  shouldConsumeBrowserInput,
   type BrowserMatchClaim,
   type BrowserMatchClaimRequest,
   type BrowserMatchEnv,
@@ -53,23 +58,23 @@ interface PlayerRow extends Record<string, SqlStorageValue> {
   score: number;
 }
 
-const INPUT_FRAME_BYTES = 20;
-const INPUT_FRAME_VERSION = 1;
+const INPUT_FRAME_BYTES = 22;
+const INPUT_FRAME_VERSION = 2;
 const INPUT_FRAME_TYPE = 1;
-const SNAPSHOT_FRAME_VERSION = 1;
+const SNAPSHOT_FRAME_VERSION = 2;
 const SNAPSHOT_FRAME_TYPE = 2;
 const SNAPSHOT_HEADER_BYTES = 24;
-const SNAPSHOT_PLAYER_BYTES = 24;
-const SNAPSHOT_PROJECTILE_BYTES = 16;
-const SNAPSHOT_EVENT_BYTES = 16;
+const SNAPSHOT_PLAYER_BYTES = 30;
+const SNAPSHOT_PROJECTILE_BYTES = 24;
+const SNAPSHOT_EVENT_BYTES = 20;
 const MAX_SNAPSHOT_PROJECTILES = 32;
-const MAX_SNAPSHOT_EVENTS = 24;
-const MAX_INPUT_MESSAGES_PER_SECOND = 80;
+const MAX_SNAPSHOT_EVENTS = 8;
 const MAX_PENDING_INPUTS_PER_PLAYER = 4;
 const MAX_UNACKED_SNAPSHOTS = 8;
 const UNCONNECTED_CLAIM_MS = 15_000;
 const PLAYER_SESSION_MAX_MS = 15 * 60 * 1_000;
 const CLIENT_INPUT_TIMEOUT_MS = 5_000;
+const CLIENT_INPUT_HOLD_MS = 250;
 const ACTION_CAST = 1;
 const CORE_DAMAGE_EVENT = 4;
 const CORE_DEFEAT_EVENT = 5;
@@ -152,44 +157,74 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     message: string | ArrayBuffer,
   ): Promise<void> {
     if (typeof message === "string" || message.byteLength !== INPUT_FRAME_BYTES) {
-      webSocket.close(1003, "binary 20-byte input frames required");
+      webSocket.close(1003, "binary 22-byte input frames required");
       return;
     }
-    const attachment = socketAttachment(webSocket);
+    let attachment: SocketAttachment;
+    try {
+      attachment = socketAttachment(webSocket);
+    } catch {
+      webSocket.close(1011, "match session state invalid");
+      return;
+    }
     const now = Date.now();
-    if (now - attachment.rateWindowStartedAtMs >= 1_000) {
-      attachment.rateWindowStartedAtMs = now;
-      attachment.rateWindowMessages = 0;
-    }
-    attachment.rateWindowMessages += 1;
-    if (attachment.rateWindowMessages > MAX_INPUT_MESSAGES_PER_SECOND) {
-      webSocket.close(1008, "input rate exceeded");
-      return;
-    }
-
     const view = new DataView(message);
     if (
       view.getUint8(0) !== INPUT_FRAME_VERSION ||
       view.getUint8(1) !== INPUT_FRAME_TYPE ||
       view.getUint16(2, true) !== INPUT_FRAME_BYTES ||
-      view.getUint8(13) !== 0
+      view.getUint8(15) !== 0
     ) {
       webSocket.close(1003, "invalid input frame");
       return;
     }
-    const sequence = view.getUint32(4, true);
-    if (sequence === 0 || !sequenceIsNewer(sequence, attachment.lastSequence)) {
-      return;
-    }
-    const moveX = quantizeAxis(view.getInt8(8));
-    const moveY = quantizeAxis(view.getInt8(9));
-    const yaw = view.getUint16(10, true);
-    const actionFlags = view.getUint8(12);
+    const actionFlags = view.getUint8(14);
     if ((actionFlags & ~ACTION_CAST) !== 0) {
       webSocket.close(1003, "unsupported input action");
       return;
     }
-    const snapshotAck = view.getUint32(16, true);
+    const budget = consumeBrowserInputToken(
+      {
+        tokens: attachment.inputRateTokens,
+        updatedAtMs: attachment.inputRateUpdatedAtMs,
+        rejectedMessages: attachment.inputRateRejectedMessages,
+      },
+      now,
+    );
+    attachment.inputRateTokens = budget.tokens;
+    attachment.inputRateUpdatedAtMs = budget.updatedAtMs;
+    attachment.inputRateRejectedMessages = budget.rejectedMessages;
+    if (!budget.accepted) {
+      webSocket.serializeAttachment(attachment);
+      if (budget.shouldClose) webSocket.close(1008, "sustained input flood");
+      return;
+    }
+    const sequence = view.getUint32(4, true);
+    if (sequence === 0 || !sequenceIsNewer(sequence, attachment.lastSequence)) {
+      webSocket.serializeAttachment(attachment);
+      return;
+    }
+    const compactMoveX = view.getInt8(8);
+    const compactMoveY = view.getInt8(9);
+    const compactMoveVertical = view.getInt8(10);
+    const compactPitch = view.getInt8(11);
+    if (
+      ![
+        compactMoveX,
+        compactMoveY,
+        compactMoveVertical,
+        compactPitch,
+      ].every(isBrowserInputComponent)
+    ) {
+      webSocket.close(1003, "input component out of range");
+      return;
+    }
+    const moveX = quantizeAxis(compactMoveX);
+    const moveY = quantizeAxis(compactMoveY);
+    const moveVertical = quantizeAxis(compactMoveVertical);
+    const pitch = quantizePitch(compactPitch);
+    const yaw = view.getUint16(12, true);
+    const snapshotAck = view.getUint32(18, true);
     if (
       snapshotAck !== 0 &&
       (attachment.lastSentSnapshotSequence === 0 ||
@@ -206,12 +241,15 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       attachment.lastAckedSnapshotSequence = snapshotAck;
     }
     attachment.lastSequence = sequence;
-    attachment.clientClock = view.getUint16(14, true);
+    attachment.clientClock = view.getUint16(16, true);
     attachment.lastInputAtMs = now;
     attachment.pendingInputs.push({
+      sequence,
       moveX,
       moveY,
+      moveVertical,
       yaw,
+      pitch,
       cast: (actionFlags & ACTION_CAST) !== 0,
     });
     if (attachment.pendingInputs.length > MAX_PENDING_INPUTS_PER_PLAYER) {
@@ -378,7 +416,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       throw new ApiError(426, "websocket_required", "WebSocket upgrade required.");
     }
-    const protocol = publicWebSocketProtocol(request);
+    const protocol = publicWebSocketProtocol(request, "aetherloom.v2");
     const room = this.roomRow();
     if (room === undefined) {
       throw new ApiError(404, "match_not_found", "Browser match room was not found.");
@@ -456,14 +494,17 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       slot: player.slot,
       teamId: player.team_id,
       lastSequence: 0,
+      lastAppliedSequence: 0,
       clientClock: 0,
       lastAckedSnapshotSequence: 0,
       lastSentSnapshotSequence: 0,
-      rateWindowStartedAtMs: Date.now(),
-      rateWindowMessages: 0,
+      inputRateTokens: BROWSER_MATCH_INPUT_TOKEN_CAPACITY,
+      inputRateUpdatedAtMs: Date.now(),
+      inputRateRejectedMessages: 0,
       lastInputAtMs: Date.now(),
       sessionExpiresAtMs: player.claimed_at_ms + PLAYER_SESSION_MAX_MS,
       pendingInputs: [],
+      heldInput: null,
     } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server, [`slot:${player.slot}`]);
 
@@ -510,7 +551,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
 
   private ensureLoop(): void {
     if (this.timer !== undefined || this.ctx.getWebSockets().length === 0) return;
-    this.lastPulseAtMs = Date.now();
+    if (this.lastPulseAtMs === 0) this.lastPulseAtMs = Date.now();
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.pulse();
@@ -521,26 +562,31 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     try {
       if (this.ctx.getWebSockets().length === 0) {
         this.tickCredit = 0;
+        this.lastPulseAtMs = 0;
         return;
       }
       const now = Date.now();
       this.expireSessions(now);
       if (this.ctx.getWebSockets().length === 0) {
         this.tickCredit = 0;
+        this.lastPulseAtMs = 0;
         return;
       }
-      const elapsed = Math.max(0, Math.min(now - this.lastPulseAtMs, 250));
-      this.lastPulseAtMs = now;
-      this.tickCredit = Math.min(32, this.tickCredit + (elapsed * BROWSER_MATCH_TICK_HZ) / 1_000);
-      const ticks = Math.min(16, Math.floor(this.tickCredit));
-      this.tickCredit -= ticks;
+      const batch = advanceBrowserTickSchedule(
+        { tickCredit: this.tickCredit, lastPulseAtMs: this.lastPulseAtMs },
+        now,
+      );
+      this.lastPulseAtMs = batch.lastPulseAtMs;
+      this.tickCredit = batch.tickCredit;
 
       const simulation = this.ensureSimulation();
       this.activateDueBots(simulation, now);
       let snapshot = simulation.snapshot();
       const events: CoreEventSnapshot[] = [];
-      for (let index = 0; index < ticks; index += 1) {
-        if (index % 2 === 0) this.consumePendingInputs(simulation);
+      for (let index = 0; index < batch.ticks; index += 1) {
+        if (shouldConsumeBrowserInput(snapshot.tick)) {
+          this.consumePendingInputs(simulation, now);
+        }
         snapshot = simulation.advanceTick();
         events.push(...snapshot.events);
         this.recordDefeats(snapshot, snapshot.events);
@@ -563,23 +609,39 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       }
       this.simulation = undefined;
       this.tickCredit = 0;
+      this.lastPulseAtMs = 0;
       return;
     }
     this.ensureLoop();
   }
 
-  private consumePendingInputs(simulation: BrowserMatchSimulation): void {
+  private consumePendingInputs(simulation: BrowserMatchSimulation, now: number): void {
     for (const webSocket of this.ctx.getWebSockets()) {
       const attachment = socketAttachment(webSocket);
-      const sample = attachment.pendingInputs.shift();
-      if (sample === undefined) continue;
+      const pending = attachment.pendingInputs.shift();
+      const sample =
+        pending ??
+        (attachment.heldInput !== null &&
+        attachment.lastInputAtMs > now - CLIENT_INPUT_HOLD_MS
+          ? attachment.heldInput
+          : undefined);
+      if (sample === undefined) {
+        simulation.clearInput(attachment.slot);
+        continue;
+      }
       simulation.submitInput(
         attachment.slot,
         sample.moveX,
         sample.moveY,
+        sample.moveVertical,
         sample.yaw,
+        sample.pitch,
         sample.cast,
       );
+      if (pending !== undefined) {
+        attachment.lastAppliedSequence = pending.sequence;
+        attachment.heldInput = { ...pending, cast: false };
+      }
       webSocket.serializeAttachment(attachment);
     }
   }
@@ -699,8 +761,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       (this.roundResetTick === undefined ? 0 : 1) |
       (waiting ? 1 << 1 : 0);
     view.setUint16(18, matchFlags, true);
-    view.setUint16(20, 0, true);
-    view.setUint16(22, 0, true);
+    view.setUint32(20, attachment.lastAppliedSequence, true);
 
     const connected = this.connectedSlots();
     const byEntity = new Map(players.map((player) => [player.entityKey, player]));
@@ -715,12 +776,14 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         (connected.has(player.playerId) ? 1 << 2 : 0);
       view.setUint8(offset + 3, flags);
       view.setInt32(offset + 4, player.xCm, true);
-      view.setInt32(offset + 8, player.zCm, true);
-      view.setUint16(offset + 12, player.yaw, true);
-      view.setUint16(offset + 14, Math.max(0, player.health), true);
-      view.setUint16(offset + 16, 100, true);
-      view.setUint16(offset + 18, this.scores.get(player.playerId) ?? 0, true);
-      view.setUint32(offset + 20, entityHandle(player.entityKey), true);
+      view.setInt32(offset + 8, player.yCm, true);
+      view.setInt32(offset + 12, player.zCm, true);
+      view.setUint16(offset + 16, player.yaw, true);
+      view.setInt16(offset + 18, player.pitch, true);
+      view.setUint16(offset + 20, Math.max(0, player.health), true);
+      view.setUint16(offset + 22, 100, true);
+      view.setUint16(offset + 24, this.scores.get(player.playerId) ?? 0, true);
+      view.setUint32(offset + 26, entityHandle(player.entityKey), true);
       offset += SNAPSHOT_PLAYER_BYTES;
     }
     for (const projectile of projectiles) {
@@ -729,7 +792,10 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       view.setUint8(offset + 5, 0);
       view.setUint16(offset + 6, projectile.lifetimeTicks, true);
       view.setInt32(offset + 8, projectile.xCm, true);
-      view.setInt32(offset + 12, projectile.zCm, true);
+      view.setInt32(offset + 12, projectile.yCm, true);
+      view.setInt32(offset + 16, projectile.zCm, true);
+      view.setUint16(offset + 20, projectile.yaw, true);
+      view.setInt16(offset + 22, projectile.pitch, true);
       offset += SNAPSHOT_PROJECTILE_BYTES;
     }
     for (const event of events) {
@@ -743,7 +809,8 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       view.setUint8(offset + 6, target?.playerId ?? 255);
       view.setUint8(offset + 7, 0);
       view.setInt32(offset + 8, position?.xCm ?? 0, true);
-      view.setInt32(offset + 12, position?.zCm ?? 0, true);
+      view.setInt32(offset + 12, position?.yCm ?? 0, true);
+      view.setInt32(offset + 16, position?.zCm ?? 0, true);
       offset += SNAPSHOT_EVENT_BYTES;
     }
     try {
@@ -815,7 +882,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       try {
         slots.add(socketAttachment(webSocket).slot);
       } catch {
-        webSocket.close(1008, "invalid session attachment");
+        webSocket.close(1011, "match session state invalid");
       }
     }
     return slots;
@@ -840,11 +907,18 @@ function socketAttachment(webSocket: WebSocket): SocketAttachment {
     attachment.slot >= BROWSER_MATCH_MAX_PLAYERS ||
     !Number.isInteger(attachment.teamId) ||
     !Number.isInteger(attachment.lastSequence) ||
+    !Number.isInteger(attachment.lastAppliedSequence) ||
     !Number.isInteger(attachment.clientClock) ||
     !Number.isInteger(attachment.lastAckedSnapshotSequence) ||
     !Number.isInteger(attachment.lastSentSnapshotSequence) ||
-    !Number.isInteger(attachment.rateWindowStartedAtMs) ||
-    !Number.isInteger(attachment.rateWindowMessages) ||
+    !Number.isFinite(attachment.inputRateTokens) ||
+    attachment.inputRateTokens === undefined ||
+    attachment.inputRateTokens < 0 ||
+    attachment.inputRateTokens > BROWSER_MATCH_INPUT_TOKEN_CAPACITY ||
+    !Number.isInteger(attachment.inputRateUpdatedAtMs) ||
+    !Number.isInteger(attachment.inputRateRejectedMessages) ||
+    attachment.inputRateRejectedMessages === undefined ||
+    attachment.inputRateRejectedMessages < 0 ||
     !Number.isInteger(attachment.lastInputAtMs) ||
     attachment.lastInputAtMs === undefined ||
     attachment.lastInputAtMs <= 0 ||
@@ -853,23 +927,36 @@ function socketAttachment(webSocket: WebSocket): SocketAttachment {
     attachment.sessionExpiresAtMs <= 0 ||
     !Array.isArray(attachment.pendingInputs) ||
     attachment.pendingInputs.length > MAX_PENDING_INPUTS_PER_PLAYER ||
-    attachment.pendingInputs.some(
-      (sample) =>
-        typeof sample !== "object" ||
-        sample === null ||
-        !Number.isInteger(sample.moveX) ||
-        !Number.isInteger(sample.moveY) ||
-        !Number.isInteger(sample.yaw) ||
-        typeof sample.cast !== "boolean",
-    )
+    attachment.pendingInputs.some((sample) => !validPendingInput(sample)) ||
+    (attachment.heldInput !== null && !validPendingInput(attachment.heldInput))
   ) {
     throw new Error("Browser match socket attachment is invalid.");
   }
   return attachment as SocketAttachment;
 }
 
+function validPendingInput(sample: unknown): sample is SocketAttachment["pendingInputs"][number] {
+  if (typeof sample !== "object" || sample === null) return false;
+  const input = sample as Partial<SocketAttachment["pendingInputs"][number]>;
+  return (
+    Number.isInteger(input.sequence) &&
+    input.sequence !== undefined &&
+    input.sequence > 0 &&
+    Number.isInteger(input.moveX) &&
+    Number.isInteger(input.moveY) &&
+    Number.isInteger(input.moveVertical) &&
+    Number.isInteger(input.yaw) &&
+    Number.isInteger(input.pitch) &&
+    typeof input.cast === "boolean"
+  );
+}
+
 function quantizeAxis(value: number): number {
   return Math.max(-2_047, Math.min(2_047, Math.round((value * 2_047) / 127)));
+}
+
+function quantizePitch(value: number): number {
+  return Math.max(-16_384, Math.min(16_384, Math.round((value * 16_384) / 127)));
 }
 
 function sequenceIsNewer(candidate: number, previous: number): boolean {
@@ -895,6 +982,6 @@ function entityHandle(entityKey: string): number {
   // The browser slice caps the authoritative entity pool at 128, so its
   // network handle can retain the full slot plus 25 generation bits. This
   // prevents a reused dense slot from masquerading as an older entity while
-  // keeping the compact v1 browser record inside the 1,200-byte frame bound.
+  // keeping the compact v2 browser record inside the 1,200-byte frame bound.
   return ((generation << 7) | index) >>> 0;
 }

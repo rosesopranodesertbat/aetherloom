@@ -18,6 +18,8 @@ pub struct KeyboardMouseInput {
     pub move_right: bool,
     pub move_forward: bool,
     pub move_backward: bool,
+    pub move_up: bool,
+    pub move_down: bool,
     pub look_yaw_delta: i16,
     pub look_pitch_delta: i16,
     pub primary: bool,
@@ -88,6 +90,8 @@ impl ControllerButtons {
 pub struct ControllerInput {
     pub left_stick: [f32; 2],
     pub right_stick: [f32; 2],
+    /// Continuous flight lift axis in `-1.0..=1.0`.
+    pub vertical_axis: f32,
     pub buttons: ControllerButtons,
     pub requested_spell: Option<u8>,
 }
@@ -96,6 +100,7 @@ pub struct ControllerInput {
 pub struct MappedInput {
     pub move_x: i16,
     pub move_y: i16,
+    pub move_vertical: i16,
     /// One-shot pointer/mouse delta accumulated until the next prediction
     /// tick. It is applied once even if one render frame produces many ticks.
     pub look_yaw_delta: i16,
@@ -184,6 +189,10 @@ impl InputMapper {
                 ]
             })
             .unwrap_or([0.0, 0.0]);
+        let keyboard_vertical = keyboard.map(keyboard_vertical).unwrap_or(0.0);
+        let controller_vertical = controller
+            .map(|input| apply_deadzone(input.vertical_axis, self.movement_deadzone))
+            .unwrap_or(0.0);
         let movement = match self.mode {
             InputDeviceMode::KeyboardMouse => keyboard_move,
             InputDeviceMode::ControllerOnly => controller_move,
@@ -191,6 +200,13 @@ impl InputMapper {
                 choose_greater_magnitude(keyboard_move[0], controller_move[0]),
                 choose_greater_magnitude(keyboard_move[1], controller_move[1]),
             ],
+        };
+        let vertical = match self.mode {
+            InputDeviceMode::KeyboardMouse => keyboard_vertical,
+            InputDeviceMode::ControllerOnly => controller_vertical,
+            InputDeviceMode::Mixed => {
+                choose_greater_magnitude(keyboard_vertical, controller_vertical)
+            }
         };
 
         let keyboard_look = keyboard
@@ -235,6 +251,7 @@ impl InputMapper {
             MappedInput {
                 move_x: quantize_movement(movement[0]),
                 move_y: quantize_movement(movement[1]),
+                move_vertical: quantize_movement(vertical),
                 look_yaw_delta: keyboard_look[0],
                 look_pitch_delta: keyboard_look[1],
                 controller_yaw_per_tick: controller_look_per_tick[0],
@@ -294,6 +311,11 @@ fn keyboard_move(input: KeyboardMouseInput) -> [f32; 2] {
     let horizontal = i8::from(input.move_right) - i8::from(input.move_left);
     let vertical = i8::from(input.move_forward) - i8::from(input.move_backward);
     [horizontal as f32, vertical as f32]
+}
+
+fn keyboard_vertical(input: KeyboardMouseInput) -> f32 {
+    let vertical = i8::from(input.move_up) - i8::from(input.move_down);
+    vertical as f32
 }
 
 fn keyboard_action_flags(input: KeyboardMouseInput) -> u16 {

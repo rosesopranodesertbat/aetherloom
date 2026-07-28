@@ -286,12 +286,38 @@ fn input(
 }
 
 fn command(target_tick: u64, sequence: u32, move_x: i16) -> PlayerCommand {
-    PlayerCommand::new(target_tick, sequence, move_x, 0, 0, 0, 0, None).expect("valid command")
+    PlayerCommand::new(target_tick, sequence, move_x, 0, 0, 0, 0, 0, None)
+        .expect("valid command")
 }
 
 fn cast_command(target_tick: u64, sequence: u32, yaw: u16) -> PlayerCommand {
-    PlayerCommand::new(target_tick, sequence, 0, 0, yaw, 0, ACTION_CAST, Some(0))
+    PlayerCommand::new(
+        target_tick,
+        sequence,
+        0,
+        0,
+        0,
+        yaw,
+        0,
+        ACTION_CAST,
+        Some(0),
+    )
         .expect("valid cast")
+}
+
+fn terrain_cast_command(target_tick: u64, sequence: u32, yaw: u16) -> PlayerCommand {
+    PlayerCommand::new(
+        target_tick,
+        sequence,
+        0,
+        0,
+        0,
+        yaw,
+        -aetherloom_protocol::MAX_LOOK_PITCH,
+        ACTION_CAST,
+        Some(0),
+    )
+    .expect("valid terrain cast")
 }
 
 fn input_batch(
@@ -652,7 +678,12 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
     let mut scheduler = TickScheduler::new(ManualClock::default(), 128);
 
     process
-        .ingest_message(input_batch(0, peer(0), 1, vec![cast_command(0, 1, 0)]))
+        .ingest_message(input_batch(
+            0,
+            peer(0),
+            1,
+            vec![terrain_cast_command(0, 1, 0)],
+        ))
         .expect("first cast");
     run_tick(&mut process, &mut scheduler);
     let initial_keyframe = process
@@ -720,6 +751,13 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
         "terrain deformation effects must leave the server too"
     );
 
+    while process
+        .state()
+        .player(viewer)
+        .is_some_and(|player| player.cooldown_ticks != 0)
+    {
+        run_tick(&mut process, &mut scheduler);
+    }
     process.host_mut().sent.clear();
     let second_cast_tick = process.state().tick();
     process
@@ -727,7 +765,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
             0,
             peer(0),
             2,
-            vec![cast_command(second_cast_tick, 2, 0)],
+            vec![terrain_cast_command(second_cast_tick, 2, 0)],
         ))
         .expect("second cast after cooldown");
     run_tick(&mut process, &mut scheduler);
