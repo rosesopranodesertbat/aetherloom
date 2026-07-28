@@ -414,7 +414,7 @@ async function routeDemoBrowserWebSocket(
     buildHash: requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH"),
     inputPool: "browser",
   });
-  const protocol = publicWebSocketProtocol(request);
+  const protocol = publicWebSocketProtocol(request, "aetherloom.v2");
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${token}`);
   headers.set("sec-websocket-protocol", protocol);

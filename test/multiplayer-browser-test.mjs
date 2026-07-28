@@ -33,6 +33,14 @@ const browserMatchRoomSource = await readFile(
   new URL('../server/cloudflare/src/browser-match-room.ts', import.meta.url),
   'utf8',
 );
+const gatewaySource = await readFile(
+  new URL('../server/cloudflare/src/gateway.ts', import.meta.url),
+  'utf8',
+);
+const demoWebSocketRouteSource = gatewaySource.slice(
+  gatewaySource.indexOf('async function routeDemoBrowserWebSocket('),
+  gatewaySource.indexOf('async function advanceIsland('),
+);
 
 function snapshotFixture() {
   const byteLength = 24 + 2 * 30 + 24 + 20;
@@ -151,6 +159,10 @@ test('browser and authoritative host pin the same acknowledged input contract', 
   assert.match(browserMatchRoomSource, /view\.getUint32\(18, true\)/u);
   assert.match(browserMatchRoomSource, /const MAX_UNACKED_SNAPSHOTS = 8;/u);
   assert.match(browserMatchRoomSource, /outstanding >= MAX_UNACKED_SNAPSHOTS/u);
+  assert.match(
+    demoWebSocketRouteSource,
+    /publicWebSocketProtocol\(request, "aetherloom\.v2"\)/u,
+  );
 });
 
 test('snapshot decoder reads all compact records from an offset view', () => {
