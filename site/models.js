@@ -180,8 +180,11 @@ function previewHash(instances, particles, focus) {
 
 function validatePreview(scene, variant) {
   const variantCount = sim.previewVariantCount(scene.id);
-  if (variantCount !== 8) {
-    throw new Error(`Scene ${scene.id} reported ${variantCount} variants; expected 8.`);
+  const expectedVariantCount = scene.id === 25 ? 24 : 8;
+  if (variantCount !== expectedVariantCount) {
+    throw new Error(
+      `Scene ${scene.id} reported ${variantCount} variants; expected ${expectedVariantCount}.`,
+    );
   }
 
   const firstCount = sim.previewScene(scene.id, variant);

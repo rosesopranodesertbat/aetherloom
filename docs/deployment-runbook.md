@@ -61,9 +61,9 @@ has no `MATCH_CAPACITY_API`; normal matchmaking allocation therefore fails
 closed instead of silently falling back. The demo route is separately gated
 and cannot write progression, inventory, ratings, or settlement data.
 Public sources may open two new players per five-minute window; reconnects are
-separately throttled, rotate their credential, and cannot extend the absolute
-15-minute systems-test session. Deployment smoke uses an authenticated random
-room and therefore neither depends on nor consumes a public duel room.
+separately throttled, reuse their room-scoped credential, and cannot extend the
+absolute 15-minute systems-test session. Deployment smoke uses an authenticated
+random room and therefore neither depends on nor consumes a public duel room.
 
 After a successful proof, retain the bound version and one previous
 `aetherloom-browser-match-staging-<build>` Worker. Once its 15-minute session

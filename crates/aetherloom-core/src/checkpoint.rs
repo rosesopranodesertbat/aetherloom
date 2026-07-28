@@ -8,12 +8,12 @@ use crate::entity::{Entity, EntityKind, EntityPool};
 use crate::rng::DeterministicRng;
 use crate::state::{
     Inventory, MatchConfig, MatchState, PlayerOutcome, PlayerState, Pose, PoseFrame,
-    WorldSeed, POSE_HISTORY_TICKS,
+    WorldSeed, POSE_HISTORY_TICKS, SPELL_SLOT_COUNT,
 };
 use crate::terrain::{validate_chunks, ChunkCoord, TerrainChunk, TERRAIN_CELLS};
 
 pub const CHECKPOINT_MAGIC: [u8; 4] = *b"ALCP";
-pub const CHECKPOINT_VERSION: u16 = 2;
+pub const CHECKPOINT_VERSION: u16 = 3;
 const HEADER_BYTES: usize = 20;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 const NONE_U16: u16 = u16::MAX;
@@ -146,7 +146,9 @@ pub(crate) fn encode_authoritative_payload(
         writer.u16(player.yaw);
         writer.i16(player.pitch);
         writer.u16(player.health);
-        writer.u16(player.cooldown_ticks);
+        for cooldown in player.spell_cooldown_ticks {
+            writer.u16(cooldown);
+        }
         for value in player.inventory.loadout {
             writer.u16(value);
         }
@@ -270,7 +272,10 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
             return Err(CheckpointError::InvalidValue("player pitch"));
         }
         let health = reader.u16()?;
-        let cooldown_ticks = reader.u16()?;
+        let mut spell_cooldown_ticks = [0_u16; SPELL_SLOT_COUNT];
+        for cooldown in &mut spell_cooldown_ticks {
+            *cooldown = reader.u16()?;
+        }
         let mut loadout = [0_u16; 4];
         for value in &mut loadout {
             *value = reader.u16()?;
@@ -317,7 +322,7 @@ fn decode_authoritative_payload(payload: &[u8]) -> Result<MatchState, Checkpoint
             yaw,
             pitch,
             health,
-            cooldown_ticks,
+            spell_cooldown_ticks,
             inventory,
             outcome,
             last_sequence,

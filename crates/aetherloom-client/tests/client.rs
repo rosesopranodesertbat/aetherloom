@@ -454,6 +454,7 @@ fn local_prediction_updates_before_the_next_render_frame() {
             viewer,
             server_tick: 40,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: vec![ReplicatedEntity {
                 entity_id,
                 kind: EntityKind::Player,
@@ -486,7 +487,7 @@ fn local_prediction_updates_before_the_next_render_frame() {
         )
         .unwrap();
     assert_eq!(cadence.commands.len(), 1);
-    assert_eq!(replica.predicted_position_cm(), Some([108, 5, 200]));
+    assert_eq!(replica.predicted_position_cm(), Some([110, 6, 200]));
 }
 
 #[test]

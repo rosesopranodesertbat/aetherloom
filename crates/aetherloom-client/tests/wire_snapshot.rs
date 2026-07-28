@@ -38,6 +38,7 @@ fn wire_keyframes_and_deltas_drive_the_core_replica_with_server_tick() {
             snapshot_id: SnapshotId::new(1),
             viewer: viewer(),
             acknowledged_input_sequence: 7,
+            spell_cooldown_ticks: [0, 0, 0, 0, 0, 0, 0, 44, 0, 0, 0, 0, 0],
             entities: vec![entity(1, 100)],
             terrain_revisions: Vec::new(),
             terrain_chunks: Vec::new(),
@@ -47,6 +48,7 @@ fn wire_keyframes_and_deltas_drive_the_core_replica_with_server_tick() {
     assert_eq!(replica.server_tick(), 40);
     assert_eq!(replica.snapshot_id(), SnapshotId::new(1));
     assert_eq!(replica.entities()[0].position_cm, [100, 0, 20]);
+    assert_eq!(replica.spell_cooldown_ticks()[7], 44);
 
     let delta = MessageEnvelope::new(
         metadata(41),
@@ -55,6 +57,7 @@ fn wire_keyframes_and_deltas_drive_the_core_replica_with_server_tick() {
             baseline_id: SnapshotId::new(1),
             viewer: viewer(),
             acknowledged_input_sequence: 8,
+            spell_cooldown_ticks: [9, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0],
             entities: vec![entity(1, 125)],
             removed_entities: Vec::new(),
         }),
@@ -62,6 +65,8 @@ fn wire_keyframes_and_deltas_drive_the_core_replica_with_server_tick() {
     assert_eq!(apply_wire_snapshot(&mut replica, &delta), Ok(true));
     assert_eq!(replica.server_tick(), 41);
     assert_eq!(replica.entities()[0].position_cm, [125, 0, 20]);
+    assert_eq!(replica.spell_cooldown_ticks()[0], 9);
+    assert_eq!(replica.spell_cooldown_ticks()[7], 43);
 }
 
 #[test]
@@ -72,6 +77,7 @@ fn wire_bridge_rejects_unknown_archetypes_before_mutating_replica() {
             snapshot_id: SnapshotId::new(1),
             viewer: viewer(),
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: vec![entity(99, 0)],
             terrain_revisions: Vec::new(),
             terrain_chunks: Vec::new(),

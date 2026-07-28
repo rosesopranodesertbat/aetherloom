@@ -104,9 +104,10 @@ The core labels interest tiers; the host schedules them as follows:
 | Browser input batches | 64 Hz |
 | Browser snapshots | 32 Hz |
 
-The staging browser adapter uses the versioned `aetherloom.v2` compact
+The staging browser adapter uses the versioned `aetherloom.v3` compact
 WebSocket contract. Inputs include planar movement, continuous lift, yaw,
-pitch, cast intent, and the latest snapshot acknowledgement; snapshots echo
+pitch, cast intent, an authoritative spell identifier, and the latest snapshot
+acknowledgement; snapshots echo
 the last applied input sequence so the client can retain only unacknowledged
 prediction history. A drift-skipping 64 Hz pacer and a token-bucket admission
 budget tolerate normal event-loop and network batching without allowing an

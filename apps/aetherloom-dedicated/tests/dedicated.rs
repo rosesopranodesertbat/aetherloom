@@ -305,6 +305,11 @@ fn cast_command(target_tick: u64, sequence: u32, yaw: u16) -> PlayerCommand {
         .expect("valid cast")
 }
 
+fn mend_command(target_tick: u64, sequence: u32) -> PlayerCommand {
+    PlayerCommand::new(target_tick, sequence, 0, 0, 0, 0, 0, ACTION_CAST, Some(7))
+        .expect("valid Mend command")
+}
+
 fn terrain_cast_command(target_tick: u64, sequence: u32, yaw: u16) -> PlayerCommand {
     PlayerCommand::new(
         target_tick,
@@ -606,6 +611,34 @@ fn reliable_resync_emits_a_keyframe() {
 }
 
 #[test]
+fn cooldown_only_casts_emit_native_snapshot_deltas() {
+    let mut process = process(1, RecordingHost::accepting());
+    admit_players(&mut process, 1);
+    let mut scheduler = TickScheduler::new(ManualClock::default(), 8);
+    run_tick(&mut process, &mut scheduler);
+    process.host_mut().sent.clear();
+
+    process
+        .ingest_message(input_batch(0, peer(0), 1, vec![mend_command(1, 1)]))
+        .expect("Mend input");
+    run_tick(&mut process, &mut scheduler);
+
+    let cooldown_delta = process
+        .host()
+        .sent
+        .iter()
+        .filter(|packet| packet.delivery == DeliveryKind::Datagram)
+        .map(decode_sent)
+        .find_map(|envelope| match envelope.message {
+            Message::SnapshotDelta(delta) => Some(delta),
+            _ => None,
+        })
+        .expect("cooldown-only snapshot delta");
+    assert!(cooldown_delta.entities.is_empty());
+    assert_eq!(cooldown_delta.spell_cooldown_ticks[7], 896);
+}
+
+#[test]
 fn damage_events_leave_as_mtu_safe_redundant_datagrams_and_dedupe_client_side() {
     // This seed places player one on player zero's south-west firing line,
     // close enough for the deterministic projectile to collide.
@@ -656,16 +689,19 @@ fn damage_events_leave_as_mtu_safe_redundant_datagrams_and_dedupe_client_side() 
     let recovered = decode_sent(damage_packets[1]);
     assert_eq!(
         feed.apply(&recovered.message),
-        Ok(AuthoritativeFeedOutcome::EventsQueued(1))
+        Ok(AuthoritativeFeedOutcome::EventsQueued(2))
     );
     assert_eq!(
         feed.apply(&recovered.message),
         Ok(AuthoritativeFeedOutcome::Obsolete),
         "duplicate redundancy must not replay the hit effect"
     );
-    let hit = feed.pop_event().expect("recovered damage event");
-    assert_eq!(hit.kind, EventKind::DAMAGE);
-    assert!(hit.target.is_some());
+    let damage = feed.pop_event().expect("recovered damage event");
+    assert_eq!(damage.kind, EventKind::DAMAGE);
+    assert!(damage.target.is_some());
+    let impact = feed.pop_event().expect("recovered impact event");
+    assert_eq!(impact.kind, EventKind::HIT);
+    assert_eq!(impact.target, damage.target);
 }
 
 #[test]
@@ -754,7 +790,7 @@ fn reliable_terrain_deltas_converge_and_full_keyframe_repairs_a_gap() {
     while process
         .state()
         .player(viewer)
-        .is_some_and(|player| player.cooldown_ticks != 0)
+        .is_some_and(|player| player.max_cooldown_ticks() != 0)
     {
         run_tick(&mut process, &mut scheduler);
     }

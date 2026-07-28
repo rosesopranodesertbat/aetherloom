@@ -292,6 +292,7 @@ fn datagram_limit_is_enforced_on_encode_and_decode() {
         baseline_id: SnapshotId::new(4),
         viewer: PlayerId::new(0).unwrap(),
         acknowledged_input_sequence: 10,
+        spell_cooldown_ticks: [0; 13],
         entities: (0..32).map(entity).collect(),
         removed_entities: Vec::new(),
     };
@@ -321,6 +322,7 @@ fn small_snapshot_delta_round_trips_as_a_datagram() {
         baseline_id: SnapshotId::new(4),
         viewer: PlayerId::new(0).unwrap(),
         acknowledged_input_sequence: 10,
+        spell_cooldown_ticks: [0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 11, 12],
         entities: vec![entity(1), entity(2)],
         removed_entities: vec![EntityId::new(3, 1).unwrap()],
     };
@@ -337,6 +339,7 @@ fn snapshot_rejects_duplicate_entity_across_updated_and_removed_lists() {
         baseline_id: SnapshotId::new(1),
         viewer: PlayerId::new(0).unwrap(),
         acknowledged_input_sequence: 9,
+        spell_cooldown_ticks: [0; 13],
         entities: vec![repeated.clone()],
         removed_entities: vec![repeated.entity_id],
     };
@@ -353,6 +356,7 @@ fn snapshot_delta_requires_a_real_baseline() {
         baseline_id: SnapshotId::NONE,
         viewer: PlayerId::new(0).unwrap(),
         acknowledged_input_sequence: 9,
+        spell_cooldown_ticks: [0; 13],
         entities: vec![entity(1)],
         removed_entities: Vec::new(),
     };
@@ -371,6 +375,7 @@ fn reliable_keyframe_round_trips_and_rejects_datagram_channel() {
         snapshot_id: SnapshotId::new(55),
         viewer: PlayerId::new(3).unwrap(),
         acknowledged_input_sequence: 80,
+        spell_cooldown_ticks: [3; 13],
         entities: vec![entity(1), entity(2)],
         terrain_revisions: vec![
             aetherloom_protocol::ChunkRevision {
@@ -435,6 +440,7 @@ fn keyframe_requires_matching_complete_terrain_chunks() {
         snapshot_id: SnapshotId::new(1),
         viewer: PlayerId::new(0).unwrap(),
         acknowledged_input_sequence: 0,
+        spell_cooldown_ticks: [0; 13],
         entities: Vec::new(),
         terrain_revisions: vec![revision],
         terrain_chunks: Vec::new(),

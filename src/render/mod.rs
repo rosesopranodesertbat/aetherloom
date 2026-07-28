@@ -69,7 +69,9 @@ mod scenery;
 
 pub use mesh::MeshLibrary;
 pub use minimap::Minimap;
-pub(crate) use preview::{PREVIEW_SCENE_COUNT, PREVIEW_VARIANT_COUNT};
+pub(crate) use preview::{
+    preview_variant_count, PREVIEW_SCENE_COUNT, PREVIEW_VARIANT_COUNT,
+};
 
 impl World {
     // ---- buffer writers ----------------------------------------------------

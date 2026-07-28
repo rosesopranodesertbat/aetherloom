@@ -7,6 +7,17 @@
 <meta name="description" content="Aetherloom multiplayer systems test for the casual staging service.">
 <meta name="theme-color" content="#090c1b">
 <meta name="referrer" content="no-referrer">
+<script id="file-staging-handoff">
+(() => {
+  if (window.location.protocol !== 'file:') return;
+  const staging = new URL('https://staging.aetherloom-staging.pages.dev/multiplayer.html');
+  const room = new URL(window.location.href).searchParams.get('room')?.trim().toLowerCase();
+  if (/^duel-(?:0[1-9]|[12][0-9]|3[0-2])$/u.test(room || '')) {
+    staging.searchParams.set('room', room);
+  }
+  window.location.replace(staging.href);
+})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Spectral:wght@400;500&display=swap" rel="stylesheet">
@@ -317,6 +328,50 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   padding: 2px 5px;
   font: inherit;
 }
+.spellbar {
+  position: fixed;
+  z-index: 7;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  display: none;
+  align-items: stretch;
+  gap: 7px;
+  transform: translateX(-50%);
+}
+body[data-connection="connected"] .spellbar { display: flex; }
+.spell {
+  min-width: 112px;
+  min-height: 46px;
+  padding: 6px 11px;
+  border: 1px solid rgba(242, 213, 128, .3);
+  background: rgba(7, 10, 22, .82);
+  color: #d7deef;
+  font: 700 11px/1.15 var(--display);
+  letter-spacing: .035em;
+  backdrop-filter: blur(10px);
+}
+.spell kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  margin-right: 6px;
+  border: 1px solid rgba(242, 213, 128, .32);
+  color: var(--gold);
+  font: 700 9px/1.5 var(--mono);
+}
+.spell.selected {
+  border-color: rgba(242, 213, 128, .88);
+  background: linear-gradient(rgba(89, 58, 13, .9), rgba(35, 27, 18, .9));
+  color: #fff0bd;
+  box-shadow: 0 0 18px rgba(229, 167, 60, .22);
+}
+.spellset-note {
+  align-self: center;
+  width: 104px;
+  color: rgba(215, 222, 239, .68);
+  font: 9px/1.3 var(--mono);
+  text-transform: uppercase;
+}
 .touch-controls {
   position: fixed;
   z-index: 12;
@@ -403,6 +458,7 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   .stats { top: auto; bottom: max(18px, env(safe-area-inset-bottom)); grid-template-columns: repeat(2, 72px); }
   .stat { padding: 7px 8px; }
   .lobby.joined { bottom: 132px; width: min(360px, calc(100vw - 36px)); }
+  .spellbar { bottom: 78px; }
   .controls-hint { display: none; }
 }
 @media (pointer: coarse), (max-width: 700px) {
@@ -433,6 +489,12 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
   .lobby.joined .room-row { display: none; }
   .lobby.joined .lobby-actions { display: block; }
   .lobby.joined #leave { min-height: 44px; padding: 0 13px; }
+  .spellbar {
+    top: 170px;
+    bottom: auto;
+  }
+  .spell { min-width: 94px; min-height: 40px; }
+  .spellset-note { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -475,7 +537,12 @@ body[data-connection="connected"] .crosshair { opacity: .82; }
 </main>
 
 <div class="crosshair" aria-hidden="true"></div>
-<div class="controls-hint"><kbd>W A S D</kbd> fly &nbsp; <kbd>Space</kbd> climb &nbsp; <kbd>Shift</kbd> dive &nbsp; <kbd>Mouse</kbd> aim &nbsp; <kbd>Click</kbd> fireball</div>
+<div class="controls-hint"><kbd>W A S D</kbd> fly &nbsp; <kbd>Space</kbd> climb &nbsp; <kbd>Shift</kbd> dive &nbsp; <kbd>Mouse</kbd> aim &nbsp; <kbd>Click</kbd> cast &nbsp; <kbd>1 / 8</kbd> spell</div>
+<div class="spellbar" id="spellbar" aria-label="Authoritative staging duel spells">
+  <button class="spell selected" type="button" data-spell="0"><kbd>1</kbd>Firebolt</button>
+  <button class="spell" type="button" data-spell="7"><kbd>8</kbd>Mend</button>
+  <span class="spellset-note">2 of 13 campaign spells are authoritative here</span>
+</div>
 
 <div class="touch-controls" aria-label="Touch flight controls">
   <div class="touch-pad">

@@ -55,7 +55,7 @@ Native admission is deliberately split into two trust domains:
    pinning those claims to match, build, epoch, region, input pool, expiry,
    one-use nonce, capacity, account, player, and team.
 6. Gameplay is authorized by the resulting `PeerId -> PlayerId` binding.
-   Protocol version 3 input batches contain commands only—no unsigned account,
+   Protocol version 4 input batches contain commands only—no unsigned account,
    player, or team identity.
 
 The native process should use `NoDirectTicketVerifier`, which disables the

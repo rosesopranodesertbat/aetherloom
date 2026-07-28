@@ -202,6 +202,13 @@ export async function sha256Hex128(value: string | ArrayBuffer): Promise<string>
     .join("");
 }
 
+export async function demoResumeToken(room: string, joinNonce: string): Promise<string> {
+  const digest = await sha256Base64Url(
+    `aetherloom-demo-resume:v1:${room}:${joinNonce}`,
+  );
+  return `demo_resume_${digest.slice(0, 24)}`;
+}
+
 export function randomToken(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   return `${prefix}_${bytesToBase64Url(bytes)}`;

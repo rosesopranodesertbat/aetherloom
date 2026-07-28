@@ -86,6 +86,7 @@ interface ProfileView {
 interface DemoJoinBody {
   room: string;
   resumeToken?: string;
+  joinNonce?: string;
 }
 
 interface DemoClaim {
@@ -96,10 +97,17 @@ interface DemoClaim {
   teamId: number;
   resumeToken: string;
   playerCount: number;
+  createdPlayer: boolean;
+}
+
+interface DemoAdmission {
+  sourceKey: string;
+  windowStartedAtMs: number;
 }
 
 const PUBLIC_DEMO_ROOM_RE = /^duel-(?:0[1-9]|[12][0-9]|3[0-2])$/u;
 const SMOKE_DEMO_ROOM_RE = /^smoke-[0-9a-f]{32}$/u;
+const DEMO_JOIN_NONCE_RE = /^demo_join_[A-Za-z0-9_-]{24}$/u;
 const DEMO_JOIN_WINDOW_MS = 5 * 60 * 1_000;
 const DEMO_NEW_CLAIMS_PER_WINDOW = 2;
 const DEMO_RESUMES_PER_WINDOW = 20;
@@ -251,10 +259,24 @@ async function joinMultiplayerDemo(
     body.resumeToken === undefined
       ? undefined
       : requireString(body.resumeToken, "resumeToken", 128);
-  const buildHash = requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH");
-  if (!deploymentSmoke) {
-    await enforceDemoAdmission(request, env, buildHash, resumeToken !== undefined);
+  const joinNonce =
+    body.joinNonce === undefined
+      ? undefined
+      : requireString(body.joinNonce, "joinNonce", 64);
+  if (
+    (resumeToken === undefined && !DEMO_JOIN_NONCE_RE.test(joinNonce ?? "")) ||
+    (resumeToken !== undefined && joinNonce !== undefined)
+  ) {
+    throw new ApiError(
+      400,
+      "invalid_join_attempt",
+      "A fresh join requires one valid join nonce; a resume must omit it.",
+    );
   }
+  const buildHash = requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH");
+  const admission = deploymentSmoke
+    ? undefined
+    : await enforceDemoAdmission(request, env, buildHash, resumeToken !== undefined);
   const matchId = await sha256Hex128(`aetherloom-demo:${buildHash}:${room}`);
   const claimResponse = await env.BROWSER_MATCH_ORIGIN!.fetch(
     new Request("https://browser-match.internal/v1/demo/claims", {
@@ -265,12 +287,29 @@ async function joinMultiplayerDemo(
         matchId,
         buildHash,
         ...(resumeToken === undefined ? {} : { resumeToken }),
+        ...(joinNonce === undefined ? {} : { joinNonce }),
       }),
     }),
   );
-  if (!claimResponse.ok) return claimResponse;
+  if (!claimResponse.ok) {
+    if (
+      admission !== undefined &&
+      claimResponse.status >= 400 &&
+      claimResponse.status < 500
+    ) {
+      await refundDemoAdmission(env, admission);
+    }
+    return claimResponse;
+  }
   const rawClaim = await readJson<DemoClaim>(claimResponse, 4_096);
   assertObject(rawClaim, "browser match claim");
+  if (typeof rawClaim.createdPlayer !== "boolean") {
+    throw new ApiError(
+      502,
+      "browser_match_claim_invalid",
+      "The browser match service returned an invalid admission result.",
+    );
+  }
   const claim: DemoClaim = {
     matchId: requireHex128(rawClaim.matchId, "claim matchId"),
     matchEpoch: requireInteger(
@@ -284,6 +323,7 @@ async function joinMultiplayerDemo(
     teamId: requireInteger(rawClaim.teamId, "claim teamId", 0, 7),
     resumeToken: requireString(rawClaim.resumeToken, "claim resumeToken", 128),
     playerCount: requireInteger(rawClaim.playerCount, "claim playerCount", 1, 8),
+    createdPlayer: rawClaim.createdPlayer,
   };
   if (claim.matchId !== matchId) {
     throw new ApiError(
@@ -291,6 +331,13 @@ async function joinMultiplayerDemo(
       "browser_match_claim_mismatch",
       "The browser match service returned a claim for a different match.",
     );
+  }
+  if (
+    admission !== undefined &&
+    resumeToken === undefined &&
+    !claim.createdPlayer
+  ) {
+    await refundDemoAdmission(env, admission);
   }
 
   const now = Math.floor(Date.now() / 1_000);
@@ -344,7 +391,7 @@ async function enforceDemoAdmission(
   env: Env,
   buildHash: string,
   resume: boolean,
-): Promise<void> {
+): Promise<DemoAdmission> {
   let source = request.headers.get("cf-connecting-ip");
   if (env.ENVIRONMENT === "local" && source === null) source = "local-development";
   if (source === null || source.length < 2 || source.length > 64) {
@@ -374,14 +421,16 @@ async function enforceDemoAdmission(
          ELSE min(demo_join_limits.claim_count + 1, ?4)
        END,
        updated_at_ms = excluded.updated_at_ms
-     RETURNING claim_count`,
+     RETURNING claim_count, window_started_at_ms`,
   )
     .bind(sourceKey, now, cutoff, limit + 1)
-    .first<{ claim_count: number }>();
+    .first<{ claim_count: number; window_started_at_ms: number }>();
   if (
     result === null ||
     !Number.isInteger(result.claim_count) ||
-    result.claim_count < 1
+    result.claim_count < 1 ||
+    !Number.isInteger(result.window_started_at_ms) ||
+    result.window_started_at_ms < 0
   ) {
     throw new Error("Demo admission limiter returned an invalid result.");
   }
@@ -393,6 +442,32 @@ async function enforceDemoAdmission(
         ? "This connection is reconnecting too frequently. Wait before trying again."
         : "This connection has already opened two new staging players. Reuse an existing tab or wait five minutes.",
     );
+  }
+  return {
+    sourceKey,
+    windowStartedAtMs: result.window_started_at_ms,
+  };
+}
+
+async function refundDemoAdmission(
+  env: Env,
+  admission: DemoAdmission,
+): Promise<void> {
+  try {
+    await env.CONTROL_DB.prepare(
+      `UPDATE demo_join_limits
+       SET claim_count = max(claim_count - 1, 0),
+           updated_at_ms = ?3
+       WHERE source_key = ?1
+         AND window_started_at_ms = ?2
+         AND claim_count > 0`,
+    )
+      .bind(admission.sourceKey, admission.windowStartedAtMs, Date.now())
+      .run();
+  } catch (error) {
+    // A failed claim must remain the primary response. Ambiguous limiter
+    // failures are surfaced in Worker logs and never mint extra capacity.
+    console.error("Could not refund rejected demo admission.", { error });
   }
 }
 
@@ -414,7 +489,7 @@ async function routeDemoBrowserWebSocket(
     buildHash: requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH"),
     inputPool: "browser",
   });
-  const protocol = publicWebSocketProtocol(request, "aetherloom.v2");
+  const protocol = publicWebSocketProtocol(request, "aetherloom.v3");
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${token}`);
   headers.set("sec-websocket-protocol", protocol);

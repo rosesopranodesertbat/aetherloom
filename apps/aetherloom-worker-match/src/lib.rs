@@ -11,9 +11,10 @@ use aetherloom_protocol::MAX_SPELL_ID;
 
 pub const BRIDGE_MAX_PLAYERS: usize = 8;
 pub const SNAPSHOT_MAGIC: i32 = 0x314d_4c41;
-pub const SNAPSHOT_ABI_VERSION: i32 = 2;
+pub const SNAPSHOT_ABI_VERSION: i32 = 3;
 pub const SNAPSHOT_HEADER_WORDS: usize = 16;
-pub const SNAPSHOT_PLAYER_WORDS: usize = 16;
+pub const SNAPSHOT_SPELL_COOLDOWN_WORDS: usize = 13;
+pub const SNAPSHOT_PLAYER_WORDS: usize = 15 + SNAPSHOT_SPELL_COOLDOWN_WORDS;
 pub const SNAPSHOT_PROJECTILE_WORDS: usize = 15;
 pub const SNAPSHOT_EVENT_WORDS: usize = 13;
 pub const INPUT_HOLD_TICKS: u8 = 2;
@@ -259,8 +260,7 @@ impl WorkerMatch {
         let input = LatestInput {
             move_x: i16::try_from(move_x).map_err(|_| BridgeError::InvalidInput)?,
             move_y: i16::try_from(move_y).map_err(|_| BridgeError::InvalidInput)?,
-            move_vertical: i16::try_from(move_vertical)
-                .map_err(|_| BridgeError::InvalidInput)?,
+            move_vertical: i16::try_from(move_vertical).map_err(|_| BridgeError::InvalidInput)?,
             look_yaw: u16::try_from(look_yaw).map_err(|_| BridgeError::InvalidInput)?,
             look_pitch: i16::try_from(look_pitch).map_err(|_| BridgeError::InvalidInput)?,
             action_flags: u16::try_from(action_flags).map_err(|_| BridgeError::InvalidInput)?,
@@ -332,7 +332,7 @@ impl WorkerMatch {
             snapshot.push(i32::from(player.yaw));
             snapshot.push(i32::from(player.pitch));
             snapshot.push(i32::from(player.health));
-            snapshot.push(i32::from(player.cooldown_ticks));
+            snapshot.extend(player.spell_cooldown_ticks.iter().copied().map(i32::from));
             snapshot.push(player.outcome as i32);
         }
 
@@ -642,7 +642,7 @@ mod tests {
         instance.advance_tick().unwrap();
         instance.advance_tick().unwrap();
         let player = instance.state.player(PlayerId::new(0).unwrap()).unwrap();
-        assert_eq!(player.position_cm, [-234, 0, 0]);
+        assert_eq!(player.position_cm, [-230, 0, 0]);
         assert_eq!(player.last_accepted_sequence(), Some(2));
         let stationary = player.position_cm;
         assert_eq!(header_tick(&instance.snapshot), 2);
@@ -663,27 +663,18 @@ mod tests {
     }
 
     #[test]
-    fn vertical_input_and_pitch_reach_the_version_two_player_snapshot() {
+    fn vertical_input_and_pitch_reach_the_version_three_player_snapshot() {
         let mut instance = WorkerMatch::new(12).unwrap();
         instance.add_player(0, 0, Controller::Human).unwrap();
         instance
-            .submit_input(
-                0,
-                0,
-                0,
-                i32::from(MAX_MOVE_AXIS),
-                1_234,
-                2_345,
-                0,
-                -1,
-            )
+            .submit_input(0, 0, 0, i32::from(MAX_MOVE_AXIS), 1_234, 2_345, 0, -1)
             .unwrap();
 
         instance.advance_tick().unwrap();
         let offset = instance.snapshot[12] as usize;
-        assert_eq!(instance.snapshot[7], 16);
-        assert_eq!(instance.snapshot[offset + 6], 5);
-        assert_eq!(instance.snapshot[offset + 9], 5);
+        assert_eq!(instance.snapshot[7], SNAPSHOT_PLAYER_WORDS as i32);
+        assert_eq!(instance.snapshot[offset + 6], 6);
+        assert_eq!(instance.snapshot[offset + 9], 6);
         assert_eq!(instance.snapshot[offset + 11], 1_234);
         assert_eq!(instance.snapshot[offset + 12], 2_345);
 
@@ -691,8 +682,33 @@ mod tests {
         instance.advance_tick().unwrap();
         let player = instance.state.player(PlayerId::new(0).unwrap()).unwrap();
         assert_eq!(player.pitch, 2_345);
-        assert_eq!(player.position_cm[1], 10);
+        assert_eq!(player.position_cm[1], 12);
         assert_eq!(player.velocity_cm_per_tick[1], 0);
+    }
+
+    #[test]
+    fn player_snapshot_keeps_each_spell_cooldown_in_its_own_slot() {
+        let mut instance = WorkerMatch::new(13).unwrap();
+        instance.add_player(0, 0, Controller::Human).unwrap();
+        instance
+            .submit_input(0, 0, 0, 0, 0, 0, i32::from(ACTION_CAST), 0)
+            .unwrap();
+        instance.advance_tick().unwrap();
+        instance
+            .submit_input(0, 0, 0, 0, 0, 0, i32::from(ACTION_CAST), 7)
+            .unwrap();
+        instance.advance_tick().unwrap();
+
+        let offset = instance.snapshot[12] as usize;
+        let cooldowns =
+            &instance.snapshot[offset + 14..offset + 14 + SNAPSHOT_SPELL_COOLDOWN_WORDS];
+        assert_eq!(cooldowns[0], 35);
+        assert_eq!(cooldowns[7], 896);
+        assert!(cooldowns
+            .iter()
+            .enumerate()
+            .all(|(spell, cooldown)| spell == 0 || spell == 7 || *cooldown == 0));
+        assert_eq!(instance.snapshot[offset + SNAPSHOT_PLAYER_WORDS - 1], 1);
     }
 
     #[test]

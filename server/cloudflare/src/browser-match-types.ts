@@ -1,4 +1,5 @@
 export const BROWSER_MATCH_MAX_PLAYERS = 8;
+export const BROWSER_MATCH_SPELL_SLOTS = 13;
 export const BROWSER_MATCH_TICK_HZ = 128;
 export const BROWSER_MATCH_INPUT_HZ = 64;
 export const BROWSER_MATCH_SNAPSHOT_HZ = 32;
@@ -23,6 +24,7 @@ export interface BrowserMatchClaimRequest {
   matchId: string;
   buildHash: string;
   resumeToken?: string;
+  joinNonce?: string;
 }
 
 export interface BrowserMatchClaim {
@@ -33,6 +35,7 @@ export interface BrowserMatchClaim {
   teamId: number;
   resumeToken: string;
   playerCount: number;
+  createdPlayer: boolean;
 }
 
 export interface PendingInputSample {
@@ -43,6 +46,7 @@ export interface PendingInputSample {
   yaw: number;
   pitch: number;
   cast: boolean;
+  requestedSpell: number | null;
 }
 
 export interface SocketAttachment {
@@ -54,6 +58,8 @@ export interface SocketAttachment {
   clientClock: number;
   lastAckedSnapshotSequence: number;
   lastSentSnapshotSequence: number;
+  lastSentEventId: number;
+  lastVisibleProjectileKeys: string[];
   inputRateTokens: number;
   inputRateUpdatedAtMs: number;
   inputRateRejectedMessages: number;
@@ -77,7 +83,7 @@ export interface CorePlayerSnapshot {
   yaw: number;
   pitch: number;
   health: number;
-  cooldownTicks: number;
+  cooldownTicks: readonly number[];
   outcome: number;
 }
 

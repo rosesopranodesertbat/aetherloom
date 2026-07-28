@@ -1,4 +1,5 @@
 import { ApiError } from "./util.ts";
+import { BROWSER_MATCH_SPELL_SLOTS } from "./browser-match-types.ts";
 import type {
   CoreEventSnapshot,
   CoreMatchSnapshot,
@@ -35,11 +36,70 @@ interface WorkerMatchExports extends WebAssembly.Exports {
 }
 
 const SNAPSHOT_MAGIC = 0x314d4c41;
-const EXPECTED_WORKER_ABI = 2;
+const EXPECTED_WORKER_ABI = 3;
 const HEADER_WORDS = 16;
-const PLAYER_WORDS = 16;
+const PLAYER_WORDS = 15 + BROWSER_MATCH_SPELL_SLOTS;
 const PROJECTILE_WORDS = 15;
 const EVENT_WORDS = 13;
+
+export function selectSnapshotProjectiles(
+  projectiles: readonly CoreProjectileSnapshot[],
+  viewer: Pick<CorePlayerSnapshot, "playerId" | "xCm" | "yCm" | "zCm">,
+  previouslySelected: ReadonlySet<string>,
+  maximum: number,
+): CoreProjectileSnapshot[] {
+  if (
+    !Number.isInteger(viewer.playerId) ||
+    viewer.playerId < 0 ||
+    ![viewer.xCm, viewer.yCm, viewer.zCm].every(Number.isInteger) ||
+    !(previouslySelected instanceof Set) ||
+    !Number.isInteger(maximum) ||
+    maximum < 0
+  ) {
+    throw new Error("Browser match projectile selection is invalid.");
+  }
+  const distanceSquared = (projectile: CoreProjectileSnapshot): number => {
+    const dx = projectile.xCm - viewer.xCm;
+    const dy = projectile.yCm - viewer.yCm;
+    const dz = projectile.zCm - viewer.zCm;
+    return dx * dx + dy * dy + dz * dz;
+  };
+  const threatBucket = (projectile: CoreProjectileSnapshot): number => {
+    const dx = projectile.xCm - viewer.xCm;
+    const dy = projectile.yCm - viewer.yCm;
+    const dz = projectile.zCm - viewer.zCm;
+    const closing =
+      dx * projectile.velocityXCmPerTick +
+        dy * projectile.velocityYCmPerTick +
+        dz * projectile.velocityZCmPerTick <
+      0;
+    const distance = distanceSquared(projectile);
+    return distance <= 2_000 ** 2 || closing && distance <= 5_000 ** 2
+      ? 0
+      : 1;
+  };
+  return [...projectiles]
+    .sort((left, right) => {
+      const ownership =
+        Number(right.ownerPlayerId === viewer.playerId) -
+        Number(left.ownerPlayerId === viewer.playerId);
+      if (ownership !== 0) return ownership;
+      const threat = threatBucket(left) - threatBucket(right);
+      if (threat !== 0) return threat;
+      const continuity =
+        Number(previouslySelected.has(right.entityKey)) -
+        Number(previouslySelected.has(left.entityKey));
+      if (continuity !== 0) return continuity;
+      const proximity = distanceSquared(left) - distanceSquared(right);
+      if (proximity !== 0) return proximity;
+      const recency = right.lifetimeTicks - left.lifetimeTicks;
+      if (recency !== 0) return recency;
+      return left.entityKey < right.entityKey
+        ? -1
+        : Number(left.entityKey > right.entityKey);
+    })
+    .slice(0, maximum);
+}
 
 export class BrowserMatchSimulation {
   private readonly exports: WorkerMatchExports;
@@ -89,6 +149,7 @@ export class BrowserMatchSimulation {
     yaw: number,
     pitch: number,
     cast: boolean,
+    requestedSpell: number | null,
   ): void {
     this.check(
       this.exports.worker_match_submit_input(
@@ -99,7 +160,7 @@ export class BrowserMatchSimulation {
         yaw,
         pitch,
         cast ? 1 << 2 : 0,
-        cast ? 0 : -1,
+        cast ? (requestedSpell ?? -1) : -1,
       ),
       "submit player input",
     );
@@ -158,6 +219,12 @@ export class BrowserMatchSimulation {
     const players: CorePlayerSnapshot[] = [];
     for (let index = 0; index < playerCount; index += 1) {
       const at = playerOffset + index * PLAYER_WORDS;
+      const cooldownTicks: number[] = [];
+      for (let spell = 0; spell < BROWSER_MATCH_SPELL_SLOTS; spell += 1) {
+        cooldownTicks.push(
+          unsigned16Word(words, at + 14 + spell, "spell cooldown"),
+        );
+      }
       players.push({
         playerId: requiredWord(words, at),
         controller: requiredWord(words, at + 1),
@@ -172,8 +239,8 @@ export class BrowserMatchSimulation {
         yaw: requiredWord(words, at + 11) & 0xffff,
         pitch: requiredWord(words, at + 12),
         health: requiredWord(words, at + 13),
-        cooldownTicks: requiredWord(words, at + 14),
-        outcome: requiredWord(words, at + 15),
+        cooldownTicks,
+        outcome: requiredWord(words, at + PLAYER_WORDS - 1),
       });
     }
 
@@ -301,6 +368,14 @@ function boundedOffset(
 function requiredWord(words: Int32Array, index: number): number {
   const value = words[index];
   if (value === undefined) throw new Error("Browser match Wasm snapshot is truncated.");
+  return value;
+}
+
+function unsigned16Word(words: Int32Array, index: number, label: string): number {
+  const value = requiredWord(words, index);
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff) {
+    throw new Error(`Browser match Wasm ${label} is invalid.`);
+  }
   return value;
 }
 

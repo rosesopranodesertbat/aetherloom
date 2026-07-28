@@ -9,12 +9,19 @@ export const DEFAULT_CONTROL_PLANE = 'https://aetherloom-control-plane-staging.c
 export const INPUT_FRAME_BYTES = 22;
 export const SNAPSHOT_HEADER_BYTES = 24;
 export const PLAYER_RECORD_BYTES = 30;
+export const VIEWER_COOLDOWN_BYTES = 26;
 export const PROJECTILE_RECORD_BYTES = 24;
 export const EVENT_RECORD_BYTES = 20;
+export const CAST_EVENT_TYPE = 3;
 export const DAMAGE_EVENT_TYPE = 4;
+export const PROJECTILE_IMPACT_EVENT_TYPE = 10;
 export const MAX_SNAPSHOT_FRAME_BYTES = 1_200;
+export const MULTIPLAYER_SPELLS = Object.freeze([
+  Object.freeze({ id: 0, name: 'Firebolt', key: '1', cooldownMs: 280 }),
+  Object.freeze({ id: 7, name: 'Mend', key: '8', cooldownMs: 7_000 }),
+]);
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const INPUT_MESSAGE_TYPE = 1;
 const SNAPSHOT_MESSAGE_TYPE = 2;
 const INPUT_ACTION_CAST = 1;
@@ -23,17 +30,38 @@ const PARTICLE_STRIDE = 8;
 const PREVIEW_Y = 512;
 const RIVAL_SCENE = 21;
 const FIREBOLT_SCENE = 25;
+const FIREBOLT_TEMPLATE_COUNT = 24;
+const FIREBOLT_TEMPLATE_FRAME_MS = 1_000 / 60;
 const MAX_PLAYERS = 128;
 const MAX_PROJECTILES = 255;
 const MAX_EVENTS = 255;
+const SPELL_SLOT_COUNT = 13;
 const WORLD_UNITS_PER_CM = 0.1;
-const CARPET_CLEARANCE = 34;
-const PROJECTILE_CLEARANCE = 39;
+const CARPET_CLEARANCE = 7.5;
+const PROJECTILE_CLEARANCE = 3.2;
+const FIRST_PERSON_EYE_HEIGHT = 3;
+const FIRST_PERSON_FOV = 1.16;
+const FIRST_PERSON_MAX_PITCH = Math.round(1.05 / (Math.PI * 0.5) * 16_384);
+const MOUSE_LOOK_UNITS_PER_PIXEL = 23;
+const TOUCH_LOOK_UNITS_PER_PIXEL = 14;
+const GAMEPAD_LOOK_DEADZONE = 0.16;
+const GAMEPAD_YAW_UNITS_PER_SECOND = 780 * 64;
+const GAMEPAD_PITCH_UNITS_PER_SECOND = 620 * 64;
+const MAX_GAMEPAD_LOOK_FRAME_MS = 50;
+const STRAFE_INPUT_SCALE = 0.55;
+const PROJECTILE_LIFETIME_TICKS = 410;
+const VIEWER_MUZZLE_EASE_TICKS = 12;
+const VIEWER_MUZZLE_FORWARD = 6;
+const VIEWER_MUZZLE_RIGHT = 1.25;
+const VIEWER_MUZZLE_DOWN = 1.5;
+const AUTHORITATIVE_MUZZLE_FORWARD = 1.4;
+const AUTHORITATIVE_MUZZLE_HEIGHT = 2.3;
+const FIREBOLT_PRESENTATION_SPEED = 220;
 const INPUT_INTERVAL_MS = 1_000 / 64;
 const CORE_MOVE_AXIS = 2_047;
 const INPUT_HOLD_TICKS = 2;
-const PLAYER_PLANAR_SPEED_CM_PER_TICK = 8;
-const PLAYER_VERTICAL_SPEED_CM_PER_TICK = 5;
+const PLAYER_PLANAR_SPEED_CM_PER_TICK = 10;
+const PLAYER_VERTICAL_SPEED_CM_PER_TICK = 6;
 const MAX_PREDICTION_HISTORY = 256;
 const MAX_PITCH = 16_384;
 const PLAYER_MIN_ALTITUDE_CM = 0;
@@ -41,7 +69,9 @@ const PLAYER_MAX_ALTITUDE_CM = 4_300;
 const MAX_RECONCILIATION_OFFSET = 96;
 const RECONCILIATION_DECAY_MS = 105;
 const MAX_IMPACTS = 32;
+const MAX_HEALS = 32;
 const MAX_SEEN_EVENTS = 512;
+const MULTIPLAYER_SPELL_IDS = new Set(MULTIPLAYER_SPELLS.map((spell) => spell.id));
 
 export class ProtocolError extends Error {
   constructor(code, message) {
@@ -86,6 +116,7 @@ export function encodeInputFrame({
   yaw = 0,
   pitch = 0,
   cast = false,
+  spell = 0,
   clientClockMs = 0,
   snapshotAck = 0,
 }) {
@@ -95,6 +126,12 @@ export function encodeInputFrame({
   integerIn(moveVertical, -127, 127, 'moveVertical');
   integerIn(yaw, 0, 0xffff, 'yaw');
   integerIn(pitch, -127, 127, 'pitch');
+  integerIn(spell, 0, 12, 'spell');
+  protocolAssert(
+    !cast || MULTIPLAYER_SPELL_IDS.has(spell),
+    'unsupported_spell',
+    'Spell is not implemented by the staging duel.',
+  );
   integerIn(clientClockMs, 0, 0xffff, 'clientClockMs');
   integerIn(snapshotAck, 0, 0xffff_ffff, 'snapshotAck');
   const bytes = new Uint8Array(INPUT_FRAME_BYTES);
@@ -109,7 +146,7 @@ export function encodeInputFrame({
   view.setInt8(11, pitch);
   view.setUint16(12, yaw, true);
   view.setUint8(14, cast ? INPUT_ACTION_CAST : 0);
-  view.setUint8(15, 0);
+  view.setUint8(15, cast ? spell : 0xff);
   view.setUint16(16, clientClockMs, true);
   view.setUint32(18, snapshotAck, true);
   return bytes;
@@ -143,6 +180,7 @@ export function decodeSnapshotFrame(payload) {
   protocolAssert(eventCount <= MAX_EVENTS, 'too_many_events', 'Snapshot event count exceeds the client limit.');
   const expectedLength = SNAPSHOT_HEADER_BYTES
     + playerCount * PLAYER_RECORD_BYTES
+    + VIEWER_COOLDOWN_BYTES
     + projectileCount * PROJECTILE_RECORD_BYTES
     + eventCount * EVENT_RECORD_BYTES;
   protocolAssert(expectedLength === bytes.byteLength, 'record_length_mismatch', 'Snapshot record counts do not match its length.');
@@ -194,6 +232,14 @@ export function decodeSnapshotFrame(payload) {
     'missing_viewer',
     'Snapshot does not contain its viewer player.',
   );
+  const viewerSlot = view.getUint8(14);
+  const viewer = players.find((player) => player.slot === viewerSlot);
+  const spellCooldownTicks = [];
+  for (let spell = 0; spell < SPELL_SLOT_COUNT; spell += 1) {
+    spellCooldownTicks.push(view.getUint16(offset + spell * 2, true));
+  }
+  offset += VIEWER_COOLDOWN_BYTES;
+  viewer.spellCooldownTicks = spellCooldownTicks;
 
   for (let index = 0; index < projectileCount; index += 1, offset += PROJECTILE_RECORD_BYTES) {
     protocolAssert(view.getUint8(offset + 5) === 0, 'reserved_bits', 'Projectile reserved field is not zero.');
@@ -218,14 +264,33 @@ export function decodeSnapshotFrame(payload) {
   }
 
   for (let index = 0; index < eventCount; index += 1, offset += EVENT_RECORD_BYTES) {
-    protocolAssert(view.getUint8(offset + 7) === 0, 'reserved_bits', 'Event reserved field is not zero.');
+    const type = view.getUint8(offset + 4);
+    const detail = view.getUint8(offset + 7);
+    if (type === CAST_EVENT_TYPE || type === PROJECTILE_IMPACT_EVENT_TYPE) {
+      protocolAssert(
+        MULTIPLAYER_SPELL_IDS.has(detail),
+        'unsupported_spell',
+        'Snapshot spell event names an unsupported spell.',
+      );
+      protocolAssert(
+        type !== PROJECTILE_IMPACT_EVENT_TYPE || detail === 0,
+        'unsupported_spell',
+        'Snapshot projectile impact names an unsupported spell.',
+      );
+    } else {
+      protocolAssert(detail === 0, 'reserved_bits', 'Event reserved field is not zero.');
+    }
     const eventId = view.getUint32(offset, true);
     rejectDuplicate(eventIds, eventId, 'event id');
     events.push({
       eventId,
-      type: view.getUint8(offset + 4),
+      type,
       actor: view.getUint8(offset + 5),
       target: view.getUint8(offset + 6),
+      spell:
+        type === CAST_EVENT_TYPE || type === PROJECTILE_IMPACT_EVENT_TYPE
+          ? detail
+          : null,
       xcm: view.getInt32(offset + 8, true),
       ycm: view.getInt32(offset + 12, true),
       zcm: view.getInt32(offset + 16, true),
@@ -239,7 +304,7 @@ export function decodeSnapshotFrame(payload) {
     tick: view.getUint32(4, true),
     snapshotSeq: view.getUint32(8, true),
     echoClock: view.getUint16(12, true),
-    viewerSlot: view.getUint8(14),
+    viewerSlot,
     playerCount,
     projectileCount,
     eventCount,
@@ -255,6 +320,13 @@ export function isNewerSequence(candidate, previous) {
   if (previous === null || previous === undefined) return true;
   const distance = (candidate - previous) >>> 0;
   return distance !== 0 && distance < 0x8000_0000;
+}
+
+export function sequenceAcknowledges(acknowledged, candidate) {
+  integerIn(acknowledged, 0, 0xffff_ffff, 'acknowledged sequence');
+  integerIn(candidate, 1, 0xffff_ffff, 'candidate sequence');
+  return acknowledged !== 0 &&
+    (acknowledged === candidate || isNewerSequence(acknowledged, candidate));
 }
 
 export function wrappedClockDelta(now, echoed) {
@@ -284,18 +356,241 @@ export function validateRoom(value) {
   return room;
 }
 
-export function movementToWorld(moveX, moveY, yaw) {
+export function resumeSessionKey(controlPlane, room) {
+  return `aetherloom.demo.resume.${encodeURIComponent(normalizeControlPlane(controlPlane))}.${validateRoom(room)}`;
+}
+
+export function joinAttemptKey(controlPlane, room) {
+  return `aetherloom.demo.join.${encodeURIComponent(normalizeControlPlane(controlPlane))}.${validateRoom(room)}`;
+}
+
+export function isResumeToken(value) {
+  return typeof value === 'string' && /^demo_resume_[A-Za-z0-9_-]{24}$/u.test(value);
+}
+
+export function isJoinNonce(value) {
+  return typeof value === 'string' && /^demo_join_[A-Za-z0-9_-]{24}$/u.test(value);
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
+}
+
+export function randomJoinNonce(cryptoProvider = globalThis.crypto) {
+  if (!cryptoProvider?.getRandomValues) {
+    throw new Error('Secure randomness is unavailable for the staging join.');
+  }
+  const bytes = cryptoProvider.getRandomValues(new Uint8Array(18));
+  return `demo_join_${bytesToBase64Url(bytes)}`;
+}
+
+export async function demoResumeToken(room, joinNonce, cryptoProvider = globalThis.crypto) {
+  const validRoom = validateRoom(room);
+  if (!isJoinNonce(joinNonce) || !cryptoProvider?.subtle?.digest) {
+    throw new Error('The staging join attempt is invalid.');
+  }
+  const input = new TextEncoder().encode(
+    `aetherloom-demo-resume:v1:${validRoom}:${joinNonce}`,
+  );
+  const digest = new Uint8Array(await cryptoProvider.subtle.digest('SHA-256', input));
+  return `demo_resume_${bytesToBase64Url(digest).slice(0, 24)}`;
+}
+
+export class ResumeTokenStore {
+  constructor(storage = null) {
+    this.storage = storage;
+    this.memory = new Map();
+  }
+
+  load(key) {
+    if (this.storage) {
+      try {
+        const token = this.storage.getItem(key);
+        if (isResumeToken(token)) {
+          this.memory.set(key, token);
+          return token;
+        }
+        this.memory.delete(key);
+        if (token !== null) this.storage.removeItem(key);
+        return undefined;
+      } catch {
+        // Storage can be unavailable in privacy modes and opaque origins.
+      }
+    }
+    return this.memory.get(key);
+  }
+
+  save(key, token, { persist = true } = {}) {
+    if (!isResumeToken(token)) throw new Error('Control plane returned an invalid resume token.');
+    this.memory.set(key, token);
+    if (persist && this.storage) {
+      try { this.storage.setItem(key, token); }
+      catch { /* The in-memory copy still supports reconnecting this page. */ }
+    }
+  }
+
+  clear(key) {
+    this.memory.delete(key);
+    if (this.storage) {
+      try { this.storage.removeItem(key); }
+      catch { /* Storage is an optional reconnect optimization. */ }
+    }
+  }
+}
+
+export class JoinNonceStore {
+  constructor(storage = null) {
+    this.storage = storage;
+    this.memory = new Map();
+  }
+
+  load(key) {
+    if (this.storage) {
+      try {
+        const nonce = this.storage.getItem(key);
+        if (isJoinNonce(nonce)) {
+          this.memory.set(key, nonce);
+          return nonce;
+        }
+        this.memory.delete(key);
+        if (nonce !== null) this.storage.removeItem(key);
+        return undefined;
+      } catch {
+        // The in-memory attempt still makes retries idempotent in this page.
+      }
+    }
+    return this.memory.get(key);
+  }
+
+  save(key, nonce, { persist = true } = {}) {
+    if (!isJoinNonce(nonce)) throw new Error('The staging join nonce is invalid.');
+    this.memory.set(key, nonce);
+    if (persist && this.storage) {
+      try { this.storage.setItem(key, nonce); }
+      catch { /* The current page can still retry the same attempt. */ }
+    }
+  }
+
+  clear(key) {
+    this.memory.delete(key);
+    if (this.storage) {
+      try { this.storage.removeItem(key); }
+      catch { /* Storage is optional. */ }
+    }
+  }
+}
+
+export class ResumeOwnership {
+  constructor(lockManager = null) {
+    this.lockManager = lockManager;
+    this.held = new Map();
+  }
+
+  get supported() {
+    return typeof this.lockManager?.request === 'function';
+  }
+
+  async claim(scope, token) {
+    const name = `aetherloom:resume:${scope}:${token}`;
+    if (this.held.has(name)) return true;
+    if (!this.supported) return false;
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      try {
+        const requested = this.lockManager.request(
+          name,
+          { ifAvailable: true, mode: 'exclusive' },
+          async (lock) => {
+            if (!lock) {
+              settle(false);
+              return;
+            }
+            let release;
+            const held = new Promise((done) => { release = done; });
+            this.held.set(name, release);
+            settle(true);
+            await held;
+            this.held.delete(name);
+          },
+        );
+        Promise.resolve(requested).catch(() => settle(false));
+      } catch {
+        settle(false);
+      }
+    });
+  }
+}
+
+export class SingleFlight {
+  constructor() {
+    this.current = null;
+  }
+
+  run(task) {
+    if (this.current !== null) return this.current;
+    const pending = Promise.resolve().then(task);
+    const tracked = pending.finally(() => {
+      if (this.current === tracked) this.current = null;
+    });
+    this.current = tracked;
+    return tracked;
+  }
+
+  reset() {
+    this.current = null;
+  }
+}
+
+export function movementToWorld(moveX, moveY, yaw, pitch = 0, moveVertical = 0) {
   integerIn(moveX, -127, 127, 'moveX');
   integerIn(moveY, -127, 127, 'moveY');
+  integerIn(moveVertical, -127, 127, 'moveVertical');
   integerIn(yaw, 0, 0xffff, 'yaw');
+  integerIn(pitch, -MAX_PITCH, MAX_PITCH, 'pitch');
   const radians = wireYawToCoreRadians(yaw);
+  const pitchRadians = wirePitchToRadians(pitch);
+  const level = Math.cos(pitchRadians);
   const strafe = moveX / 127;
   const forward = moveY / 127;
-  const worldX = clamp(Math.round((Math.cos(radians) * forward - Math.sin(radians) * strafe) * 127), -127, 127);
-  const worldZ = clamp(Math.round((Math.sin(radians) * forward + Math.cos(radians) * strafe) * 127), -127, 127);
+  const lift = moveVertical / 127;
+  const worldX = clamp(Math.round((
+    Math.cos(radians) * level * forward -
+    Math.sin(radians) * strafe
+  ) * 127), -127, 127);
+  const worldY = clamp(Math.round((
+    Math.sin(pitchRadians) * forward +
+    lift
+  ) * 127), -127, 127);
+  const worldZ = clamp(Math.round((
+    Math.sin(radians) * level * forward +
+    Math.cos(radians) * strafe
+  ) * 127), -127, 127);
   return {
     x: worldX === 0 ? 0 : worldX,
     y: worldZ === 0 ? 0 : worldZ,
+    vertical: worldY === 0 ? 0 : worldY,
+  };
+}
+
+export function shapeFlightInput(strafe, thrust) {
+  protocolAssert(
+    Number.isFinite(strafe) &&
+    Number.isFinite(thrust) &&
+    Math.abs(strafe) <= 1 &&
+    Math.abs(thrust) <= 1,
+    'invalid_input',
+    'Flight input is out of range.',
+  );
+  return {
+    strafe: strafe * STRAFE_INPUT_SCALE,
+    thrust,
   };
 }
 
@@ -308,6 +603,25 @@ export function wirePitchToRadians(pitch) {
   return pitch / MAX_PITCH * Math.PI * 0.5;
 }
 
+function firstPersonBasis(yawValue, pitchValue) {
+  const yaw = wireYawToCoreRadians(yawValue);
+  const pitch = wirePitchToRadians(pitchValue);
+  const level = Math.cos(pitch);
+  return {
+    forward: [
+      Math.cos(yaw) * level,
+      Math.sin(pitch),
+      Math.sin(yaw) * level,
+    ],
+    right: [-Math.sin(yaw), 0, Math.cos(yaw)],
+    up: [
+      -Math.cos(yaw) * Math.sin(pitch),
+      Math.cos(pitch),
+      -Math.sin(yaw) * Math.sin(pitch),
+    ],
+  };
+}
+
 export function firstPersonCamera(viewer) {
   protocolAssert(
     viewer &&
@@ -315,29 +629,90 @@ export function firstPersonCamera(viewer) {
     'invalid_camera',
     'First-person viewer pose is invalid.',
   );
-  const yaw = wireYawToCoreRadians(viewer.yaw);
-  const pitch = wirePitchToRadians(viewer.pitch);
-  const level = Math.cos(pitch);
-  const forwardX = Math.cos(yaw) * level;
-  const forwardY = Math.sin(pitch);
-  const forwardZ = Math.sin(yaw) * level;
-  const eyeX = viewer.x + forwardX * 1.4;
-  const eyeY = viewer.y + 7.3;
-  const eyeZ = viewer.z + forwardZ * 1.4;
-  // Keep a stable camera basis even at the exact vertical pitch limits.
-  const upX = -Math.cos(yaw) * Math.sin(pitch);
-  const upY = Math.cos(pitch);
-  const upZ = -Math.sin(yaw) * Math.sin(pitch);
+  const { forward, up } = firstPersonBasis(viewer.yaw, viewer.pitch);
+  const eyeX = viewer.x;
+  const eyeY = viewer.y + FIRST_PERSON_EYE_HEIGHT;
+  const eyeZ = viewer.z;
   return {
     ex: eyeX,
     ey: eyeY,
     ez: eyeZ,
-    cx: eyeX + forwardX * 80,
-    cy: eyeY + forwardY * 80,
-    cz: eyeZ + forwardZ * 80,
-    ux: upX,
-    uy: upY,
-    uz: upZ,
+    cx: eyeX + forward[0] * 80,
+    cy: eyeY + forward[1] * 80,
+    cz: eyeZ + forward[2] * 80,
+    ux: up[0],
+    uy: up[1],
+    uz: up[2],
+  };
+}
+
+export function firstPersonMuzzle(viewer) {
+  protocolAssert(
+    viewer &&
+    [viewer.x, viewer.y, viewer.z, viewer.yaw, viewer.pitch].every(Number.isFinite),
+    'invalid_camera',
+    'First-person viewer pose is invalid.',
+  );
+  const { forward, right, up } = firstPersonBasis(viewer.yaw, viewer.pitch);
+  const eye = [viewer.x, viewer.y + FIRST_PERSON_EYE_HEIGHT, viewer.z];
+  return {
+    x:
+      eye[0] +
+      forward[0] * VIEWER_MUZZLE_FORWARD +
+      right[0] * VIEWER_MUZZLE_RIGHT -
+      up[0] * VIEWER_MUZZLE_DOWN,
+    y:
+      eye[1] +
+      forward[1] * VIEWER_MUZZLE_FORWARD +
+      right[1] * VIEWER_MUZZLE_RIGHT -
+      up[1] * VIEWER_MUZZLE_DOWN,
+    z:
+      eye[2] +
+      forward[2] * VIEWER_MUZZLE_FORWARD +
+      right[2] * VIEWER_MUZZLE_RIGHT -
+      up[2] * VIEWER_MUZZLE_DOWN,
+    yaw: viewer.yaw,
+    pitch: viewer.pitch,
+  };
+}
+
+export function viewerProjectilePresentation(
+  position,
+  projectile,
+  viewerSlot,
+  elapsedTicks = PROJECTILE_LIFETIME_TICKS - projectile.ttl,
+) {
+  if (projectile.owner !== viewerSlot) return { ...position };
+  const elapsed = clamp(
+    elapsedTicks,
+    0,
+    VIEWER_MUZZLE_EASE_TICKS,
+  );
+  const amount = 1 - elapsed / VIEWER_MUZZLE_EASE_TICKS;
+  const { forward, right, up } = firstPersonBasis(
+    projectile.yaw,
+    projectile.pitch,
+  );
+  const presentationOffset = [
+    forward[0] * VIEWER_MUZZLE_FORWARD +
+      right[0] * VIEWER_MUZZLE_RIGHT -
+      up[0] * VIEWER_MUZZLE_DOWN -
+      forward[0] * AUTHORITATIVE_MUZZLE_FORWARD,
+    FIRST_PERSON_EYE_HEIGHT +
+      forward[1] * VIEWER_MUZZLE_FORWARD +
+      right[1] * VIEWER_MUZZLE_RIGHT -
+      up[1] * VIEWER_MUZZLE_DOWN -
+      AUTHORITATIVE_MUZZLE_HEIGHT,
+    forward[2] * VIEWER_MUZZLE_FORWARD +
+      right[2] * VIEWER_MUZZLE_RIGHT -
+      up[2] * VIEWER_MUZZLE_DOWN -
+      forward[2] * AUTHORITATIVE_MUZZLE_FORWARD,
+  ];
+  return {
+    ...position,
+    x: position.x + presentationOffset[0] * amount,
+    y: position.y + presentationOffset[1] * amount,
+    z: position.z + presentationOffset[2] * amount,
   };
 }
 
@@ -549,11 +924,13 @@ function parseJoinResponse(value) {
   if (webSocketUrl.protocol !== 'wss:' && !(local && webSocketUrl.protocol === 'ws:')) {
     throw new Error('Match WebSocket must use WSS, except on localhost.');
   }
+  const resumeToken = string(value.resumeToken, 'resume token', 36);
+  if (!isResumeToken(resumeToken)) throw new Error('Join response has an invalid resume token.');
   const result = {
     matchId: string(value.matchId, 'match id', 128),
     accountId: string(value.accountId, 'account id', 128),
     slot: number(value.slot, 'slot', 0, 255),
-    resumeToken: string(value.resumeToken, 'resume token', 256),
+    resumeToken,
     webSocketUrl: webSocketUrl.toString(),
     ticket,
     tickHz: number(value.tickHz, 'tick rate', 1, 256),
@@ -590,6 +967,50 @@ export function yawAfterLookDelta(yaw, delta) {
   integerIn(yaw, 0, 0xffff, 'yaw');
   protocolAssert(Number.isFinite(delta), 'invalid_input', 'look delta must be finite.');
   return (yaw + Math.round(delta) + 0x1_0000) & 0xffff;
+}
+
+export function gamepadLookDelta(axis, elapsedMs, unitsPerSecond) {
+  protocolAssert(Number.isFinite(axis), 'invalid_input', 'gamepad look axis must be finite.');
+  protocolAssert(
+    Number.isFinite(elapsedMs) && elapsedMs >= 0,
+    'invalid_input',
+    'gamepad look elapsed time must be finite and non-negative.',
+  );
+  protocolAssert(
+    Number.isFinite(unitsPerSecond) && unitsPerSecond >= 0,
+    'invalid_input',
+    'gamepad look rate must be finite and non-negative.',
+  );
+  const shapedAxis = Math.abs(axis) < GAMEPAD_LOOK_DEADZONE
+    ? 0
+    : clamp(axis, -1, 1);
+  return shapedAxis
+    * unitsPerSecond
+    * Math.min(elapsedMs, MAX_GAMEPAD_LOOK_FRAME_MS)
+    / 1_000;
+}
+
+export function authoritativeCooldownReadyAt(
+  receivedAt,
+  remainingTicks,
+  rttMs = 0,
+) {
+  protocolAssert(
+    Number.isFinite(receivedAt) &&
+    Number.isInteger(remainingTicks) &&
+    remainingTicks >= 0 &&
+    remainingTicks <= 0xffff &&
+    Number.isFinite(rttMs) &&
+    rttMs >= 0,
+    'invalid_cooldown',
+    'Authoritative cooldown timing is invalid.',
+  );
+  if (remainingTicks === 0) return receivedAt;
+  const estimatedSnapshotAge = Math.min(rttMs * 0.5, 250);
+  return Math.max(
+    receivedAt,
+    receivedAt + remainingTicks * 1_000 / 128 - estimatedSnapshotAge,
+  );
 }
 
 function interpolateYaw(from, to, amount) {
@@ -649,7 +1070,10 @@ class MultiplayerApp {
     this.heights = new Float32Array(sim.memory.buffer, sim.heightPtr(), this.terrainWidth ** 2);
     this.templates = {
       rival: this.copyPreviewTemplate(RIVAL_SCENE),
-      firebolt: this.copyPreviewTemplate(FIREBOLT_SCENE),
+      firebolt: Array.from(
+        { length: FIREBOLT_TEMPLATE_COUNT },
+        (_, variant) => this.copyPreviewTemplate(FIREBOLT_SCENE, variant),
+      ),
     };
     this.instances = new Float32Array(sim.instCapacity() * INSTANCE_STRIDE);
     this.particles = new Float32Array(sim.partCapacity() * PARTICLE_STRIDE);
@@ -658,6 +1082,7 @@ class MultiplayerApp {
     this.playerTracks = new Map();
     this.projectileTracks = new Map();
     this.impacts = [];
+    this.heals = [];
     this.seenEvents = new Set();
     this.seenEventOrder = [];
     this.keys = new Set();
@@ -666,8 +1091,15 @@ class MultiplayerApp {
     this.yaw = 0;
     this.pitch = 0;
     this.yawInitialized = false;
+    this.lastRenderAt = null;
     this.castPulse = false;
+    this.mouseCastHeld = false;
+    this.touchCastHeld = false;
     this.gamepadCastHeld = false;
+    this.selectedSpell = MULTIPLAYER_SPELLS[0].id;
+    this.castCues = [];
+    this.nextCastCueId = 1;
+    this.localCastReadyAt = new Map();
     this.latestInput = { x: 0, y: 0, vertical: 0 };
     this.inputHistory = [];
     this.acknowledgedInputSequence = 0;
@@ -676,6 +1108,13 @@ class MultiplayerApp {
     this.sentClocks = new Map();
     this.ws = null;
     this.joinGeneration = 0;
+    this.joinFlight = new SingleFlight();
+    this.joinAbortController = null;
+    const sessionStorage = safeBrowserStorage('sessionStorage');
+    this.resumeTokens = new ResumeTokenStore(sessionStorage);
+    this.joinNonces = new JoinNonceStore(sessionStorage);
+    this.resumeOwnership = new ResumeOwnership(safeBrowserLocks());
+    this.liveResumeTokens = new Map();
     this.reconnectAttempt = 0;
     this.reconnectTimer = null;
     this.inputTimer = null;
@@ -693,8 +1132,8 @@ class MultiplayerApp {
     this.bindControls();
   }
 
-  copyPreviewTemplate(scene) {
-    const count = this.sim.previewScene(scene, 0);
+  copyPreviewTemplate(scene, variant = 0) {
+    const count = this.sim.previewScene(scene, variant);
     if (count <= 0 || count > this.sim.instCapacity() || this.sim.instStride() !== INSTANCE_STRIDE) {
       throw new Error(`Model preview scene ${scene} is unavailable.`);
     }
@@ -714,6 +1153,10 @@ class MultiplayerApp {
       this.sim.heightPtr(),
       this.terrainWidth ** 2,
     );
+    // The extracted authoritative core currently has a flat base terrain.
+    // Rendering the legacy campaign heightmap here would move targets and
+    // projectiles away from their server collision coordinates.
+    this.heights.fill(0);
     this.renderer.uploadHeights(this.heights, 0, this.terrainWidth - 1);
     this.sim.clearDirty?.();
   }
@@ -756,26 +1199,84 @@ class MultiplayerApp {
   }
 
   sessionKey(room) {
-    return `aetherloom.demo.resume.${new URL(this.controlPlane).host}.${room}`;
+    return resumeSessionKey(this.controlPlane, room);
   }
 
-  loadResumeToken(room) {
-    try { return sessionStorage.getItem(this.sessionKey(room)) || undefined; }
-    catch { return undefined; }
+  joinKey(room) {
+    return joinAttemptKey(this.controlPlane, room);
   }
 
-  saveResumeToken(room, token) {
-    try { sessionStorage.setItem(this.sessionKey(room), token); }
-    catch { /* Private browsing may disable storage; the live socket still works. */ }
+  async loadResumeToken(room) {
+    const key = this.sessionKey(room);
+    const live = this.liveResumeTokens.get(key);
+    if (live !== undefined) return live;
+    const stored = this.resumeTokens.load(key);
+    if (stored === undefined) return undefined;
+    if (!this.resumeOwnership.supported) {
+      this.resumeTokens.clear(key);
+      this.joinNonces.clear(this.joinKey(room));
+      return undefined;
+    }
+    if (!await this.resumeOwnership.claim(key, stored)) {
+      // sessionStorage can be cloned into a duplicated tab. Only the tab that
+      // owns this short-lived token may resume its player.
+      this.resumeTokens.clear(key);
+      this.joinNonces.clear(this.joinKey(room));
+      return undefined;
+    }
+    this.liveResumeTokens.set(key, stored);
+    return stored;
+  }
+
+  async saveResumeToken(room, token) {
+    const key = this.sessionKey(room);
+    const owned = this.resumeOwnership.supported
+      ? await this.resumeOwnership.claim(key, token)
+      : false;
+    this.liveResumeTokens.set(key, token);
+    this.resumeTokens.save(key, token, { persist: owned });
   }
 
   clearResumeToken(room) {
-    try { sessionStorage.removeItem(this.sessionKey(room)); }
-    catch { /* Storage is an optional reconnect optimization. */ }
+    const key = this.sessionKey(room);
+    this.liveResumeTokens.delete(key);
+    this.resumeTokens.clear(key);
   }
 
-  async requestJoin(room, resumeToken) {
+  clearJoinAttempt(room) {
+    this.joinNonces.clear(this.joinKey(room));
+  }
+
+  async prepareFreshJoin(room) {
+    const joinKey = this.joinKey(room);
+    const sessionKey = this.sessionKey(room);
+    let nonce = this.joinNonces.load(joinKey);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (nonce === undefined) nonce = randomJoinNonce();
+      const resumeToken = await demoResumeToken(room, nonce);
+      const owned = this.resumeOwnership.supported
+        ? await this.resumeOwnership.claim(sessionKey, resumeToken)
+        : false;
+      if (!this.resumeOwnership.supported || owned) {
+        this.joinNonces.save(joinKey, nonce, { persist: owned });
+        this.liveResumeTokens.set(sessionKey, resumeToken);
+        this.resumeTokens.save(sessionKey, resumeToken, { persist: owned });
+        return { nonce, resumeToken };
+      }
+      // A duplicated tab inherited the first tab's in-flight attempt. It must
+      // create an independent player instead of replaying that attempt.
+      this.joinNonces.clear(joinKey);
+      this.resumeTokens.clear(sessionKey);
+      nonce = undefined;
+    }
+    throw new Error('This tab could not acquire an independent staging player.');
+  }
+
+  async requestJoin(room, { resumeToken, joinNonce } = {}, signal) {
     const controller = new AbortController();
+    const cancel = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', cancel, { once: true });
     const timeout = setTimeout(() => controller.abort(), 12_000);
     try {
       const response = await fetch(`${this.controlPlane}/v1/demo/join`, {
@@ -785,7 +1286,11 @@ class MultiplayerApp {
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ room, ...(resumeToken ? { resumeToken } : {}) }),
+        body: JSON.stringify({
+          room,
+          ...(resumeToken ? { resumeToken } : {}),
+          ...(joinNonce ? { joinNonce } : {}),
+        }),
         signal: controller.signal,
       });
       let payload;
@@ -804,10 +1309,23 @@ class MultiplayerApp {
       throw error;
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', cancel);
     }
   }
 
-  async join({ reconnecting = false } = {}) {
+  join(options = {}) {
+    return this.joinFlight.run(async () => {
+      const controller = new AbortController();
+      this.joinAbortController = controller;
+      try {
+        return await this.performJoin(options, controller.signal);
+      } finally {
+        if (this.joinAbortController === controller) this.joinAbortController = null;
+      }
+    });
+  }
+
+  async performJoin({ reconnecting = false } = {}, signal) {
     let room;
     try {
       room = validateRoom(reconnecting ? this.joinedRoom : this.ui.room.value);
@@ -839,30 +1357,60 @@ class MultiplayerApp {
       this.playerTracks.clear();
       this.projectileTracks.clear();
       this.impacts.length = 0;
+      this.heals.length = 0;
+      this.castCues.length = 0;
+      this.localCastReadyAt.clear();
       this.seenEvents.clear();
       this.seenEventOrder.length = 0;
       updateRoomUrl(room);
     }
 
     try {
-      const resumeToken = this.loadResumeToken(room);
+      const resumeToken = await this.loadResumeToken(room);
       let joined;
-      try {
-        joined = await this.requestJoin(room, resumeToken);
-      } catch (error) {
-        if (
-          resumeToken &&
-          error instanceof JoinError &&
-          (error.code === 'invalid_resume_token' || error.code === 'resume_expired')
-        ) {
-          this.clearResumeToken(room);
-          joined = await this.requestJoin(room, undefined);
-        } else {
-          throw error;
+      if (resumeToken !== undefined) {
+        try {
+          joined = await this.requestJoin(room, { resumeToken }, signal);
+        } catch (error) {
+          if (
+            error instanceof JoinError &&
+            (error.code === 'invalid_resume_token' || error.code === 'resume_expired')
+          ) {
+            this.clearResumeToken(room);
+            if (reconnecting) {
+              throw new JoinError(
+                error.status,
+                error.code,
+                'This staging session expired. Choose Join to open a new player.',
+              );
+            }
+          } else {
+            throw error;
+          }
         }
       }
+      if (joined === undefined) {
+        const attempt = await this.prepareFreshJoin(room);
+        try {
+          joined = await this.requestJoin(
+            room,
+            { joinNonce: attempt.nonce },
+            signal,
+          );
+        } catch (error) {
+          if (error instanceof JoinError && error.status >= 400 && error.status < 500) {
+            this.clearResumeToken(room);
+            this.clearJoinAttempt(room);
+          }
+          throw error;
+        }
+        if (joined.resumeToken !== attempt.resumeToken) {
+          throw new Error('The staging join did not match this tab’s idempotent attempt.');
+        }
+        this.clearJoinAttempt(room);
+      }
       if (generation !== this.joinGeneration) return;
-      this.saveResumeToken(room, joined.resumeToken);
+      await this.saveResumeToken(room, joined.resumeToken);
       this.joinSlot = joined.slot;
       this.interpolationMs = 1_000 / joined.snapshotHz;
       this.openSocket(joined, generation);
@@ -871,7 +1419,15 @@ class MultiplayerApp {
       this.showError(error);
       this.setConnection('error', reconnecting ? 'Reconnect failed' : 'Could not join staging');
       this.ui.join.disabled = false;
-      if (reconnecting) this.scheduleReconnect();
+      const resumeEnded =
+        error instanceof JoinError &&
+        (error.code === 'invalid_resume_token' || error.code === 'resume_expired');
+      if (resumeEnded) {
+        this.ui.lobby.classList.remove('joined');
+        this.ui.leave.hidden = true;
+      } else if (reconnecting) {
+        this.scheduleReconnect();
+      }
     }
   }
 
@@ -883,8 +1439,9 @@ class MultiplayerApp {
     this.inputHistory.length = 0;
     this.acknowledgedInputSequence = 0;
     this.reconciliation = { x: 0, y: 0, z: 0, from: nowMs() };
-    this.seenEvents.clear();
-    this.seenEventOrder.length = 0;
+    // A resumed socket can receive the room's short reliable-event replay.
+    // Keep the same-match de-duplication cursor here; fresh joins and Leave
+    // clear it explicitly.
     this.rtt = null;
     this.snapshotJitterMs = 0;
     this.lastSnapshotAt = null;
@@ -893,7 +1450,7 @@ class MultiplayerApp {
     let socket;
     try {
       socket = new WebSocket(joined.webSocketUrl, [
-        'aetherloom.v2',
+        'aetherloom.v3',
         `aetherloom.auth.${joined.ticket}`,
       ]);
     } catch (error) {
@@ -924,7 +1481,7 @@ class MultiplayerApp {
         socket.close(1000, 'superseded');
         return;
       }
-      if (socket.protocol !== 'aetherloom.v2') {
+      if (socket.protocol !== 'aetherloom.v3') {
         socket.close(1002, 'subprotocol mismatch');
         return;
       }
@@ -992,6 +1549,9 @@ class MultiplayerApp {
   }
 
   leave() {
+    this.joinAbortController?.abort();
+    this.joinAbortController = null;
+    this.joinFlight.reset();
     this.joinGeneration += 1;
     clearTimeout(this.reconnectTimer);
     this.stopInput();
@@ -1004,6 +1564,13 @@ class MultiplayerApp {
     this.playerTracks.clear();
     this.projectileTracks.clear();
     this.impacts.length = 0;
+    this.heals.length = 0;
+    this.castCues.length = 0;
+    this.localCastReadyAt.clear();
+    this.castPulse = false;
+    this.mouseCastHeld = false;
+    this.touchCastHeld = false;
+    this.gamepadCastHeld = false;
     this.seenEvents.clear();
     this.seenEventOrder.length = 0;
     this.joinedRoom = null;
@@ -1056,36 +1623,24 @@ class MultiplayerApp {
     const pads = navigator.getGamepads?.() || [];
     const pad = Array.from(pads).find(Boolean);
     if (pad) {
-      const dead = (value) => Math.abs(value) < 0.16 ? 0 : value;
+      const dead = (value) => Math.abs(value) < GAMEPAD_LOOK_DEADZONE ? 0 : value;
       const padX = dead(pad.axes[0] || 0);
       const padY = -dead(pad.axes[1] || 0);
       if (Math.hypot(padX, padY) > Math.hypot(horizontal, vertical)) {
         horizontal = padX;
         vertical = padY;
       }
-      this.yaw = yawAfterLookDelta(this.yaw, dead(pad.axes[2] || 0) * 780);
-      this.pitch = clamp(
-        this.pitch - Math.round(dead(pad.axes[3] || 0) * 620),
-        -MAX_PITCH,
-        MAX_PITCH,
-      );
       const controllerAltitude = Number(Boolean(pad.buttons[0]?.pressed))
         - Number(Boolean(pad.buttons[1]?.pressed));
       if (controllerAltitude !== 0) altitude = controllerAltitude;
-      const held = Boolean(pad.buttons[7]?.pressed);
-      if (held && !this.gamepadCastHeld) this.castPulse = true;
-      this.gamepadCastHeld = held;
+      this.gamepadCastHeld = Boolean(pad.buttons[7]?.pressed);
     } else {
       this.gamepadCastHeld = false;
     }
-    const length = Math.hypot(horizontal, vertical);
-    if (length > 1) {
-      horizontal /= length;
-      vertical /= length;
-    }
+    const shaped = shapeFlightInput(horizontal, vertical);
     return {
-      x: clamp(Math.round(horizontal * 127), -127, 127),
-      y: clamp(Math.round(vertical * 127), -127, 127),
+      x: clamp(Math.round(shaped.strafe * 127), -127, 127),
+      y: clamp(Math.round(shaped.thrust * 127), -127, 127),
       vertical: clamp(Math.round(altitude * 127), -127, 127),
     };
   }
@@ -1093,12 +1648,44 @@ class MultiplayerApp {
   sendInput() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const localMovement = this.sampleInput();
-    const movement = movementToWorld(localMovement.x, localMovement.y, this.yaw);
-    movement.vertical = localMovement.vertical;
+    const movement = movementToWorld(
+      localMovement.x,
+      localMovement.y,
+      this.yaw,
+      this.pitch,
+      localMovement.vertical,
+    );
     this.latestInput = movement;
-    const cast = this.castPulse;
+    const cast =
+      this.castPulse ||
+      this.mouseCastHeld ||
+      this.touchCastHeld ||
+      this.gamepadCastHeld;
     this.castPulse = false;
     const sentAt = nowMs();
+    const localReadyAt = this.localCastReadyAt.get(this.selectedSpell) ?? 0;
+    if (cast && sentAt >= localReadyAt) {
+      const viewer = this.predictedViewer(sentAt);
+      if (viewer && this.selectedSpell === 0) {
+        this.castCues.push({
+          id: this.nextCastCueId,
+          sequence: this.sequence,
+          at: firstPersonMuzzle(viewer),
+          bornAt: sentAt,
+          spell: this.selectedSpell,
+        });
+        this.nextCastCueId = this.nextCastCueId === 0xffff_ffff
+          ? 1
+          : this.nextCastCueId + 1;
+        if (this.castCues.length > 8) this.castCues.splice(0, this.castCues.length - 8);
+      }
+      const spell = MULTIPLAYER_SPELLS.find((candidate) =>
+        candidate.id === this.selectedSpell);
+      this.localCastReadyAt.set(
+        this.selectedSpell,
+        sentAt + (spell?.cooldownMs ?? 250),
+      );
+    }
     const sentClock = Math.floor(sentAt) & 0xffff;
     const frame = encodeInputFrame({
       sequence: this.sequence,
@@ -1108,6 +1695,7 @@ class MultiplayerApp {
       yaw: this.yaw,
       pitch: clamp(Math.round(this.pitch / MAX_PITCH * 127), -127, 127),
       cast,
+      spell: this.selectedSpell,
       clientClockMs: sentClock,
       snapshotAck: this.latestSnapshotSeq ?? 0,
     });
@@ -1133,7 +1721,15 @@ class MultiplayerApp {
   updateTrack(map, key, target, receivedAt) {
     const existing = map.get(key);
     const current = sampleTrack(existing, receivedAt, this.interpolationMs) || target;
-    map.set(key, { previous: current, target, from: receivedAt, seenAt: receivedAt });
+    const next = {
+      ...existing,
+      previous: current,
+      target,
+      from: receivedAt,
+      seenAt: receivedAt,
+    };
+    map.set(key, next);
+    return next;
   }
 
   handleSnapshot(snapshot) {
@@ -1161,6 +1757,18 @@ class MultiplayerApp {
       this.inputHistory = this.inputHistory.filter((entry) =>
         isNewerSequence(entry.sequence, this.acknowledgedInputSequence));
     }
+    const echoedAt = snapshot.echoClock === 0
+      ? undefined
+      : this.sentClocks.get(snapshot.echoClock);
+    if (echoedAt !== undefined) {
+      this.sentClocks.delete(snapshot.echoClock);
+      const roundTrip = receivedAt - echoedAt;
+      if (roundTrip >= 0 && roundTrip <= 10_000) {
+        this.rtt = this.rtt === null
+          ? roundTrip
+          : this.rtt * 0.76 + roundTrip * 0.24;
+      }
+    }
 
     for (const player of snapshot.players) {
       const target = this.worldPosition(player.xcm, player.ycm, player.zcm, CARPET_CLEARANCE);
@@ -1174,6 +1782,21 @@ class MultiplayerApp {
         this.yawInitialized = true;
       }
     }
+    const viewerPlayer = snapshot.players.find(
+      (player) => player.slot === snapshot.viewerSlot,
+    );
+    if (viewerPlayer?.spellCooldownTicks?.length === 13) {
+      for (const spell of MULTIPLAYER_SPELLS) {
+        this.localCastReadyAt.set(
+          spell.id,
+          authoritativeCooldownReadyAt(
+            receivedAt,
+            viewerPlayer.spellCooldownTicks[spell.id],
+            this.rtt ?? 0,
+          ),
+        );
+      }
+    }
     const liveSlots = new Set(snapshot.players.map((player) => player.slot));
     for (const slot of this.playerTracks.keys()) if (!liveSlots.has(slot)) this.playerTracks.delete(slot);
 
@@ -1182,11 +1805,24 @@ class MultiplayerApp {
         projectile.xcm,
         projectile.ycm,
         projectile.zcm,
-        PROJECTILE_CLEARANCE,
+        CARPET_CLEARANCE,
       );
       target.yaw = projectile.yaw;
       target.pitch = projectile.pitch;
-      this.updateTrack(this.projectileTracks, projectile.entity, target, receivedAt);
+      const track = this.updateTrack(
+        this.projectileTracks,
+        projectile.entity,
+        target,
+        receivedAt,
+      );
+      if (!Number.isFinite(track.firstSeenAt)) {
+        track.firstSeenAt = receivedAt;
+        track.firstSeenElapsedTicks =
+          PROJECTILE_LIFETIME_TICKS - projectile.ttl;
+        if (projectile.owner === snapshot.viewerSlot) {
+          this.consumeCastCue(0);
+        }
+      }
     }
     const liveProjectiles = new Set(snapshot.projectiles.map((projectile) => projectile.entity));
     for (const entity of this.projectileTracks.keys()) {
@@ -1200,7 +1836,27 @@ class MultiplayerApp {
       if (this.seenEventOrder.length > MAX_SEEN_EVENTS) {
         this.seenEvents.delete(this.seenEventOrder.shift());
       }
-      if (event.type === DAMAGE_EVENT_TYPE) this.spawnImpact(event, receivedAt);
+      if (event.type === PROJECTILE_IMPACT_EVENT_TYPE && event.spell === 0) {
+        this.spawnImpact(event, receivedAt);
+      }
+      if (
+        event.type === CAST_EVENT_TYPE &&
+        event.spell === 0 &&
+        event.actor === snapshot.viewerSlot
+      ) {
+        this.consumeCastCue(0);
+      }
+      if (event.type === CAST_EVENT_TYPE && event.spell === 7) {
+        this.spawnHeal(event, receivedAt);
+      }
+    }
+    if (
+      viewerPlayer?.spellCooldownTicks?.[0] === 0 &&
+      this.acknowledgedInputSequence !== 0
+    ) {
+      this.castCues = this.castCues.filter((cue) =>
+        cue.spell !== 0 ||
+        !sequenceAcknowledges(this.acknowledgedInputSequence, cue.sequence));
     }
 
     const reconciledViewer = this.rawPredictedViewer(receivedAt);
@@ -1225,21 +1881,29 @@ class MultiplayerApp {
       };
     }
 
-    const echoedAt = snapshot.echoClock === 0 ? undefined : this.sentClocks.get(snapshot.echoClock);
-    if (echoedAt !== undefined) {
-      this.sentClocks.delete(snapshot.echoClock);
-      const roundTrip = receivedAt - echoedAt;
-      if (roundTrip >= 0 && roundTrip <= 10_000) {
-        this.rtt = this.rtt === null ? roundTrip : this.rtt * 0.76 + roundTrip * 0.24;
-      }
-    }
     this.updateStats();
   }
 
+  consumeCastCue(spell) {
+    const index = this.castCues.findIndex((cue) => cue.spell === spell);
+    if (index >= 0) this.castCues.splice(index, 1);
+  }
+
   spawnImpact(event, time) {
-    const at = this.worldPosition(event.xcm, event.ycm, event.zcm, CARPET_CLEARANCE);
+    const at = this.worldPosition(
+      event.xcm,
+      event.ycm,
+      event.zcm,
+      PROJECTILE_CLEARANCE,
+    );
     this.impacts.push({ eventId: event.eventId, at, bornAt: time });
     if (this.impacts.length > MAX_IMPACTS) this.impacts.splice(0, this.impacts.length - MAX_IMPACTS);
+  }
+
+  spawnHeal(event, time) {
+    const at = this.worldPosition(event.xcm, event.ycm, event.zcm, CARPET_CLEARANCE);
+    this.heals.push({ eventId: event.eventId, at, bornAt: time });
+    if (this.heals.length > MAX_HEALS) this.heals.splice(0, this.heals.length - MAX_HEALS);
   }
 
   rawPredictedViewer(time) {
@@ -1297,12 +1961,31 @@ class MultiplayerApp {
         );
       }
       for (const projectile of this.latestSnapshot.projectiles) {
-        const position = sampleTrack(this.projectileTracks.get(projectile.entity), time, this.interpolationMs);
-        if (!position) continue;
+        const track = this.projectileTracks.get(projectile.entity);
+        const tracked = sampleTrack(
+          track,
+          time,
+          this.interpolationMs,
+        );
+        if (!tracked) continue;
+        const elapsedTicks =
+          (track?.firstSeenElapsedTicks ?? PROJECTILE_LIFETIME_TICKS - projectile.ttl) +
+          Math.max(0, time - (track?.firstSeenAt ?? time)) * 128 / 1_000;
+        const position = viewerProjectilePresentation(
+          tracked,
+          projectile,
+          this.latestSnapshot.viewerSlot,
+          elapsedTicks,
+        );
+        const fireboltTemplate =
+          this.templates.firebolt[
+            (Math.floor(time / FIREBOLT_TEMPLATE_FRAME_MS) + projectile.entity) %
+              this.templates.firebolt.length
+          ];
         count = appendTemplate(
           this.instances,
           count,
-          this.templates.firebolt,
+          fireboltTemplate,
           this.templateOrigin,
           [position.x, position.y, position.z],
           wireYawToRenderRadians(position.yaw),
@@ -1316,6 +1999,46 @@ class MultiplayerApp {
   composeParticles(time) {
     let count = 0;
     const capacity = this.particles.length / PARTICLE_STRIDE;
+    this.castCues = this.castCues.filter((cue) => time - cue.bornAt < 180);
+    for (const cue of this.castCues) {
+      const age = Math.max(0, (time - cue.bornAt) / 1_000);
+      const remaining = clamp(1 - age / 0.18, 0, 1);
+      const yaw = wireYawToCoreRadians(cue.at.yaw);
+      const pitch = wirePitchToRadians(cue.at.pitch);
+      const level = Math.cos(pitch);
+      const forward = [
+        Math.cos(yaw) * level,
+        Math.sin(pitch),
+        Math.sin(yaw) * level,
+      ];
+      const travelled = age * FIREBOLT_PRESENTATION_SPEED;
+      for (let index = 0; index < 11 && count < capacity; index += 1) {
+        const seed = cue.id ^ Math.imul(index + 1, 0x9e37_79b9);
+        const phase = hashUnit(seed) * Math.PI * 2;
+        const spread = hashUnit(seed ^ 0xa511_e9b3);
+        const trail = Math.min(travelled, index * 0.42);
+        const radius = spread * (0.22 + age * 2.4);
+        const base = count * PARTICLE_STRIDE;
+        this.particles[base] =
+          cue.at.x +
+          forward[0] * (travelled - trail) +
+          Math.cos(phase) * radius;
+        this.particles[base + 1] =
+          cue.at.y +
+          forward[1] * (travelled - trail) +
+          Math.sin(phase * 1.7) * radius;
+        this.particles[base + 2] =
+          cue.at.z +
+          forward[2] * (travelled - trail) +
+          Math.sin(phase) * radius;
+        this.particles[base + 3] = (index < 3 ? 2.8 : 1.2 + spread) * (0.45 + remaining);
+        this.particles[base + 4] = 1.65;
+        this.particles[base + 5] = index < 3 ? 0.92 : 0.34 + spread * 0.28;
+        this.particles[base + 6] = index < 3 ? 0.38 : 0.04;
+        this.particles[base + 7] = remaining * remaining;
+        count += 1;
+      }
+    }
     this.impacts = this.impacts.filter((impact) => time - impact.bornAt < 900);
     for (const impact of this.impacts) {
       const age = (time - impact.bornAt) / 1_000;
@@ -1361,6 +2084,33 @@ class MultiplayerApp {
         count += 1;
       }
     }
+    this.heals = this.heals.filter((heal) => time - heal.bornAt < 1_050);
+    for (const heal of this.heals) {
+      const age = Math.max(0, (time - heal.bornAt) / 1_000);
+      const remaining = clamp(1 - age / 1.05, 0, 1);
+      for (let index = 0; index < 30 && count < capacity; index += 1) {
+        const seed = heal.eventId ^ Math.imul(index + 1, 0x7f4a_7c15);
+        const angle = hashUnit(seed) * Math.PI * 2;
+        const spread = hashUnit(seed ^ 0x68bc_21eb);
+        const phase = hashUnit(seed ^ 0x02e5_be93);
+        const radius =
+          2 +
+          spread * 8 +
+          Math.sin(age * 7 + phase * Math.PI * 2) * 1.4;
+        const base = count * PARTICLE_STRIDE;
+        this.particles[base] = heal.at.x + Math.cos(angle) * radius;
+        this.particles[base + 1] =
+          heal.at.y - 3 + phase * 9 + age * (9 + spread * 16);
+        this.particles[base + 2] = heal.at.z + Math.sin(angle) * radius;
+        this.particles[base + 3] =
+          (1.2 + spread * 2.1) * (0.55 + remaining);
+        this.particles[base + 4] = 0.24 + spread * 0.18;
+        this.particles[base + 5] = 1.25;
+        this.particles[base + 6] = 0.43 + phase * 0.27;
+        this.particles[base + 7] = remaining * remaining;
+        count += 1;
+      }
+    }
     this.particleCount = count;
   }
 
@@ -1383,6 +2133,31 @@ class MultiplayerApp {
   }
 
   render(time) {
+    const elapsedMs = this.lastRenderAt === null ? 0 : Math.max(0, time - this.lastRenderAt);
+    this.lastRenderAt = time;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      const pads = navigator.getGamepads?.() || [];
+      const pad = Array.from(pads).find(Boolean);
+      if (pad) {
+        this.yaw = yawAfterLookDelta(
+          this.yaw,
+          gamepadLookDelta(
+            pad.axes[2] || 0,
+            elapsedMs,
+            GAMEPAD_YAW_UNITS_PER_SECOND,
+          ),
+        );
+        this.pitch = clamp(
+          this.pitch - Math.round(gamepadLookDelta(
+            pad.axes[3] || 0,
+            elapsedMs,
+            GAMEPAD_PITCH_UNITS_PER_SECOND,
+          )),
+          -FIRST_PERSON_MAX_PITCH,
+          FIRST_PERSON_MAX_PITCH,
+        );
+      }
+    }
     this.composeInstances(time);
     this.composeParticles(time);
     this.renderer.frame(
@@ -1392,7 +2167,7 @@ class MultiplayerApp {
       this.instances,
       this.instanceCount,
       {
-        fov: 1.232,
+        fov: FIRST_PERSON_FOV,
         time: time / 1_000,
         sun: [0.53, 0.72, 0.38],
         sunI: 1,
@@ -1420,6 +2195,24 @@ class MultiplayerApp {
       : '—';
   }
 
+  selectSpell(id) {
+    const spell = MULTIPLAYER_SPELLS.find((candidate) => candidate.id === id);
+    if (!spell) throw new Error('That spell is not authoritative in the staging duel yet.');
+    this.selectedSpell = spell.id;
+    for (const button of document.querySelectorAll('.spell[data-spell]')) {
+      const selected = Number(button.dataset.spell) === spell.id;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    }
+    this.ui.touchFire.textContent = spell.name;
+  }
+
+  cycleSpell(direction) {
+    const index = MULTIPLAYER_SPELLS.findIndex((spell) => spell.id === this.selectedSpell);
+    const next = (index + direction + MULTIPLAYER_SPELLS.length) % MULTIPLAYER_SPELLS.length;
+    this.selectSpell(MULTIPLAYER_SPELLS[next].id);
+  }
+
   bindControls() {
     const movementKeys = new Set([
       'w', 'a', 's', 'd',
@@ -1437,12 +2230,28 @@ class MultiplayerApp {
         this.castPulse = true;
         event.preventDefault();
       }
+      const selected = MULTIPLAYER_SPELLS.find((spell) => spell.key === event.key);
+      if (selected && !event.repeat) {
+        this.selectSpell(selected.id);
+        event.preventDefault();
+      }
+      if (key === 'q' && !event.repeat) {
+        this.cycleSpell(-1);
+        event.preventDefault();
+      }
+      if (key === 'e' && !event.repeat) {
+        this.cycleSpell(1);
+        event.preventDefault();
+      }
     });
     addEventListener('keyup', (event) => this.keys.delete(event.key.toLowerCase()));
     const clearHeldControls = () => {
       this.keys.clear();
       this.touchKeys.clear();
       this.castPulse = false;
+      this.mouseCastHeld = false;
+      this.touchCastHeld = false;
+      this.gamepadCastHeld = false;
       this.touchAim = null;
       for (const button of document.querySelectorAll('.touch-controls .active')) {
         button.classList.remove('active');
@@ -1454,17 +2263,19 @@ class MultiplayerApp {
     });
     document.addEventListener('mousemove', (event) => {
       if (document.pointerLockElement === this.ui.canvas) {
-        this.yaw = yawAfterLookDelta(this.yaw, event.movementX * 70);
+        this.yaw = yawAfterLookDelta(
+          this.yaw,
+          event.movementX * MOUSE_LOOK_UNITS_PER_PIXEL,
+        );
         this.pitch = clamp(
-          this.pitch - Math.round(event.movementY * 70),
-          -MAX_PITCH,
-          MAX_PITCH,
+          this.pitch - Math.round(event.movementY * MOUSE_LOOK_UNITS_PER_PIXEL),
+          -FIRST_PERSON_MAX_PITCH,
+          FIRST_PERSON_MAX_PITCH,
         );
       }
     });
     this.ui.canvas.addEventListener('mousedown', (event) => {
       if (event.button !== 0 || document.body.dataset.connection !== 'connected') return;
-      this.castPulse = true;
       if (document.pointerLockElement !== this.ui.canvas) {
         try {
           const pending = this.ui.canvas.requestPointerLock?.();
@@ -1472,7 +2283,15 @@ class MultiplayerApp {
         } catch {
           // Older implementations return void or throw synchronously.
         }
+        return;
       }
+      this.mouseCastHeld = true;
+    });
+    addEventListener('mouseup', (event) => {
+      if (event.button === 0) this.mouseCastHeld = false;
+    });
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement !== this.ui.canvas) this.mouseCastHeld = false;
     });
     this.ui.canvas.addEventListener('pointerdown', (event) => {
       if (event.pointerType === 'mouse' || document.body.dataset.connection !== 'connected') return;
@@ -1487,8 +2306,12 @@ class MultiplayerApp {
       const deltaY = event.clientY - this.touchAim.y;
       this.touchAim.x = event.clientX;
       this.touchAim.y = event.clientY;
-      this.yaw = yawAfterLookDelta(this.yaw, delta * 95);
-      this.pitch = clamp(this.pitch - Math.round(deltaY * 95), -MAX_PITCH, MAX_PITCH);
+      this.yaw = yawAfterLookDelta(this.yaw, delta * TOUCH_LOOK_UNITS_PER_PIXEL);
+      this.pitch = clamp(
+        this.pitch - Math.round(deltaY * TOUCH_LOOK_UNITS_PER_PIXEL),
+        -FIRST_PERSON_MAX_PITCH,
+        FIRST_PERSON_MAX_PITCH,
+      );
     });
     const finishTouchAim = (event) => {
       if (this.touchAim?.id === event.pointerId) this.touchAim = null;
@@ -1517,18 +2340,23 @@ class MultiplayerApp {
     }
     const castDown = (event) => {
       event.preventDefault();
-      this.castPulse = true;
+      this.touchCastHeld = true;
       this.ui.touchFire.classList.add('active');
       this.ui.touchFire.setPointerCapture?.(event.pointerId);
     };
     const castUp = (event) => {
       event.preventDefault();
+      this.touchCastHeld = false;
       this.ui.touchFire.classList.remove('active');
     };
     this.ui.touchFire.addEventListener('pointerdown', castDown);
     this.ui.touchFire.addEventListener('pointerup', castUp);
     this.ui.touchFire.addEventListener('pointercancel', castUp);
     this.ui.touchFire.addEventListener('lostpointercapture', castUp);
+    for (const button of document.querySelectorAll('.spell[data-spell]')) {
+      button.addEventListener('click', () => this.selectSpell(Number(button.dataset.spell)));
+    }
+    this.selectSpell(this.selectedSpell);
   }
 
   publicState() {
@@ -1545,6 +2373,7 @@ class MultiplayerApp {
       rttMs: this.rtt === null ? null : Math.round(this.rtt),
       yaw: this.yaw,
       pitch: this.pitch,
+      selectedSpell: this.selectedSpell,
       viewer: this.predictedViewer(nowMs()),
       malformedFrames: this.protocolFailures,
       instanceCount: this.instanceCount,
@@ -1558,6 +2387,30 @@ function updateRoomUrl(room) {
   const url = new URL(location.href);
   url.searchParams.set('room', room);
   history.replaceState(null, '', url);
+}
+
+function safeBrowserStorage(name) {
+  try {
+    const storage = globalThis[name];
+    return storage &&
+      typeof storage.getItem === 'function' &&
+      typeof storage.setItem === 'function' &&
+      typeof storage.removeItem === 'function'
+      ? storage
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeBrowserLocks() {
+  try {
+    return typeof globalThis.navigator?.locks?.request === 'function'
+      ? globalThis.navigator.locks
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 let app = null;
@@ -1580,6 +2433,7 @@ const testApi = {
   validateRoom,
   wirePitchToRadians,
   yawAfterLookDelta,
+  gamepadLookDelta,
   snapshot: () => app?.publicState() || {
     ready: false,
     connection: 'booting',
@@ -1659,7 +2513,7 @@ async function boot() {
     ui.room.value = ui.room.value.toLowerCase().replace(/[^a-z0-9-]/gu, '');
   });
   ui.room.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') app.join();
+    if (event.key === 'Enter' && !ui.join.disabled) app.join();
   });
   ui.join.addEventListener('click', () => app.join());
   ui.leave.addEventListener('click', () => app.leave());

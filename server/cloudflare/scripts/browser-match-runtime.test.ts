@@ -4,13 +4,61 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { BrowserMatchSimulation } from "../src/browser-match-runtime.ts";
+import {
+  BrowserMatchSimulation,
+  selectSnapshotProjectiles,
+} from "../src/browser-match-runtime.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const bytes = await readFile(join(root, "generated", "aetherloom-worker-match.wasm"));
 const module = new WebAssembly.Module(bytes);
 
-test("browser-match Wasm export and snapshot pin the same version-two ABI", () => {
+test("snapshot budgeting never starves the viewer's newest projectiles", () => {
+  const projectiles = Array.from({ length: 40 }, (_, index) => ({
+    entityKey: `0:${index + 1}`,
+    ownerPlayerId: index === 0 || index === 39 ? 2 : index % 2,
+    teamId: index % 2,
+    xCm:
+      index === 1
+        ? 1
+        : index === 3 || index === 4
+          ? 10_005
+          : 10_000 + index,
+    yCm: 0,
+    zCm: 0,
+    velocityXCmPerTick: 0,
+    velocityYCmPerTick: 0,
+    velocityZCmPerTick: 0,
+    yaw: 0,
+    pitch: 0,
+    lifetimeTicks: index === 0 ? 1 : index + 1,
+    flags: 0,
+  }));
+  const selected = selectSnapshotProjectiles(
+    projectiles,
+    { playerId: 2, xCm: 0, yCm: 0, zCm: 0 },
+    new Set(["0:4"]),
+    31,
+  );
+  assert.deepEqual(
+    selected.slice(0, 2).map((projectile) => projectile.entityKey).sort(),
+    ["0:1", "0:40"],
+  );
+  assert.equal(selected.length, 31);
+  assert.equal(
+    selected.some((projectile) => projectile.entityKey === "0:2"),
+    true,
+    "the nearest hostile shot must survive newer distant shots",
+  );
+  assert.equal(selected.some((projectile) => projectile.entityKey === "0:39"), false);
+  assert.ok(
+    selected.findIndex((projectile) => projectile.entityKey === "0:4") <
+      selected.findIndex((projectile) => projectile.entityKey === "0:5"),
+    "an already visible projectile must win an otherwise equivalent tie",
+  );
+});
+
+test("browser-match Wasm export and snapshot pin the same version-three ABI", () => {
   const instance = new WebAssembly.Instance(module, {});
   const exports = instance.exports as {
     memory: WebAssembly.Memory;
@@ -19,7 +67,7 @@ test("browser-match Wasm export and snapshot pin the same version-two ABI", () =
     worker_match_snapshot_ptr: () => number;
     worker_match_snapshot_len: () => number;
   };
-  assert.equal(exports.worker_match_abi_version(), 2);
+  assert.equal(exports.worker_match_abi_version(), 3);
   assert.equal(exports.worker_match_init(0, 0), 0);
   const words = new Int32Array(
     exports.memory.buffer,
@@ -47,16 +95,16 @@ test("browser-match Wasm advances the real fixed-spawn authoritative core", () =
     ],
   );
 
-  match.submitInput(0, 2_047, 0, 0, 0, 0, false);
+  match.submitInput(0, 2_047, 0, 0, 0, 0, false, null);
   const first = match.advanceTick();
   const second = match.advanceTick();
   const stale = match.advanceTick();
   assert.equal(first.tick, 1);
-  assert.equal(first.players[0]?.xCm, -242);
-  assert.equal(second.players[0]?.xCm, -234);
+  assert.equal(first.players[0]?.xCm, -240);
+  assert.equal(second.players[0]?.xCm, -230);
   assert.equal(
     stale.players[0]?.xCm,
-    -234,
+    -230,
     "an open socket without a fresh frame must auto-neutralize after two ticks",
   );
 });
@@ -65,7 +113,7 @@ test("browser-match Wasm exposes authoritative projectile damage events", () => 
   const match = new BrowserMatchSimulation(module, 11, 0);
   match.addHuman(0, 0);
   match.addHuman(1, 1);
-  match.submitInput(0, 0, 0, 0, 0, 0, true);
+  match.submitInput(0, 0, 0, 0, 0, 0, true, 0);
 
   let damaged = false;
   for (let tick = 0; tick < 32; tick += 1) {
@@ -75,20 +123,47 @@ test("browser-match Wasm exposes authoritative projectile damage events", () => 
       assert.ok((snapshot.players[1]?.health ?? 100) < 100);
       break;
     }
-    match.submitInput(0, 0, 0, 0, 0, 0, false);
+    match.submitInput(0, 0, 0, 0, 0, 0, false, null);
   }
   assert.equal(damaged, true);
+});
+
+test("browser-match Wasm exposes authoritative Mend without a projectile", () => {
+  const match = new BrowserMatchSimulation(module, 12, 0);
+  match.addHuman(0, 0);
+  match.addHuman(1, 1);
+  match.submitInput(0, 0, 0, 0, 0, 0, true, 0);
+  for (let tick = 0; tick < 32; tick += 1) {
+    const snapshot = match.advanceTick();
+    if ((snapshot.players[1]?.health ?? 100) < 100) break;
+    match.submitInput(0, 0, 0, 0, 0, 0, false, null);
+  }
+  assert.ok((match.snapshot().players[1]?.health ?? 100) < 100);
+  match.submitInput(1, 0, 0, 0, 32_768, 0, true, 7);
+  const healed = match.advanceTick();
+  assert.equal(healed.players[1]?.health, 100);
+  assert.equal(healed.players[1]?.cooldownTicks.length, 13);
+  assert.equal(healed.players[1]?.cooldownTicks[0], 0);
+  assert.equal(healed.players[1]?.cooldownTicks[7], 896);
+  assert.equal(
+    healed.players[1]?.cooldownTicks.every(
+      (cooldown, spell) => spell === 7 || cooldown === 0,
+    ),
+    true,
+  );
+  assert.equal(healed.projectiles.length, 0);
+  assert.ok(healed.events.some((event) => event.kind === 3 && event.data[0] === 7));
 });
 
 test("browser-match Wasm keeps vertical flight and pitch authoritative", () => {
   const match = new BrowserMatchSimulation(module, 17, 0);
   match.addHuman(0, 0);
-  match.submitInput(0, 0, 0, 2_047, 0, 8_192, false);
+  match.submitInput(0, 0, 0, 2_047, 0, 8_192, false, null);
   const climbed = match.advanceTick();
-  assert.equal(climbed.players[0]?.yCm, 5);
+  assert.equal(climbed.players[0]?.yCm, 6);
   assert.equal(climbed.players[0]?.pitch, 8_192);
 
-  match.submitInput(0, 0, 0, -2_047, 0, -8_192, false);
+  match.submitInput(0, 0, 0, -2_047, 0, -8_192, false, null);
   const descended = match.advanceTick();
   assert.equal(descended.players[0]?.yCm, 0);
   assert.equal(descended.players[0]?.pitch, -8_192);

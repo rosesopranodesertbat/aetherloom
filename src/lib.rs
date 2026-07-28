@@ -227,16 +227,12 @@ pub extern "C" fn instCount() -> i32 {
 pub extern "C" fn previewSceneCount() -> i32 {
     render::PREVIEW_SCENE_COUNT
 }
-/// Every valid scene currently exposes the same eight deterministic variants.
+/// Returns the deterministic visual-QA variants available for one scene.
 #[allow(unsafe_code)]
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "C" fn previewVariantCount(scene: i32) -> i32 {
-    if (0..render::PREVIEW_SCENE_COUNT).contains(&scene) {
-        render::PREVIEW_VARIANT_COUNT
-    } else {
-        0
-    }
+    render::preview_variant_count(scene)
 }
 /// Replaces only the render-output buffers with one deterministic model scene.
 ///

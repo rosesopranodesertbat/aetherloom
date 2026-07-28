@@ -17,6 +17,7 @@ fn keyframe(revision: u32, height: i16) -> SnapshotKeyframe {
         snapshot_id: SnapshotId::new(revision),
         viewer: viewer(),
         acknowledged_input_sequence: 0,
+        spell_cooldown_ticks: [0; 13],
         entities: Vec::new(),
         terrain_revisions: vec![ChunkRevision {
             x: 2,

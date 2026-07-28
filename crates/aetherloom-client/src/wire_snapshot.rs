@@ -65,6 +65,7 @@ fn decode_keyframe(
         viewer: keyframe.viewer,
         server_tick,
         acknowledged_input_sequence: keyframe.acknowledged_input_sequence,
+        spell_cooldown_ticks: keyframe.spell_cooldown_ticks,
         entities: decode_entities(&keyframe.entities)?,
         removed_entities: Vec::new(),
         terrain_revisions: keyframe
@@ -92,6 +93,7 @@ fn decode_delta(
         viewer: delta.viewer,
         server_tick,
         acknowledged_input_sequence: delta.acknowledged_input_sequence,
+        spell_cooldown_ticks: delta.spell_cooldown_ticks,
         entities: decode_entities(&delta.entities)?,
         removed_entities: delta.removed_entities.clone(),
         terrain_revisions: Vec::new(),

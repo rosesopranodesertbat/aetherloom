@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub const PROTOCOL_MAGIC: [u8; 4] = *b"ALMP";
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const HEADER_BYTES: usize = 60;
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const MAX_RELIABLE_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -25,6 +25,9 @@ pub const TERRAIN_CELLS_PER_CHUNK: usize =
 const MAX_TERRAIN_OPS: usize =
     TERRAIN_CELLS_PER_CHUNK;
 const NONE_PLAYER_OR_TEAM: u16 = u16::MAX;
+/// Number of campaign spell slots whose authoritative cooldowns are carried
+/// privately to the snapshot viewer.
+pub const SPELL_COOLDOWN_SLOTS: usize = 13;
 const NONE_ENTITY: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +199,7 @@ pub struct SnapshotDelta {
     pub baseline_id: SnapshotId,
     pub viewer: PlayerId,
     pub acknowledged_input_sequence: u32,
+    pub spell_cooldown_ticks: [u16; SPELL_COOLDOWN_SLOTS],
     pub entities: Vec<EntityState>,
     pub removed_entities: Vec<EntityId>,
 }
@@ -228,6 +232,9 @@ impl SnapshotDelta {
         writer.u32(self.baseline_id.get());
         writer.u16(self.viewer.get());
         writer.u32(self.acknowledged_input_sequence);
+        for cooldown in self.spell_cooldown_ticks {
+            writer.u16(cooldown);
+        }
         encode_count(writer, self.entities.len(), "snapshot delta entities")?;
         for entity in &self.entities {
             entity.encode(writer)?;
@@ -248,6 +255,10 @@ impl SnapshotDelta {
         let baseline_id = SnapshotId::new(reader.u32()?);
         let viewer = PlayerId::new(reader.u16()?)?;
         let acknowledged_input_sequence = reader.u32()?;
+        let mut spell_cooldown_ticks = [0_u16; SPELL_COOLDOWN_SLOTS];
+        for cooldown in &mut spell_cooldown_ticks {
+            *cooldown = reader.u16()?;
+        }
         let entity_count =
             decode_count(reader, "snapshot delta entities", MAX_DELTA_ENTITIES)?;
         let mut entities = Vec::with_capacity(entity_count);
@@ -265,6 +276,7 @@ impl SnapshotDelta {
             baseline_id,
             viewer,
             acknowledged_input_sequence,
+            spell_cooldown_ticks,
             entities,
             removed_entities,
         };
@@ -345,6 +357,7 @@ pub struct SnapshotKeyframe {
     pub snapshot_id: SnapshotId,
     pub viewer: PlayerId,
     pub acknowledged_input_sequence: u32,
+    pub spell_cooldown_ticks: [u16; SPELL_COOLDOWN_SLOTS],
     pub entities: Vec<EntityState>,
     pub terrain_revisions: Vec<ChunkRevision>,
     pub terrain_chunks: Vec<TerrainChunkState>,
@@ -414,6 +427,9 @@ impl SnapshotKeyframe {
         writer.u32(self.snapshot_id.get());
         writer.u16(self.viewer.get());
         writer.u32(self.acknowledged_input_sequence);
+        for cooldown in self.spell_cooldown_ticks {
+            writer.u16(cooldown);
+        }
         encode_count(writer, self.entities.len(), "snapshot keyframe entities")?;
         for entity in &self.entities {
             entity.encode(writer)?;
@@ -443,6 +459,10 @@ impl SnapshotKeyframe {
         let snapshot_id = SnapshotId::new(reader.u32()?);
         let viewer = PlayerId::new(reader.u16()?)?;
         let acknowledged_input_sequence = reader.u32()?;
+        let mut spell_cooldown_ticks = [0_u16; SPELL_COOLDOWN_SLOTS];
+        for cooldown in &mut spell_cooldown_ticks {
+            *cooldown = reader.u16()?;
+        }
         let entity_count =
             decode_count(reader, "snapshot keyframe entities", MAX_KEYFRAME_ENTITIES)?;
         let mut entities = Vec::with_capacity(entity_count);
@@ -472,6 +492,7 @@ impl SnapshotKeyframe {
             snapshot_id,
             viewer,
             acknowledged_input_sequence,
+            spell_cooldown_ticks,
             entities,
             terrain_revisions,
             terrain_chunks,

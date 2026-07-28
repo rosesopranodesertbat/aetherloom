@@ -3,7 +3,7 @@ use aetherloom_core::{
     Controller, CoreError, Entity, EntityKind, EntityPool, InterestTier, MatchConfig,
     MatchState, PlayerCommand, PlayerId, PlayerSpawn, PresentationWorld,
     ReplicaError, ReplicatedEntity, ReplicationError, RewindError, Snapshot,
-    SnapshotId, SnapshotKind, TeamId, WorldSeed, MAX_INTERPOLATION_DELAY_TICKS,
+    SnapshotId, SnapshotKind, TeamId, TickEventKind, WorldSeed, MAX_INTERPOLATION_DELAY_TICKS,
     MAX_INTERPOLATION_SAMPLES, MAX_PENDING_PREDICTION_COMMANDS,
     MAX_REWIND_TICKS, MIN_INTERPOLATION_DELAY_TICKS, POSE_HISTORY_TICKS,
 };
@@ -68,6 +68,21 @@ fn command_3d(
     .unwrap()
 }
 
+fn spell_command(tick: u64, sequence: u32, yaw: u16, spell: u8) -> PlayerCommand {
+    PlayerCommand::new(
+        tick,
+        sequence,
+        0,
+        0,
+        0,
+        yaw,
+        0,
+        ACTION_CAST,
+        Some(spell),
+    )
+    .unwrap()
+}
+
 fn commands(tick: u64, id: PlayerId, command: PlayerCommand) -> CommandSet {
     let mut set = CommandSet::new(tick);
     set.insert(id, command).unwrap();
@@ -94,8 +109,8 @@ fn vertical_flight_and_pitch_cross_every_authoritative_boundary() {
         .unwrap();
 
     let player_state = state.player(player(0)).unwrap();
-    assert_eq!(player_state.position_cm, [0, 5, 0]);
-    assert_eq!(player_state.velocity_cm_per_tick, [0, 5, 0]);
+    assert_eq!(player_state.position_cm, [0, 6, 0]);
+    assert_eq!(player_state.velocity_cm_per_tick, [0, 6, 0]);
     assert_eq!(player_state.yaw, 1_234);
     assert_eq!(player_state.pitch, 4_096);
     let entity = state.entities().get(entity_id).unwrap();
@@ -135,7 +150,7 @@ fn vertical_flight_and_pitch_cross_every_authoritative_boundary() {
 
     let restored = MatchState::restore(state.checkpoint()).unwrap();
     let restored_player = restored.player(player(0)).unwrap();
-    assert_eq!(restored_player.position_cm, [0, 5, 0]);
+    assert_eq!(restored_player.position_cm, [0, 6, 0]);
     assert_eq!(restored_player.pitch, 4_096);
     assert_eq!(
         restored.pose_history().last().unwrap().poses[0].pitch,
@@ -152,7 +167,7 @@ fn vertical_flight_and_pitch_cross_every_authoritative_boundary() {
     assert_eq!(state.player(player(0)).unwrap().position_cm[1], 0);
     assert_eq!(
         state.player(player(0)).unwrap().velocity_cm_per_tick[1],
-        -5
+        -6
     );
     state
         .advance_tick(commands(
@@ -163,6 +178,53 @@ fn vertical_flight_and_pitch_cross_every_authoritative_boundary() {
         .unwrap();
     assert_eq!(state.player(player(0)).unwrap().position_cm[1], 0);
     assert_eq!(state.player(player(0)).unwrap().velocity_cm_per_tick[1], 0);
+}
+
+#[test]
+fn planar_input_preserves_flight_strafe_but_caps_custom_full_diagonals() {
+    let mut intended = MatchState::new(config(), WorldSeed::new(0xD0F5));
+    intended
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 0, 0], 0),
+        )
+        .unwrap();
+    intended
+        .advance_tick(commands(
+            0,
+            player(0),
+            command(0, 1, MAX_MOVE_AXIS, 1_128, false),
+        ))
+        .unwrap();
+    assert_eq!(
+        intended.player(player(0)).unwrap().velocity_cm_per_tick,
+        [10, 0, 5],
+        "the first-person client's full-thrust, 55%-strafe diagonal stays intact",
+    );
+
+    let mut untrusted = MatchState::new(config(), WorldSeed::new(0xD0F6));
+    untrusted
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 0, 0], 0),
+        )
+        .unwrap();
+    untrusted
+        .advance_tick(commands(
+            0,
+            player(0),
+            command(0, 1, MAX_MOVE_AXIS, MAX_MOVE_AXIS, false),
+        ))
+        .unwrap();
+    assert_eq!(
+        untrusted.player(player(0)).unwrap().velocity_cm_per_tick,
+        [8, 0, 8],
+        "a custom client cannot gain the uncapped full-diagonal speed",
+    );
 }
 
 #[test]
@@ -241,20 +303,20 @@ fn projectile_aim_is_fine_grained_three_dimensional_and_speed_normalized() {
         ]
     }
 
-    assert_eq!(velocity(0, 0), [20, 0, 0]);
-    assert_eq!(velocity(4_096, 0), [18, 0, 8]);
-    assert_eq!(velocity(8_192, 0), [14, 0, 14]);
-    assert_eq!(velocity(16_384, 0), [0, 0, 20]);
-    assert_eq!(velocity(0, 8_192), [14, 14, 0]);
-    assert_eq!(velocity(8_192, 8_192), [10, 14, 10]);
+    assert_eq!(velocity(0, 0), [17, 0, 0]);
+    assert_eq!(velocity(4_096, 0), [16, 0, 7]);
+    assert_eq!(velocity(8_192, 0), [12, 0, 12]);
+    assert_eq!(velocity(16_384, 0), [0, 0, 17]);
+    assert_eq!(velocity(0, 8_192), [12, 12, 0]);
+    assert_eq!(velocity(8_192, 8_192), [8, 12, 8]);
     assert_eq!(
         projectile(4_096, 0).position_cm,
-        [31, 123, 13],
+        [29, 123, 12],
         "the muzzle offset must use the fine aim ray, not rounded velocity"
     );
     assert_eq!(
         projectile(8_192, 8_192).position_cm,
-        [17, 137, 17],
+        [15, 135, 15],
         "the first authoritative projectile sample must remain on the camera ray"
     );
 
@@ -273,10 +335,126 @@ fn projectile_aim_is_fine_grained_three_dimensional_and_speed_normalized() {
             .map(|component| i32::from(*component).pow(2))
             .sum();
         assert!(
-            (159_000..=161_000).contains(&distance_squared),
+            (117_000..=119_000).contains(&distance_squared),
             "{yaw}/{pitch} produced {displacement:?} with squared distance {distance_squared}"
         );
     }
+}
+
+#[test]
+fn firebolt_keeps_the_campaign_damage_and_three_second_flight_window() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0F7));
+    state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([0, 1_000, 0], 0),
+        )
+        .unwrap();
+    state
+        .advance_tick(commands(
+            0,
+            player(0),
+            spell_command(0, 1, 0, 0),
+        ))
+        .unwrap();
+    for tick in 1..128 {
+        state.advance_tick(CommandSet::new(tick)).unwrap();
+    }
+    assert!(
+        state
+            .entities()
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Projectile),
+        "a campaign Firebolt must remain visible after one second",
+    );
+    for tick in 128..410 {
+        state.advance_tick(CommandSet::new(tick)).unwrap();
+    }
+    assert!(
+        state
+            .entities()
+            .iter()
+            .all(|entity| entity.kind != EntityKind::Projectile),
+        "the 3.2-second Firebolt must eventually expire",
+    );
+}
+
+#[test]
+fn mend_is_authoritative_and_never_disguises_itself_as_a_projectile() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0F4));
+    state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([-100, 100, 0], 0),
+        )
+        .unwrap();
+    state
+        .add_player_at_spawn(
+            player(1),
+            team(1),
+            Controller::Human,
+            PlayerSpawn::new([0, 100, 0], 32_768),
+        )
+        .unwrap();
+
+    state
+        .advance_tick(commands(
+            0,
+            player(0),
+            spell_command(0, 1, 0, 0),
+        ))
+        .unwrap();
+    assert_eq!(state.player(player(1)).unwrap().health, 66);
+    assert!(state
+        .entities()
+        .iter()
+        .all(|entity| entity.kind != EntityKind::Projectile));
+
+    let mend = state
+        .advance_tick(commands(
+            1,
+            player(1),
+            spell_command(1, 1, 32_768, 7),
+        ))
+        .unwrap();
+    let healed = state.player(player(1)).unwrap();
+    assert_eq!(healed.health, 100);
+    assert_eq!(healed.cooldown_ticks(7), Some(896));
+    assert_eq!(healed.cooldown_ticks(0), Some(0));
+    assert_eq!(
+        state.entities().get(healed.entity_id.unwrap()).unwrap().health,
+        healed.health,
+    );
+    assert!(state
+        .entities()
+        .iter()
+        .all(|entity| entity.kind != EntityKind::Projectile));
+    assert!(mend.events.iter().any(|event| {
+        event.kind == TickEventKind::Cast &&
+            event.data[0] == 7 &&
+            event.data[1] == 100
+    }));
+
+    let firebolt = state
+        .advance_tick(commands(
+            2,
+            player(1),
+            spell_command(2, 2, 32_768, 0),
+        ))
+        .unwrap();
+    let caster = state.player(player(1)).unwrap();
+    assert_eq!(caster.cooldown_ticks(0), Some(36));
+    assert_eq!(caster.cooldown_ticks(7), Some(895));
+    assert!(firebolt.events.iter().any(|event| {
+        event.kind == TickEventKind::Cast && event.data[0] == 0
+    }));
+    let viewer_snapshot = state.replicate(player(1), SnapshotId::NONE).unwrap();
+    assert_eq!(viewer_snapshot.spell_cooldown_ticks[0], 36);
+    assert_eq!(viewer_snapshot.spell_cooldown_ticks[7], 895);
 }
 
 #[test]
@@ -330,7 +508,7 @@ fn pitched_projectiles_deform_only_when_they_contact_terrain() {
         ))
         .unwrap();
     assert!(opening.terrain.is_empty());
-    for tick in 1..32 {
+    for tick in 1..410 {
         let events = upward.advance_tick(CommandSet::new(tick)).unwrap();
         assert!(events.terrain.is_empty());
     }
@@ -432,7 +610,7 @@ fn reset_player_at_spawn_restores_combat_state_and_entity_consistency() {
         .insert(player(1), command(0, 70, 0, 0, false))
         .unwrap();
     state.advance_tick(opening_commands).unwrap();
-    for tick in 1..24 {
+    for tick in 1..25 {
         state.advance_tick(CommandSet::new(tick)).unwrap();
     }
     assert!(state.player(player(1)).unwrap().health < 100);
@@ -445,7 +623,7 @@ fn reset_player_at_spawn_restores_combat_state_and_entity_consistency() {
     assert_eq!(player_state.velocity_cm_per_tick, [0; 3]);
     assert_eq!(player_state.yaw, reset.yaw());
     assert_eq!(player_state.health, 100);
-    assert_eq!(player_state.cooldown_ticks, 0);
+    assert_eq!(player_state.max_cooldown_ticks(), 0);
     assert_eq!(player_state.outcome, aetherloom_core::PlayerOutcome::Active);
     assert_eq!(player_state.last_accepted_sequence(), Some(70));
     assert!(state.pose_history().iter().all(|frame| {
@@ -775,7 +953,7 @@ fn crowded_deltas_stay_inside_the_protocol_datagram_budget() {
 
     let delta = state.replicate(player(0), baseline).unwrap();
     let encoded_size =
-        60 + 18 + delta.entities.len() * 40 + delta.removed_entities.len() * 8;
+        60 + 18 + 26 + delta.entities.len() * 40 + delta.removed_entities.len() * 8;
     assert!(
         encoded_size <= 1_200,
         "replication acknowledged an unsendable {encoded_size}-byte delta"
@@ -797,7 +975,7 @@ fn crowded_deltas_eventually_cover_every_moving_player() {
         .snapshot_id;
     let mut updated_players = BTreeSet::new();
 
-    for tick in 0..128_u64 {
+    for tick in 0..256_u64 {
         let mut inputs = CommandSet::new(tick);
         for raw in 0..128 {
             inputs
@@ -899,6 +1077,7 @@ fn client_rejects_delta_without_baseline_and_bounds_prediction_history() {
         viewer,
         server_tick: 1,
         acknowledged_input_sequence: 0,
+        spell_cooldown_ticks: [0; 13],
         entities: Vec::new(),
         removed_entities: Vec::new(),
         terrain_revisions: Vec::new(),
@@ -930,6 +1109,7 @@ fn client_rejects_delta_without_baseline_and_bounds_prediction_history() {
         viewer,
         server_tick: 2,
         acknowledged_input_sequence: 1,
+        spell_cooldown_ticks: [0; 13],
         entities: Vec::new(),
         removed_entities: Vec::new(),
         terrain_revisions: Vec::new(),
@@ -947,6 +1127,7 @@ fn client_rejects_delta_without_baseline_and_bounds_prediction_history() {
         viewer,
         server_tick: 3,
         acknowledged_input_sequence: 32,
+        spell_cooldown_ticks: [0; 13],
         entities: Vec::new(),
         removed_entities: Vec::new(),
         terrain_revisions: Vec::new(),
@@ -972,6 +1153,7 @@ fn zero_acknowledgement_keeps_pre_wrap_prediction_pending() {
             viewer,
             server_tick: 0,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: Vec::new(),
             removed_entities: Vec::new(),
             terrain_revisions: Vec::new(),
@@ -1027,7 +1209,7 @@ fn checkpoint_rejects_conflicting_player_and_entity_authority() {
         .add_player(player(0), team(0), Controller::Human)
         .unwrap();
     let mut encoded = state.checkpoint().encode();
-    // Checkpoint v2: the first player's health follows the fixed 20-byte
+    // Checkpoint v3: the first player's health follows the fixed 20-byte
     // envelope and 109 bytes of authoritative payload fields.
     encoded[129..131].copy_from_slice(&50_u16.to_le_bytes());
     let checksum = checksum64(&encoded[20..]);
@@ -1056,10 +1238,10 @@ fn checkpoint_rejects_ghost_or_out_of_range_entity_owners() {
         .unwrap();
     let encoded = state.checkpoint().encode();
     // With two occupied entity slots, the second dense entity begins at byte
-    // 739 in checkpoint v2. An owner beyond this match's eight slots could
+    // 931 in checkpoint v3. An owner beyond this match's eight slots could
     // later index the player array during damage attribution.
     let mut out_of_range_owner = encoded.clone();
-    out_of_range_owner[748..750].copy_from_slice(&127_u16.to_le_bytes());
+    out_of_range_owner[940..942].copy_from_slice(&127_u16.to_le_bytes());
     let checksum = checksum64(&out_of_range_owner[20..]);
     out_of_range_owner[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&out_of_range_owner).is_err());
@@ -1067,7 +1249,7 @@ fn checkpoint_rejects_ghost_or_out_of_range_entity_owners() {
     // Turning that projectile into another player used to create an unowned
     // ghost outside the player-slot authority mapping.
     let mut ghost_player = encoded;
-    ghost_player[747] = EntityKind::Player as u8;
+    ghost_player[939] = EntityKind::Player as u8;
     let checksum = checksum64(&ghost_player[20..]);
     ghost_player[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&ghost_player).is_err());
@@ -1091,13 +1273,13 @@ fn checkpoint_rejects_noncanonical_and_inconsistent_sequence_state() {
     let encoded = state.checkpoint().encode();
 
     let mut absent_but_nonzero = encoded.clone();
-    absent_but_nonzero[159..163].copy_from_slice(&1_u32.to_le_bytes());
+    absent_but_nonzero[183..187].copy_from_slice(&1_u32.to_le_bytes());
     let checksum = checksum64(&absent_but_nonzero[20..]);
     absent_but_nonzero[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&absent_but_nonzero).is_err());
 
     let mut inconsistent_bot_next = encoded;
-    inconsistent_bot_next[163..167].copy_from_slice(&2_u32.to_le_bytes());
+    inconsistent_bot_next[187..191].copy_from_slice(&2_u32.to_le_bytes());
     let checksum = checksum64(&inconsistent_bot_next[20..]);
     inconsistent_bot_next[12..20].copy_from_slice(&checksum.to_le_bytes());
     assert!(AuthoritativeCheckpoint::decode(&inconsistent_bot_next).is_err());
@@ -1174,6 +1356,7 @@ fn replica_retains_bounded_remote_history_and_interpolates_at_adaptive_delay() {
             viewer: player(0),
             server_tick: 100,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: vec![remote(entity_id, 0)],
             removed_entities: Vec::new(),
             terrain_revisions: Vec::new(),
@@ -1187,6 +1370,7 @@ fn replica_retains_bounded_remote_history_and_interpolates_at_adaptive_delay() {
             viewer: player(0),
             server_tick: 104,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: vec![remote(entity_id, 40)],
             removed_entities: Vec::new(),
             terrain_revisions: Vec::new(),
@@ -1209,6 +1393,7 @@ fn replica_retains_bounded_remote_history_and_interpolates_at_adaptive_delay() {
                 viewer: player(0),
                 server_tick: 104 + offset as u64,
                 acknowledged_input_sequence: 0,
+                spell_cooldown_ticks: [0; 13],
                 entities: vec![remote(entity_id, 40 + offset as i32 * 10)],
                 removed_entities: Vec::new(),
                 terrain_revisions: Vec::new(),
@@ -1232,6 +1417,7 @@ fn replica_rejects_newer_snapshot_ids_that_regress_server_time() {
             viewer: player(0),
             server_tick: 50,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: Vec::new(),
             removed_entities: Vec::new(),
             terrain_revisions: Vec::new(),
@@ -1245,6 +1431,7 @@ fn replica_rejects_newer_snapshot_ids_that_regress_server_time() {
             viewer: player(0),
             server_tick: 49,
             acknowledged_input_sequence: 0,
+            spell_cooldown_ticks: [0; 13],
             entities: Vec::new(),
             removed_entities: Vec::new(),
             terrain_revisions: Vec::new(),

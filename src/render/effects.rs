@@ -19,6 +19,12 @@ const ORB_DETAIL_RANGE: f32 = 320.0;
 /// Motes circling a nearby orb.
 const ORB_MOTES: i32 = 3;
 
+#[inline]
+fn wrap_angle(angle: f32) -> f32 {
+    let tau = core::f32::consts::TAU;
+    angle - floor(angle / tau) * tau
+}
+
 impl World {
     /// Isolated visual-QA models for carpets, orbs, and projectiles.
     ///
@@ -100,13 +106,40 @@ impl World {
                     _ => ProjectileKind::DragonFire,
                 };
                 let old_elapsed = self.session.elapsed;
-                self.session.elapsed = variant as f32 * 0.04 + 0.1;
-                let velocity = [sin(angle) * 70.0, 12.0, cos(angle) * 70.0];
+                self.session.elapsed = if projectile == ProjectileKind::Firebolt {
+                    // Twenty-four gallery frames cover one mathematically
+                    // closed fireball cycle. Multiplayer advances these at
+                    // display rate, including a seamless last-to-first frame.
+                    variant.rem_euclid(24) as f32
+                        * core::f32::consts::TAU
+                        / (24.0 * 11.0)
+                } else {
+                    variant as f32 * 0.04 + 0.1
+                };
+                // Firebolt variants are animation phases around a neutral +Z
+                // flight axis. Multiplayer can rotate these frames onto the
+                // authoritative ray without inheriting a baked upward pitch.
+                // Its 2,200 cm/s core speed is 220 legacy render units/second.
+                let velocity = if projectile == ProjectileKind::Firebolt {
+                    [0.0, 0.0, 220.0]
+                } else {
+                    [sin(angle) * 70.0, 12.0, cos(angle) * 70.0]
+                };
                 let (colour, size) = projectile.head_style();
                 if projectile == ProjectileKind::CreatureBolt {
                     self.draw_bolt(origin, velocity, size, colour, variant as usize);
                 } else {
-                    self.draw_fireball(origin, velocity, size, colour, variant as usize);
+                    self.draw_fireball(
+                        origin,
+                        velocity,
+                        size,
+                        colour,
+                        if projectile == ProjectileKind::Firebolt {
+                            0
+                        } else {
+                            variant as usize
+                        },
+                    );
                 }
                 self.session.elapsed = old_elapsed;
             }
@@ -619,7 +652,7 @@ impl World {
         let flight_pitch = -atan2(along[1], horizontal);
         let clock = self.session.elapsed * 11.0 + index as f32 * 2.399_963;
         let flare = 0.90 + sin(clock) * 0.10;
-        let cross_flare = 0.90 + cos(clock * 1.31) * 0.10;
+        let cross_flare = 0.90 + cos(clock * 2.0) * 0.10;
         // Faster shots pull a longer flame, but the bounded factor keeps
         // meteors from consuming half the screen and stalled previews useful.
         let motion_stretch = clamp(speed / 180.0, 0.78, 1.25);
@@ -647,7 +680,7 @@ impl World {
 
         // The shaded sheath is broad and slightly aft; two hotter volumes sit
         // progressively farther forward, ending in a small leading cap.
-        let head_wobble = sin(clock * 0.73) * size * 0.08;
+        let head_wobble = sin(clock * 3.0) * size * 0.08;
         self.push_oriented(
             [
                 at[0] - along[0] * size * 0.16 + across[0] * head_wobble,
@@ -660,7 +693,11 @@ impl World {
                 size * (2.52 - mass * 0.32) * motion_stretch,
             ],
             outer,
-            Rotation::new(flight_yaw, flight_pitch, clock * 0.18),
+            Rotation::new(
+                flight_yaw,
+                flight_pitch,
+                wrap_angle(clock),
+            ),
             0.36,
             Shape::Sphere,
         );
@@ -676,7 +713,11 @@ impl World {
                 size * (1.70 - mass * 0.08) * motion_stretch,
             ],
             inner,
-            Rotation::new(flight_yaw, flight_pitch, -clock * 0.14),
+            Rotation::new(
+                flight_yaw,
+                flight_pitch,
+                wrap_angle(-clock * 2.0),
+            ),
             0.68,
             if mass > 0.5 {
                 Shape::Boulder
@@ -696,7 +737,11 @@ impl World {
                 size * (1.02 + mass * 0.15),
             ],
             hot,
-            Rotation::new(clock * 0.31, clock * 0.23, clock * 0.17),
+            Rotation::new(
+                wrap_angle(clock),
+                wrap_angle(clock * 2.0),
+                wrap_angle(-clock),
+            ),
             0.94,
             Shape::Boulder,
         );
@@ -718,7 +763,7 @@ impl World {
         // has a different silhouette from either side.
         for step in 0..WAKE_KNOTS {
             let progress = (step as f32 + 1.0) / WAKE_KNOTS as f32;
-            let spiral = clock * 0.24 + step as f32 * 2.15;
+            let spiral = clock + step as f32 * 2.15;
             let lateral = size * (0.12 + progress * 0.42) * (1.0 - progress * 0.35);
             let spiral_cos = cos(spiral);
             let spiral_sin = sin(spiral);
@@ -726,7 +771,7 @@ impl World {
             let radial_y = across[1] * spiral_cos + up[1] * spiral_sin;
             let radial_z = across[2] * spiral_cos + up[2] * spiral_sin;
             let back = size * (0.72 + progress * 5.0) * motion_stretch;
-            let flicker = 0.91 + sin(clock * 1.07 + step as f32 * 1.91) * 0.09;
+            let flicker = 0.91 + sin(clock * 2.0 + step as f32 * 1.91) * 0.09;
             let radius = size * (0.82 * (1.0 - progress) + 0.24) * flicker;
             let length = size
                 * (1.55 * (1.0 - progress) + 0.58)
@@ -744,7 +789,11 @@ impl World {
                     warm[1] * (0.12 + heat * 0.76),
                     warm[2] * (0.08 + heat * 0.72),
                 ],
-                Rotation::new(flight_yaw, flight_pitch, spiral * 0.35),
+                Rotation::new(
+                    flight_yaw,
+                    flight_pitch,
+                    wrap_angle(spiral),
+                ),
                 0.08 + heat * heat * 0.46,
                 Shape::Sphere,
             );
@@ -754,8 +803,8 @@ impl World {
         // upright cones, their local +Y axes are aligned to the actual flame
         // direction, so pitching a projectile pitches its whole silhouette.
         for tongue in 0..TONGUES {
-            let phase = tongue as f32 * 2.399_963 + clock * 0.33;
-            let pulse = 0.5 + sin(clock * 1.37 + tongue as f32 * 2.11) * 0.5;
+            let phase = tongue as f32 * 2.399_963 + clock;
+            let pulse = 0.5 + sin(clock * 3.0 + tongue as f32 * 2.11) * 0.5;
             let phase_cos = cos(phase);
             let phase_sin = sin(phase);
             let radial = [
@@ -816,7 +865,7 @@ impl World {
         // second row of smooth bubbles.
         for ember in 0..EMBERS {
             let progress = (ember as f32 + 1.0) / (EMBERS + 1) as f32;
-            let phase = clock * 0.61 + ember as f32 * 2.73;
+            let phase = clock + ember as f32 * 2.73;
             let phase_cos = cos(phase);
             let phase_sin = sin(phase);
             let radial = [
@@ -827,10 +876,10 @@ impl World {
             let back = size * (1.8 + progress * 4.8) * motion_stretch;
             let out = size
                 * (0.52 + progress * 0.78)
-                * (0.82 + sin(clock * 0.47 + ember as f32) * 0.18);
+                * (0.82 + sin(clock * 2.0 + ember as f32) * 0.18);
             let ember_size = size
                 * (0.10 + (1.0 - progress) * 0.10)
-                * (0.88 + cos(phase * 1.7) * 0.12);
+                * (0.88 + cos(phase * 2.0) * 0.12);
             self.push_oriented(
                 [
                     at[0] - along[0] * back + radial[0] * out,
@@ -843,7 +892,11 @@ impl World {
                     warm[1] * 0.72 + hot[1] * 0.28,
                     warm[2] * 0.72 + hot[2] * 0.28,
                 ],
-                Rotation::new(phase, phase * 0.73, phase * 0.41),
+                Rotation::new(
+                    wrap_angle(phase),
+                    wrap_angle(phase * 2.0),
+                    wrap_angle(-phase),
+                ),
                 0.72 - progress * 0.28,
                 Shape::Boulder,
             );
@@ -854,7 +907,7 @@ impl World {
         // a chain of dark rocks.
         for puff in 0..SMOKE_LOBES {
             let progress = (puff as f32 + 1.0) / SMOKE_LOBES as f32;
-            let phase = clock * 0.12 + puff as f32 * 2.17;
+            let phase = clock + puff as f32 * 2.17;
             let phase_cos = cos(phase);
             let phase_sin = sin(phase);
             let radial = [
@@ -866,7 +919,7 @@ impl World {
             let drift = size * (0.22 + progress * 0.42);
             let puff_size = size
                 * (0.50 + progress * 0.38)
-                * (0.92 + sin(clock * 0.31 + puff as f32 * 1.7) * 0.08);
+                * (0.92 + sin(clock + puff as f32 * 1.7) * 0.08);
             self.push_oriented(
                 [
                     at[0] - along[0] * back + radial[0] * drift,
@@ -879,7 +932,11 @@ impl World {
                     smoke[1] * (1.0 - progress * 0.14),
                     smoke[2] * (1.0 - progress * 0.12),
                 ],
-                Rotation::new(flight_yaw, flight_pitch, phase),
+                Rotation::new(
+                    flight_yaw,
+                    flight_pitch,
+                    wrap_angle(phase),
+                ),
                 0.07 + (1.0 - progress) * 0.07,
                 Shape::Sphere,
             );

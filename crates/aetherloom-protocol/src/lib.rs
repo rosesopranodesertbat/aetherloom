@@ -26,7 +26,8 @@ pub use message::{
     LootEntry, MatchOutcome, MatchResult, Message, MessageEnvelope, MessageKind, PlayerMatchResult,
     SnapshotDelta, SnapshotKeyframe, TerrainChunkState, TerrainDelta, TerrainOp, TerrainOpKind,
     HEADER_BYTES, MAX_DATAGRAM_BYTES, MAX_EVENTS_PER_BATCH, MAX_RELIABLE_FRAME_BYTES,
-    PROTOCOL_MAGIC, PROTOCOL_VERSION, TERRAIN_CELLS_PER_CHUNK, TERRAIN_CHUNK_SIDE,
+    PROTOCOL_MAGIC, PROTOCOL_VERSION, SPELL_COOLDOWN_SLOTS, TERRAIN_CELLS_PER_CHUNK,
+    TERRAIN_CHUNK_SIDE,
 };
 
 /// The fixed authoritative simulation frequency.

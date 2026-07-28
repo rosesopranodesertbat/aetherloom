@@ -18,14 +18,23 @@ use crate::terrain::{
 };
 use crate::{AuthoritativeCheckpoint, CheckpointError, SnapshotId};
 
-pub const PLAYER_PLANAR_SPEED_CM_PER_TICK: i32 = 8;
-pub const PLAYER_VERTICAL_SPEED_CM_PER_TICK: i32 = 5;
+pub const PLAYER_PLANAR_SPEED_CM_PER_TICK: i32 = 10;
+pub const PLAYER_VERTICAL_SPEED_CM_PER_TICK: i32 = 6;
 pub const PLAYER_MIN_ALTITUDE_CM: i32 = 0;
 pub const PLAYER_MAX_ALTITUDE_CM: i32 = 4_300;
+/// The browser flight model preserves full forward thrust while reducing
+/// strafe to 55%, so its intended diagonal is slightly longer than one axis.
+/// Cap arbitrary/custom clients at that same deterministic envelope.
+pub const PLAYER_MAX_PLANAR_INPUT_MAGNITUDE: i32 = 2_338;
 const PLAYER_HEALTH: u16 = 100;
-const CAST_COOLDOWN_TICKS: u16 = AUTHORITATIVE_HZ as u16 / 4;
-const PROJECTILE_LIFETIME_TICKS: u16 = AUTHORITATIVE_HZ as u16 / 4;
-const PROJECTILE_SPEED_CM_PER_TICK: i16 = 20;
+const FIREBOLT_SPELL_ID: u8 = 0;
+const MEND_SPELL_ID: u8 = 7;
+const FIREBOLT_COOLDOWN_TICKS: u16 = 36;
+const MEND_COOLDOWN_TICKS: u16 = 896;
+const MEND_HEALTH: u16 = 55;
+pub(crate) const SPELL_SLOT_COUNT: usize = aetherloom_protocol::SPELL_COOLDOWN_SLOTS;
+const PROJECTILE_LIFETIME_TICKS: u16 = 410;
+const PROJECTILE_SPEED_CM_PER_SECOND: i32 = 2_200;
 const PROJECTILE_MUZZLE_FORWARD_CM: i32 = 14;
 const PROJECTILE_MUZZLE_HEIGHT_CM: i32 = 23;
 const PROJECTILE_HIT_RADIUS_CM: i64 = 75;
@@ -199,7 +208,7 @@ pub struct PlayerState {
     pub yaw: u16,
     pub pitch: i16,
     pub health: u16,
-    pub cooldown_ticks: u16,
+    pub spell_cooldown_ticks: [u16; SPELL_SLOT_COUNT],
     pub inventory: Inventory,
     pub outcome: PlayerOutcome,
     pub(crate) last_sequence: Option<u32>,
@@ -218,7 +227,7 @@ impl PlayerState {
             yaw: 0,
             pitch: 0,
             health: 0,
-            cooldown_ticks: 0,
+            spell_cooldown_ticks: [0; SPELL_SLOT_COUNT],
             inventory: Inventory::default(),
             outcome: PlayerOutcome::Defeated,
             last_sequence: None,
@@ -228,6 +237,14 @@ impl PlayerState {
 
     pub const fn last_accepted_sequence(&self) -> Option<u32> {
         self.last_sequence
+    }
+
+    pub fn cooldown_ticks(&self, spell: u8) -> Option<u16> {
+        self.spell_cooldown_ticks.get(spell as usize).copied()
+    }
+
+    pub fn max_cooldown_ticks(&self) -> u16 {
+        self.spell_cooldown_ticks.iter().copied().max().unwrap_or(0)
     }
 }
 
@@ -260,6 +277,7 @@ pub enum TickEventKind {
     EntitySpawned = 7,
     EntityDespawned = 8,
     TerrainDeformed = 9,
+    ProjectileImpact = 10,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,7 +549,7 @@ impl MatchState {
             yaw: spawn.yaw,
             pitch: 0,
             health: PLAYER_HEALTH,
-            cooldown_ticks: 0,
+            spell_cooldown_ticks: [0; SPELL_SLOT_COUNT],
             inventory: Inventory::default(),
             outcome: PlayerOutcome::Active,
             last_sequence: None,
@@ -575,7 +593,7 @@ impl MatchState {
         player.yaw = spawn.yaw;
         player.pitch = 0;
         player.health = PLAYER_HEALTH;
-        player.cooldown_ticks = 0;
+        player.spell_cooldown_ticks = [0; SPELL_SLOT_COUNT];
         player.outcome = PlayerOutcome::Active;
 
         let entity = self
@@ -721,7 +739,9 @@ impl MatchState {
                     }
                 }
             }
-            player.cooldown_ticks = player.cooldown_ticks.saturating_sub(1);
+            for cooldown in &mut player.spell_cooldown_ticks {
+                *cooldown = cooldown.saturating_sub(1);
+            }
         }
 
         let mut tick_events = TickEvents {
@@ -803,7 +823,7 @@ impl MatchState {
         let index = player_id.index();
         let entity_capacity_available =
             self.entities.len() < self.entities.capacity() as usize;
-        let (should_cast, should_extract, source_entity, team, position) = {
+        let (requested_spell, should_cast, should_extract, source_entity, team, position) = {
             let player = &mut self.players[index];
             player.last_sequence = Some(command.sequence());
             if player.controller == Controller::Bot {
@@ -813,12 +833,12 @@ impl MatchState {
                 return Ok(());
             }
 
+            let (move_x, move_z) =
+                cap_planar_input(i32::from(command.move_x()), i32::from(command.move_y()));
             let velocity_x =
-                command.move_x() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
-                    / i32::from(MAX_MOVE_AXIS);
+                move_x * PLAYER_PLANAR_SPEED_CM_PER_TICK / i32::from(MAX_MOVE_AXIS);
             let velocity_z =
-                command.move_y() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
-                    / i32::from(MAX_MOVE_AXIS);
+                move_z * PLAYER_PLANAR_SPEED_CM_PER_TICK / i32::from(MAX_MOVE_AXIS);
             let requested_velocity_y =
                 command.move_vertical() as i32 * PLAYER_VERTICAL_SPEED_CM_PER_TICK
                     / i32::from(MAX_MOVE_AXIS);
@@ -839,14 +859,29 @@ impl MatchState {
             let position = player.position_cm;
             let source_entity = player.entity_id;
             let team = player.team;
+            let requested_spell = command.requested_spell();
+            let implemented_spell = matches!(
+                requested_spell,
+                Some(FIREBOLT_SPELL_ID) | Some(MEND_SPELL_ID)
+            );
+            let needs_entity = requested_spell == Some(FIREBOLT_SPELL_ID);
+            let spell_ready = requested_spell
+                .and_then(|spell| player.spell_cooldown_ticks.get(spell as usize))
+                .is_some_and(|cooldown| *cooldown == 0);
             let should_cast = command.action_flags() & ACTION_CAST != 0
-                && command.requested_spell().is_some()
-                && player.cooldown_ticks == 0
-                && entity_capacity_available;
+                && implemented_spell
+                && spell_ready
+                && (!needs_entity || entity_capacity_available);
             let should_extract = command.action_flags() & ACTION_EXTRACT != 0;
 
             if should_cast {
-                player.cooldown_ticks = CAST_COOLDOWN_TICKS;
+                if requested_spell == Some(MEND_SPELL_ID) {
+                    player.spell_cooldown_ticks[MEND_SPELL_ID as usize] =
+                        MEND_COOLDOWN_TICKS;
+                } else {
+                    player.spell_cooldown_ticks[FIREBOLT_SPELL_ID as usize] =
+                        FIREBOLT_COOLDOWN_TICKS;
+                }
             }
             if should_extract {
                 player.outcome = PlayerOutcome::Extracted;
@@ -857,7 +892,14 @@ impl MatchState {
                 player.inventory.unbanked_resources = 0;
                 player.velocity_cm_per_tick = [0; 3];
             }
-            (should_cast, should_extract, source_entity, team, position)
+            (
+                requested_spell,
+                should_cast,
+                should_extract,
+                source_entity,
+                team,
+                position,
+            )
         };
 
         if let Some(entity_id) = source_entity {
@@ -869,16 +911,16 @@ impl MatchState {
             }
         }
 
-        if should_cast {
+        if should_cast && requested_spell == Some(FIREBOLT_SPELL_ID) {
             let direction =
                 projectile_direction_q30(command.look_yaw(), command.look_pitch());
             let velocity = projectile_velocity(direction, 0);
             let mut projectile = Entity::new(EntityKind::Projectile);
             projectile.owner = Some(player_id);
             projectile.team = team;
-            // This is the same ray as the first-person eye: the projectile
-            // renderer has 23 cm less vertical clearance than the camera, and
-            // the eye is 14 cm forward of the player's render origin.
+            // The collision origin stays close to the player so the first
+            // segment cannot skip nearby targets. Presentation eases the
+            // viewer-owned projectile from the farther, below-eye hand muzzle.
             projectile.position_cm = [
                 position[0].saturating_add(scale_projectile_direction(
                     direction[0],
@@ -900,13 +942,27 @@ impl MatchState {
                 TickEventKind::Cast,
                 source_entity,
                 Some(projectile_id),
-                [command.requested_spell().unwrap_or(0) as i32, 0, 0, 0],
+                [i32::from(FIREBOLT_SPELL_ID), 0, 0, 0],
             ));
             events.events.push(self.next_event(
                 TickEventKind::EntitySpawned,
                 source_entity,
                 Some(projectile_id),
                 [EntityKind::Projectile as i32, 0, 0, 0],
+            ));
+        } else if should_cast && requested_spell == Some(MEND_SPELL_ID) {
+            let healed = self.players[index].health.saturating_add(MEND_HEALTH).min(PLAYER_HEALTH);
+            self.players[index].health = healed;
+            if let Some(entity_id) = source_entity {
+                if let Some(entity) = self.entities.get_mut(entity_id) {
+                    entity.health = healed;
+                }
+            }
+            events.events.push(self.next_event(
+                TickEventKind::Cast,
+                source_entity,
+                source_entity,
+                [i32::from(MEND_SPELL_ID), i32::from(healed), 0, 0],
             ));
         }
 
@@ -982,8 +1038,24 @@ impl MatchState {
 
             let expired = projectile.lifetime_ticks == 0;
             if let Some(target) = hit_player {
-                let damage = 18 + (self.combat_rng.next_u64() % 5) as u16;
-                self.apply_damage(projectile.owner, target, damage, events);
+                self.apply_damage(projectile.owner, target, 34, events);
+            }
+            if hit_player.is_some() || hit_terrain {
+                let actor =
+                    projectile.owner.and_then(|owner| self.players[owner.index()].entity_id);
+                let target = hit_player
+                    .and_then(|player| self.players[player.index()].entity_id);
+                events.events.push(self.next_event(
+                    TickEventKind::ProjectileImpact,
+                    actor,
+                    target,
+                    [
+                        projectile.position_cm[0],
+                        projectile.position_cm[1],
+                        projectile.position_cm[2],
+                        i32::from(FIREBOLT_SPELL_ID),
+                    ],
+                ));
             }
             if hit_player.is_some() || hit_terrain || expired {
                 let _ = self.entities.remove(projectile_id);
@@ -1217,6 +1289,38 @@ fn next_command_sequence(previous: u32) -> u32 {
     }
 }
 
+pub(crate) fn cap_planar_input(move_x: i32, move_z: i32) -> (i32, i32) {
+    let magnitude_squared =
+        i64::from(move_x) * i64::from(move_x) + i64::from(move_z) * i64::from(move_z);
+    let maximum = i64::from(PLAYER_MAX_PLANAR_INPUT_MAGNITUDE);
+    if magnitude_squared <= maximum * maximum {
+        return (move_x, move_z);
+    }
+    let floor = integer_square_root(magnitude_squared as u64);
+    let magnitude = if floor * floor == magnitude_squared as u64 {
+        floor
+    } else {
+        floor + 1
+    } as i64;
+    (
+        (i64::from(move_x) * maximum / magnitude) as i32,
+        (i64::from(move_z) * maximum / magnitude) as i32,
+    )
+}
+
+fn integer_square_root(value: u64) -> u64 {
+    if value < 2 {
+        return value;
+    }
+    let mut estimate = value;
+    let mut next = (estimate + 1) / 2;
+    while next < estimate {
+        estimate = next;
+        next = (estimate + value / estimate) / 2;
+    }
+    estimate
+}
+
 const CORDIC_GAIN_INVERSE_Q30: i64 = 652_032_874;
 const CORDIC_ATAN_TURN_UNITS: [i32; 15] = [
     8_192, 4_836, 2_555, 1_297, 651, 326, 163, 81, 41, 20, 10, 5, 3, 1, 1,
@@ -1274,10 +1378,13 @@ fn projectile_direction_q30(yaw: u16, pitch: i16) -> [i64; 3] {
 
 fn projectile_velocity(direction_q30: [i64; 3], elapsed_ticks: u16) -> [i16; 3] {
     let before_distance =
-        i128::from(PROJECTILE_SPEED_CM_PER_TICK) * i128::from(elapsed_ticks);
+        i128::from(PROJECTILE_SPEED_CM_PER_SECOND)
+            * i128::from(elapsed_ticks)
+            / i128::from(AUTHORITATIVE_HZ);
     let after_distance =
-        i128::from(PROJECTILE_SPEED_CM_PER_TICK)
-            * i128::from(u32::from(elapsed_ticks) + 1);
+        i128::from(PROJECTILE_SPEED_CM_PER_SECOND)
+            * i128::from(u32::from(elapsed_ticks) + 1)
+            / i128::from(AUTHORITATIVE_HZ);
     direction_q30.map(|component| {
         let before = round_shift_q30(i128::from(component) * before_distance);
         let after = round_shift_q30(i128::from(component) * after_distance);

@@ -220,8 +220,9 @@ function signature(scene, variant, shot) {
 }
 
 for (let scene = 0; scene < SCENES.length; scene++) {
-  assert.equal(sim.previewVariantCount(scene), VARIANTS,
-    `${SCENES[scene]} must expose ${VARIANTS} variants`);
+  const expectedVariants = scene === 25 ? 24 : VARIANTS;
+  assert.equal(sim.previewVariantCount(scene), expectedVariants,
+    `${SCENES[scene]} must expose ${expectedVariants} variants`);
   for (let variant = 0; variant < VARIANTS; variant++) {
     const first = snapshot(scene, variant);
     validateSnapshot(scene, variant, first);
@@ -251,6 +252,24 @@ for (let scene = 0; scene < SCENES.length; scene++) {
     pairSignatures.push([first.count, signature(scene, variant, first)]);
   }
 }
+for (let variant = VARIANTS; variant < 24; variant++) {
+  const first = snapshot(25, variant);
+  validateSnapshot(25, variant, first);
+  const second = snapshot(25, variant);
+  assert.ok(second.instanceBytes.equals(first.instanceBytes),
+    `firebolt variant ${variant}: nondeterministic instance bytes`);
+  assert.ok(second.focusBytes.equals(first.focusBytes),
+    `firebolt variant ${variant}: nondeterministic focus`);
+  const contentHash = createHash('sha256')
+    .update(first.instanceBytes)
+    .update(first.focusBytes)
+    .digest('hex');
+  assert.ok(!variantContentHashes[25].has(contentHash),
+    `firebolt variant ${variant} duplicates an earlier animation phase`);
+  variantContentHashes[25].add(contentHash);
+}
+assert.equal(variantContentHashes[25].size, 24,
+  'firebolt must expose 24 distinct deterministic animation phases');
 assert.equal(impactParticleHashes.size, VARIANTS,
   'fireball-impact must expose one distinct particle effect per variant');
 
@@ -266,6 +285,7 @@ for (const [scene, variant] of [[-1, 0], [SCENES.length, 0], [0, -1], [0, VARIAN
     `invalid preview ${scene}:${variant} must clear focus`,
   );
 }
+assert.equal(sim.previewScene(25, 24), 0, 'past-end firebolt animation phase must fail');
 
 const observed = SCENES.map((_, scene) => {
   const pairs = pairSignatures.slice(scene * VARIANTS, (scene + 1) * VARIANTS);

@@ -1,7 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { browserMatchModule } from "./browser-match-module.ts";
-import { BrowserMatchSimulation } from "./browser-match-runtime.ts";
+import {
+  BrowserMatchSimulation,
+  selectSnapshotProjectiles,
+} from "./browser-match-runtime.ts";
 import {
   BROWSER_MATCH_BOT_TAKEOVER_MS,
   BROWSER_MATCH_INPUT_TOKEN_CAPACITY,
@@ -9,6 +12,7 @@ import {
   BROWSER_MATCH_MAX_PLAYERS,
   BROWSER_MATCH_RECONNECT_MS,
   BROWSER_MATCH_SNAPSHOT_HZ,
+  BROWSER_MATCH_SPELL_SLOTS,
   BROWSER_MATCH_TICK_HZ,
   advanceBrowserTickSchedule,
   consumeBrowserInputToken,
@@ -27,10 +31,10 @@ import { publicWebSocketProtocol, ticketFromRequest } from "./tickets.ts";
 import {
   ApiError,
   assertObject,
+  demoResumeToken,
   errorResponse,
   jsonResponse,
   randomHex128,
-  randomToken,
   readJson,
   requireHex128,
   requireString,
@@ -59,16 +63,19 @@ interface PlayerRow extends Record<string, SqlStorageValue> {
 }
 
 const INPUT_FRAME_BYTES = 22;
-const INPUT_FRAME_VERSION = 2;
+const INPUT_FRAME_VERSION = 3;
 const INPUT_FRAME_TYPE = 1;
-const SNAPSHOT_FRAME_VERSION = 2;
+const SNAPSHOT_FRAME_VERSION = 3;
 const SNAPSHOT_FRAME_TYPE = 2;
 const SNAPSHOT_HEADER_BYTES = 24;
 const SNAPSHOT_PLAYER_BYTES = 30;
+const SNAPSHOT_VIEWER_COOLDOWN_BYTES = BROWSER_MATCH_SPELL_SLOTS * 2;
 const SNAPSHOT_PROJECTILE_BYTES = 24;
 const SNAPSHOT_EVENT_BYTES = 20;
-const MAX_SNAPSHOT_PROJECTILES = 32;
+const MAX_SNAPSHOT_PROJECTILES = 31;
 const MAX_SNAPSHOT_EVENTS = 8;
+const MAX_RECENT_EVENTS = 128;
+const EVENT_REPLAY_TICKS = BROWSER_MATCH_TICK_HZ * 2;
 const MAX_PENDING_INPUTS_PER_PLAYER = 4;
 const MAX_UNACKED_SNAPSHOTS = 8;
 const UNCONNECTED_CLAIM_MS = 15_000;
@@ -76,8 +83,12 @@ const PLAYER_SESSION_MAX_MS = 15 * 60 * 1_000;
 const CLIENT_INPUT_TIMEOUT_MS = 5_000;
 const CLIENT_INPUT_HOLD_MS = 250;
 const ACTION_CAST = 1;
+const DEMO_JOIN_NONCE_RE = /^demo_join_[A-Za-z0-9_-]{24}$/u;
+const IMPLEMENTED_SPELLS = new Set([0, 7]);
+const CORE_CAST_EVENT = 3;
 const CORE_DAMAGE_EVENT = 4;
 const CORE_DEFEAT_EVENT = 5;
+const CORE_PROJECTILE_IMPACT_EVENT = 10;
 const ROUND_RESET_DELAY_TICKS = BROWSER_MATCH_TICK_HZ * 3;
 
 export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
@@ -88,6 +99,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
   private tickCredit = 0;
   private roundResetTick: number | undefined;
   private readonly scores = new Map<number, number>();
+  private recentEvents: CoreEventSnapshot[] = [];
 
   constructor(ctx: DurableObjectState, env: BrowserMatchEnv) {
     super(ctx, env);
@@ -172,8 +184,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     if (
       view.getUint8(0) !== INPUT_FRAME_VERSION ||
       view.getUint8(1) !== INPUT_FRAME_TYPE ||
-      view.getUint16(2, true) !== INPUT_FRAME_BYTES ||
-      view.getUint8(15) !== 0
+      view.getUint16(2, true) !== INPUT_FRAME_BYTES
     ) {
       webSocket.close(1003, "invalid input frame");
       return;
@@ -181,6 +192,15 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     const actionFlags = view.getUint8(14);
     if ((actionFlags & ~ACTION_CAST) !== 0) {
       webSocket.close(1003, "unsupported input action");
+      return;
+    }
+    const requestedSpell = view.getUint8(15);
+    const casting = (actionFlags & ACTION_CAST) !== 0;
+    if (
+      (casting && !IMPLEMENTED_SPELLS.has(requestedSpell)) ||
+      (!casting && requestedSpell !== 0xff)
+    ) {
+      webSocket.close(1003, "unsupported requested spell");
       return;
     }
     const budget = consumeBrowserInputToken(
@@ -250,7 +270,8 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       moveVertical,
       yaw,
       pitch,
-      cast: (actionFlags & ACTION_CAST) !== 0,
+      cast: casting,
+      requestedSpell: casting ? requestedSpell : null,
     });
     if (attachment.pendingInputs.length > MAX_PENDING_INPUTS_PER_PLAYER) {
       attachment.pendingInputs.shift();
@@ -290,17 +311,33 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       raw.resumeToken === undefined
         ? undefined
         : requireString(raw.resumeToken, "resumeToken", 128);
+    const joinNonce =
+      raw.joinNonce === undefined
+        ? undefined
+        : requireString(raw.joinNonce, "joinNonce", 64);
+    if (
+      (resumeToken === undefined && !DEMO_JOIN_NONCE_RE.test(joinNonce ?? "")) ||
+      (resumeToken !== undefined && joinNonce !== undefined)
+    ) {
+      throw new ApiError(
+        400,
+        "invalid_join_attempt",
+        "A fresh claim requires one valid join nonce; a resume must omit it.",
+      );
+    }
     const resumeHash =
       resumeToken === undefined ? undefined : await sha256Base64Url(resumeToken);
     const connectedSlots = this.connectedSlots();
     const now = Date.now();
     this.reconcileDisconnectedRows(connectedSlots, now);
-    const nextResumeToken = randomToken("demo_resume");
-    const nextResumeHash = await sha256Base64Url(nextResumeToken);
+    const nextResumeToken =
+      joinNonce === undefined ? undefined : await demoResumeToken(roomCode, joinNonce);
+    const nextResumeHash =
+      nextResumeToken === undefined
+        ? undefined
+        : await sha256Base64Url(nextResumeToken);
     const accountId = randomHex128();
     const expiredSlots: number[] = [];
-    let createdPlayer = false;
-
     const claim = this.ctx.storage.transactionSync(() => {
       let room = this.roomRow();
       if (room === undefined) {
@@ -329,7 +366,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         throw new ApiError(409, "room_identity_conflict", "Room identity is immutable.");
       }
 
-      if (resumeHash !== undefined) {
+      if (resumeToken !== undefined && resumeHash !== undefined) {
         const resumed = this.ctx.storage.sql
           .exec<PlayerRow>("SELECT * FROM players WHERE resume_hash = ?", resumeHash)
           .toArray()[0];
@@ -348,12 +385,14 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
           throw new ApiError(401, "resume_expired", "The reconnect window has expired.");
         }
         this.ctx.storage.sql.exec(
-          "UPDATE players SET resume_hash = ?, last_seen_at_ms = ? WHERE slot = ?",
-          nextResumeHash,
+          "UPDATE players SET last_seen_at_ms = ? WHERE slot = ?",
           now,
           resumed.slot,
         );
-        return this.presentClaim(room, resumed, nextResumeToken);
+        return this.presentClaim(room, resumed, resumeToken);
+      }
+      if (nextResumeToken === undefined || nextResumeHash === undefined) {
+        throw new Error("Fresh browser match claim did not derive a resume credential.");
       }
 
       const players = this.playerRows();
@@ -373,6 +412,15 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         }
       }
       const remaining = this.playerRows();
+      const retried = remaining.find((player) => player.resume_hash === nextResumeHash);
+      if (retried !== undefined) {
+        this.ctx.storage.sql.exec(
+          "UPDATE players SET last_seen_at_ms = ? WHERE slot = ?",
+          now,
+          retried.slot,
+        );
+        return this.presentClaim(room, retried, nextResumeToken);
+      }
       const used = new Set(remaining.map((player) => player.slot));
       const slot = Array.from(
         { length: BROWSER_MATCH_MAX_PLAYERS },
@@ -394,17 +442,16 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         now,
         now,
       );
-      createdPlayer = true;
       const player = this.ctx.storage.sql
         .exec<PlayerRow>("SELECT * FROM players WHERE slot = ?", slot)
         .toArray()[0];
       if (player === undefined) throw new Error("New browser match player was not stored.");
-      return this.presentClaim(room, player, nextResumeToken);
+      return this.presentClaim(room, player, nextResumeToken, true);
     });
 
     if (this.simulation !== undefined) {
       for (const slot of expiredSlots) this.simulation.removePlayer(slot);
-      if (createdPlayer) {
+      if (claim.createdPlayer) {
         this.simulation.addHuman(claim.playerSlot, claim.teamId);
         this.scores.set(claim.playerSlot, 0);
       }
@@ -416,7 +463,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       throw new ApiError(426, "websocket_required", "WebSocket upgrade required.");
     }
-    const protocol = publicWebSocketProtocol(request, "aetherloom.v2");
+    const protocol = publicWebSocketProtocol(request, "aetherloom.v3");
     const room = this.roomRow();
     if (room === undefined) {
       throw new ApiError(404, "match_not_found", "Browser match room was not found.");
@@ -498,6 +545,8 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       clientClock: 0,
       lastAckedSnapshotSequence: 0,
       lastSentSnapshotSequence: 0,
+      lastSentEventId: 0,
+      lastVisibleProjectileKeys: [],
       inputRateTokens: BROWSER_MATCH_INPUT_TOKEN_CAPACITY,
       inputRateUpdatedAtMs: Date.now(),
       inputRateRejectedMessages: 0,
@@ -509,9 +558,12 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     this.ctx.acceptWebSocket(server, [`slot:${player.slot}`]);
 
     const simulation = this.ensureSimulation();
+    const attachment = socketAttachment(server);
+    attachment.lastSentEventId = this.latestRecentEventId();
+    server.serializeAttachment(attachment);
     simulation.setHuman(player.slot);
     simulation.clearInput(player.slot);
-    this.sendSnapshot(server, simulation.snapshot(), []);
+    this.sendSnapshot(server, simulation.snapshot());
     this.ensureLoop();
     return new Response(null, {
       status: 101,
@@ -526,6 +578,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     if (room === undefined) {
       throw new ApiError(404, "match_not_found", "Browser match room was not found.");
     }
+    this.discardSimulation();
     const simulation = new BrowserMatchSimulation(
       browserMatchModule,
       room.seed_low >>> 0,
@@ -599,15 +652,16 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
           snapshot = simulation.snapshot();
         }
       }
+      this.rememberEvents(events, snapshot.tick);
       for (const webSocket of this.ctx.getWebSockets()) {
-        this.sendSnapshot(webSocket, snapshot, events);
+        this.sendSnapshot(webSocket, snapshot);
       }
     } catch (error) {
       console.error("browser match loop failed", { error });
       for (const webSocket of this.ctx.getWebSockets()) {
         webSocket.close(1011, "authoritative match failure");
       }
-      this.simulation = undefined;
+      this.discardSimulation();
       this.tickCredit = 0;
       this.lastPulseAtMs = 0;
       return;
@@ -637,10 +691,15 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         sample.yaw,
         sample.pitch,
         sample.cast,
+        sample.requestedSpell,
       );
       if (pending !== undefined) {
         attachment.lastAppliedSequence = pending.sequence;
-        attachment.heldInput = { ...pending, cast: false };
+        attachment.heldInput = {
+          ...pending,
+          cast: false,
+          requestedSpell: null,
+        };
       }
       webSocket.serializeAttachment(attachment);
     }
@@ -714,7 +773,6 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
   private sendSnapshot(
     webSocket: WebSocket,
     snapshot: CoreMatchSnapshot,
-    rawEvents: readonly CoreEventSnapshot[],
   ): void {
     const attachment = socketAttachment(webSocket);
     const outstanding =
@@ -730,13 +788,30 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       return;
     }
     const players = [...snapshot.players].sort((left, right) => left.playerId - right.playerId);
-    const projectiles = snapshot.projectiles.slice(0, MAX_SNAPSHOT_PROJECTILES);
-    const events = rawEvents
-      .filter((event) => event.kind === CORE_DAMAGE_EVENT || event.kind === CORE_DEFEAT_EVENT)
-      .slice(-MAX_SNAPSHOT_EVENTS);
+    const viewer = players.find((player) => player.playerId === attachment.slot);
+    if (
+      viewer === undefined ||
+      viewer.cooldownTicks.length !== BROWSER_MATCH_SPELL_SLOTS ||
+      viewer.cooldownTicks.some(
+        (cooldown) =>
+          !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 0xffff,
+      )
+    ) {
+      throw new Error("Browser match viewer cooldown state is invalid.");
+    }
+    const projectiles = selectSnapshotProjectiles(
+      snapshot.projectiles,
+      viewer,
+      new Set(attachment.lastVisibleProjectileKeys),
+      MAX_SNAPSHOT_PROJECTILES,
+    );
+    const events = this.recentEvents
+      .filter((event) => event.eventId > attachment.lastSentEventId)
+      .slice(0, MAX_SNAPSHOT_EVENTS);
     const byteLength =
       SNAPSHOT_HEADER_BYTES +
       players.length * SNAPSHOT_PLAYER_BYTES +
+      SNAPSHOT_VIEWER_COOLDOWN_BYTES +
       projectiles.length * SNAPSHOT_PROJECTILE_BYTES +
       events.length * SNAPSHOT_EVENT_BYTES;
     if (byteLength > BROWSER_MATCH_MAX_FRAME_BYTES) {
@@ -786,6 +861,10 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       view.setUint32(offset + 26, entityHandle(player.entityKey), true);
       offset += SNAPSHOT_PLAYER_BYTES;
     }
+    for (let spell = 0; spell < BROWSER_MATCH_SPELL_SLOTS; spell += 1) {
+      view.setUint16(offset + spell * 2, viewer.cooldownTicks[spell] ?? 0, true);
+    }
+    offset += SNAPSHOT_VIEWER_COOLDOWN_BYTES;
     for (const projectile of projectiles) {
       view.setUint32(offset, entityHandle(projectile.entityKey), true);
       view.setUint8(offset + 4, Math.max(0, projectile.ownerPlayerId));
@@ -807,19 +886,87 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       view.setUint8(offset + 4, event.kind);
       view.setUint8(offset + 5, actor?.playerId ?? 255);
       view.setUint8(offset + 6, target?.playerId ?? 255);
-      view.setUint8(offset + 7, 0);
-      view.setInt32(offset + 8, position?.xCm ?? 0, true);
-      view.setInt32(offset + 12, position?.yCm ?? 0, true);
-      view.setInt32(offset + 16, position?.zCm ?? 0, true);
+      let detail = 0;
+      if (
+        event.kind === CORE_CAST_EVENT ||
+        event.kind === CORE_PROJECTILE_IMPACT_EVENT
+      ) {
+        const detailIndex = event.kind === CORE_PROJECTILE_IMPACT_EVENT ? 3 : 0;
+        const eventSpell = event.data[detailIndex];
+        if (!Number.isInteger(eventSpell) || !IMPLEMENTED_SPELLS.has(eventSpell)) {
+          throw new Error("Browser match core emitted an unsupported spell event.");
+        }
+        detail = eventSpell;
+      }
+      view.setUint8(offset + 7, detail);
+      view.setInt32(
+        offset + 8,
+        event.kind === CORE_PROJECTILE_IMPACT_EVENT
+          ? event.data[0]
+          : position?.xCm ?? 0,
+        true,
+      );
+      view.setInt32(
+        offset + 12,
+        event.kind === CORE_PROJECTILE_IMPACT_EVENT
+          ? event.data[1]
+          : position?.yCm ?? 0,
+        true,
+      );
+      view.setInt32(
+        offset + 16,
+        event.kind === CORE_PROJECTILE_IMPACT_EVENT
+          ? event.data[2]
+          : position?.zCm ?? 0,
+        true,
+      );
       offset += SNAPSHOT_EVENT_BYTES;
+    }
+    if (offset !== byteLength) {
+      throw new Error("Browser match snapshot layout length is inconsistent.");
     }
     try {
       webSocket.send(buffer);
       attachment.lastSentSnapshotSequence = snapshotSequence;
+      const lastEvent = events.at(-1);
+      if (lastEvent !== undefined) attachment.lastSentEventId = lastEvent.eventId;
+      attachment.lastVisibleProjectileKeys = projectiles.map(
+        (projectile) => projectile.entityKey,
+      );
       webSocket.serializeAttachment(attachment);
     } catch {
       webSocket.close(1011, "snapshot delivery failed");
     }
+  }
+
+  private rememberEvents(
+    events: readonly CoreEventSnapshot[],
+    currentTick: number,
+  ): void {
+    for (const event of events) {
+      if (
+        event.kind === CORE_CAST_EVENT ||
+        event.kind === CORE_DAMAGE_EVENT ||
+        event.kind === CORE_DEFEAT_EVENT ||
+        event.kind === CORE_PROJECTILE_IMPACT_EVENT
+      ) {
+        this.recentEvents.push(event);
+      }
+    }
+    const oldestTick = Math.max(0, currentTick - EVENT_REPLAY_TICKS);
+    this.recentEvents = this.recentEvents
+      .filter((event) => event.tick >= oldestTick)
+      .slice(-MAX_RECENT_EVENTS);
+  }
+
+  private latestRecentEventId(): number {
+    return this.recentEvents.at(-1)?.eventId ?? 0;
+  }
+
+  private discardSimulation(): void {
+    this.simulation = undefined;
+    this.recentEvents = [];
+    this.roundResetTick = undefined;
   }
 
   private disconnect(webSocket: WebSocket): void {
@@ -836,7 +983,10 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     try {
       this.simulation?.clearInput(attachment.slot);
     } catch {
-      this.simulation = undefined;
+      this.discardSimulation();
+      for (const connected of this.ctx.getWebSockets()) {
+        connected.close(1012, "authoritative match restarted");
+      }
     }
     this.ctx.storage.sql.exec(
       `UPDATE players
@@ -852,6 +1002,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     room: RoomRow,
     player: PlayerRow,
     resumeToken: string,
+    createdPlayer = false,
   ): BrowserMatchClaim {
     return {
       matchId: room.match_id,
@@ -861,6 +1012,7 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
       teamId: player.team_id,
       resumeToken,
       playerCount: this.playerRows().length,
+      createdPlayer,
     };
   }
 
@@ -911,6 +1063,16 @@ function socketAttachment(webSocket: WebSocket): SocketAttachment {
     !Number.isInteger(attachment.clientClock) ||
     !Number.isInteger(attachment.lastAckedSnapshotSequence) ||
     !Number.isInteger(attachment.lastSentSnapshotSequence) ||
+    !Number.isInteger(attachment.lastSentEventId) ||
+    attachment.lastSentEventId === undefined ||
+    attachment.lastSentEventId < 0 ||
+    !Array.isArray(attachment.lastVisibleProjectileKeys) ||
+    attachment.lastVisibleProjectileKeys.length > MAX_SNAPSHOT_PROJECTILES ||
+    attachment.lastVisibleProjectileKeys.some(
+      (entityKey) =>
+        typeof entityKey !== "string" ||
+        !/^[0-9]+:[0-9]+$/u.test(entityKey),
+    ) ||
     !Number.isFinite(attachment.inputRateTokens) ||
     attachment.inputRateTokens === undefined ||
     attachment.inputRateTokens < 0 ||
@@ -942,12 +1104,36 @@ function validPendingInput(sample: unknown): sample is SocketAttachment["pending
     Number.isInteger(input.sequence) &&
     input.sequence !== undefined &&
     input.sequence > 0 &&
+    input.sequence <= 0xffff_ffff &&
     Number.isInteger(input.moveX) &&
+    input.moveX !== undefined &&
+    input.moveX >= -2_047 &&
+    input.moveX <= 2_047 &&
     Number.isInteger(input.moveY) &&
+    input.moveY !== undefined &&
+    input.moveY >= -2_047 &&
+    input.moveY <= 2_047 &&
     Number.isInteger(input.moveVertical) &&
+    input.moveVertical !== undefined &&
+    input.moveVertical >= -2_047 &&
+    input.moveVertical <= 2_047 &&
     Number.isInteger(input.yaw) &&
+    input.yaw !== undefined &&
+    input.yaw >= 0 &&
+    input.yaw <= 0xffff &&
     Number.isInteger(input.pitch) &&
-    typeof input.cast === "boolean"
+    input.pitch !== undefined &&
+    input.pitch >= -16_384 &&
+    input.pitch <= 16_384 &&
+    typeof input.cast === "boolean" &&
+    (
+      input.cast
+        ? input.requestedSpell !== undefined &&
+          input.requestedSpell !== null &&
+          Number.isInteger(input.requestedSpell) &&
+          IMPLEMENTED_SPELLS.has(input.requestedSpell)
+        : input.requestedSpell === null
+    )
   );
 }
 

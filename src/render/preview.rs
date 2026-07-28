@@ -7,6 +7,17 @@ use super::*;
 
 pub(crate) const PREVIEW_SCENE_COUNT: i32 = 30;
 pub(crate) const PREVIEW_VARIANT_COUNT: i32 = 8;
+pub(crate) const FIREBOLT_PREVIEW_VARIANT_COUNT: i32 = 24;
+
+pub(crate) const fn preview_variant_count(scene: i32) -> i32 {
+    if scene == 25 {
+        FIREBOLT_PREVIEW_VARIANT_COUNT
+    } else if scene >= 0 && scene < PREVIEW_SCENE_COUNT {
+        PREVIEW_VARIANT_COUNT
+    } else {
+        0
+    }
+}
 
 const PREVIEW_Y: f32 = 512.0;
 
@@ -22,9 +33,7 @@ impl World {
         self.render.carpet_last = -1;
         self.preview_focus = [0.0; 4];
 
-        if !(0..PREVIEW_SCENE_COUNT).contains(&scene)
-            || !(0..PREVIEW_VARIANT_COUNT).contains(&variant)
-        {
+        if !(0..preview_variant_count(scene)).contains(&variant) {
             return 0;
         }
 

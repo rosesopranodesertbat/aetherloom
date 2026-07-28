@@ -31,7 +31,7 @@ All mutation functions return `0` on success or a negative status:
 | `-8` | authoritative core rejected the operation |
 
 ```text
-worker_match_abi_version() -> i32                 // 2
+worker_match_abi_version() -> i32                 // 3
 worker_match_authoritative_hz() -> i32            // 128
 worker_match_max_players() -> i32                 // 8
 
@@ -64,7 +64,7 @@ snapshot. Consumers must reacquire the pointer and length after initialization,
 player/controller changes, reset, or tick advancement. Input submission and
 input clearing do not rebuild or invalidate the current snapshot.
 
-## Snapshot ABI version 2
+## Snapshot ABI version 3
 
 The buffer is an `i32[worker_match_snapshot_len()]` in Wasm linear memory.
 Unsigned halves are carried in signed words; use `word >>> 0` in JavaScript
@@ -75,12 +75,12 @@ before reconstructing a `u64`. Entity ID `0:0` means absent.
 | Word | Field |
 | ---: | --- |
 | 0 | magic `0x314d4c41` (`ALM1` in little-endian bytes) |
-| 1 | ABI version (`2`) |
+| 1 | ABI version (`3`) |
 | 2 | total buffer words |
 | 3–4 | next authoritative tick, low/high `u32` |
 | 5 | authoritative Hz (`128`) |
 | 6 | active player record count |
-| 7 | player stride (`16`) |
+| 7 | player stride (`28`) |
 | 8 | projectile record count |
 | 9 | projectile stride (`15`) |
 | 10 | last-tick event record count |
@@ -90,7 +90,7 @@ before reconstructing a `u64`. Entity ID `0:0` means absent.
 | 14 | event-record word offset |
 | 15 | reserved, zero |
 
-### Player record: 16 words
+### Player record: 28 words
 
 ```text
 0 player_id
@@ -107,8 +107,8 @@ before reconstructing a `u64`. Entity ID `0:0` means absent.
 11 yaw
 12 pitch
 13 health
-14 cooldown_ticks
-15 outcome               // Active=1, Extracted=2, Defeated=3, ...
+14..26 spell cooldown ticks for slots 0..12
+27 outcome               // Active=1, Extracted=2, Defeated=3, ...
 ```
 
 ### Projectile record: 15 words

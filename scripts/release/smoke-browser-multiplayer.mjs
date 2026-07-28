@@ -68,7 +68,7 @@ if (
   throw new Error("multiplayer smoke target is not the expected staging build");
 }
 
-async function join() {
+async function join({ resumeToken, joinNonce } = {}) {
   const response = await fetch(
     new URL("/internal/v1/demo/smoke/join", controlPlane),
     {
@@ -78,7 +78,11 @@ async function join() {
         "content-type": "application/json",
         origin: origin.origin,
       },
-      body: JSON.stringify({ room }),
+      body: JSON.stringify({
+        room,
+        ...(resumeToken === undefined ? {} : { resumeToken }),
+        ...(joinNonce === undefined ? {} : { joinNonce }),
+      }),
       signal: AbortSignal.timeout(10_000),
     },
   );
@@ -107,7 +111,7 @@ async function join() {
 function open(joined) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(joined.webSocketUrl, [
-      "aetherloom.v2",
+      "aetherloom.v3",
       `aetherloom.auth.${joined.ticket}`,
     ]);
     socket.binaryType = "arraybuffer";
@@ -119,7 +123,7 @@ function open(joined) {
       "open",
       () => {
         clearTimeout(timeout);
-        if (socket.protocol !== "aetherloom.v2") {
+        if (socket.protocol !== "aetherloom.v3") {
           socket.close();
           reject(new Error("multiplayer WebSocket selected the wrong protocol"));
           return;
@@ -185,6 +189,7 @@ function observe(socket) {
 function startInput(socket, yaw, observer) {
   let sequence = 1;
   let cast = false;
+  let spell = 0;
   let moveVertical = 0;
   let pitch = 0;
   let timer;
@@ -201,6 +206,7 @@ function startInput(socket, yaw, observer) {
         yaw,
         pitch,
         cast,
+        spell,
         clientClockMs: Date.now() & 0xffff,
         snapshotAck: observer.snapshots.at(-1)?.snapshotSeq ?? 0,
       }),
@@ -220,7 +226,8 @@ function startInput(socket, yaw, observer) {
   };
   timer = setTimeout(pace, interval);
   return {
-    cast() {
+    castSpell(requestedSpell = 0) {
+      spell = requestedSpell;
       cast = true;
     },
     fly(vertical, lookPitch = pitch) {
@@ -234,15 +241,27 @@ function startInput(socket, yaw, observer) {
   };
 }
 
-const firstJoin = await join();
-const secondJoin = await join();
+const firstJoinNonce = `demo_join_${randomBytes(18).toString("base64url")}`;
+const secondJoinNonce = `demo_join_${randomBytes(18).toString("base64url")}`;
+const initialJoin = await join({ joinNonce: firstJoinNonce });
+const idempotentJoin = await join({ joinNonce: firstJoinNonce });
+const firstJoin = await join({ resumeToken: initialJoin.resumeToken });
+const secondJoin = await join({ joinNonce: secondJoinNonce });
 if (
+  initialJoin.accountId !== idempotentJoin.accountId ||
+  initialJoin.slot !== idempotentJoin.slot ||
+  initialJoin.resumeToken !== idempotentJoin.resumeToken ||
+  idempotentJoin.playerCount !== 1 ||
+  initialJoin.matchId !== firstJoin.matchId ||
+  initialJoin.accountId !== firstJoin.accountId ||
+  initialJoin.slot !== firstJoin.slot ||
+  initialJoin.resumeToken !== firstJoin.resumeToken ||
+  firstJoin.playerCount !== 1 ||
   firstJoin.matchId !== secondJoin.matchId ||
   firstJoin.slot === secondJoin.slot ||
-  firstJoin.playerCount !== 1 ||
   secondJoin.playerCount !== 2
 ) {
-  throw new Error("fresh multiplayer smoke room did not allocate two distinct players");
+  throw new Error("multiplayer resume did not preserve one player before allocating the second");
 }
 const bySlot = [firstJoin, secondJoin].sort((left, right) => left.slot - right.slot);
 if (bySlot[0].slot !== 0 || bySlot[1].slot !== 1) {
@@ -271,19 +290,23 @@ try {
   ]);
   const casterInput = firstJoin.slot === 0 ? firstInput : secondInput;
   const targetSlot = 1;
-  casterInput.cast();
+  casterInput.castSpell(0);
   const [firstDamage, secondDamage] = await Promise.all([
     firstObserver.waitFor(
       (snapshot) =>
         snapshot.players.some(
           (player) => player.slot === targetSlot && player.health < 100,
-        ) && snapshot.events.some((event) => event.type === 4),
+        ) &&
+        snapshot.events.some((event) => event.type === 4) &&
+        snapshot.events.some((event) => event.type === 10 && event.spell === 0),
     ),
     secondObserver.waitFor(
       (snapshot) =>
         snapshot.players.some(
           (player) => player.slot === targetSlot && player.health < 100,
-        ) && snapshot.events.some((event) => event.type === 4),
+        ) &&
+        snapshot.events.some((event) => event.type === 4) &&
+        snapshot.events.some((event) => event.type === 10 && event.spell === 0),
     ),
   ]);
   const health = firstDamage.players.find((player) => player.slot === targetSlot)?.health;
@@ -292,6 +315,25 @@ try {
     secondDamage.players.find((player) => player.slot === targetSlot)?.health !== health
   ) {
     throw new Error("multiplayer clients disagreed on authoritative damage");
+  }
+  const targetInput = secondJoin.slot === targetSlot ? secondInput : firstInput;
+  const targetObserver = secondJoin.slot === targetSlot
+    ? secondObserver
+    : firstObserver;
+  targetInput.castSpell(7);
+  const healed = await targetObserver.waitFor(
+    (snapshot) =>
+      snapshot.players.some(
+        (player) => player.slot === targetSlot && player.health === 100,
+      ) &&
+      snapshot.events.some(
+        (event) => event.type === 3 && event.spell === 7,
+      ),
+  );
+  if (
+    healed.players.find((player) => player.slot === targetSlot)?.health !== 100
+  ) {
+    throw new Error("authoritative Mend did not restore the damaged target");
   }
   const flightInput = firstJoin.slot === 0 ? firstInput : secondInput;
   const flightObserver = firstJoin.slot === 0 ? firstObserver : secondObserver;
@@ -315,7 +357,7 @@ try {
   const compactPitch = 63;
   const expectedPitch = Math.round((compactPitch * 16_384) / 127);
   flightInput.fly(0, compactPitch);
-  flightInput.cast();
+  flightInput.castSpell(0);
   const [firstPitched, secondPitched] = await Promise.all([
     firstObserver.waitFor((snapshot) =>
       snapshot.projectiles.some(
@@ -355,6 +397,9 @@ try {
       descendedY,
       pitchedProjectilePitch: expectedPitch,
       bothClientsObservedDamage: true,
+      authoritativeMend: true,
+      idempotentFreshJoin: true,
+      stableResume: true,
       buildHash: expectedBuild,
     }),
   );

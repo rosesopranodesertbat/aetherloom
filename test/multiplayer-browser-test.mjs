@@ -1,26 +1,47 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import {
+  CAST_EVENT_TYPE,
   DAMAGE_EVENT_TYPE,
   INPUT_FRAME_BYTES,
+  JoinNonceStore,
   MAX_SNAPSHOT_FRAME_BYTES,
+  PROJECTILE_IMPACT_EVENT_TYPE,
   ProtocolError,
+  ResumeOwnership,
+  ResumeTokenStore,
+  SingleFlight,
+  VIEWER_COOLDOWN_BYTES,
+  authoritativeCooldownReadyAt,
   bilinearHeight,
   composeTemplate,
   decodeSnapshotFrame,
+  demoResumeToken,
   encodeInputFrame,
   firstPersonCamera,
+  firstPersonMuzzle,
+  gamepadLookDelta,
+  isJoinNonce,
   isNewerSequence,
+  isResumeToken,
+  joinAttemptKey,
   movementToWorld,
   nextPacedDeadline,
   normalizeControlPlane,
   pendingInputDisplacement,
   predictedBrowserAxisDisplacement,
   predictViewerPosition,
+  randomJoinNonce,
+  resumeSessionKey,
+  sequenceAcknowledges,
+  shapeFlightInput,
   socketCloseMessage,
   validateRoom,
+  viewerProjectilePresentation,
   wirePitchToRadians,
   wireYawToCoreRadians,
   wireYawToRenderRadians,
@@ -42,11 +63,34 @@ const demoWebSocketRouteSource = gatewaySource.slice(
   gatewaySource.indexOf('async function advanceIsland('),
 );
 
+function mapStorage(entries = new Map()) {
+  return {
+    getItem: (key) => entries.get(key) ?? null,
+    setItem: (key, value) => entries.set(key, value),
+    removeItem: (key) => entries.delete(key),
+  };
+}
+
+class DeterministicLockManager {
+  constructor() {
+    this.held = new Set();
+    this.requests = [];
+  }
+
+  request(name, options, callback) {
+    this.requests.push({ name, options });
+    if (this.held.has(name)) return Promise.resolve(callback(null));
+    this.held.add(name);
+    return Promise.resolve(callback({ name, mode: options.mode }))
+      .finally(() => this.held.delete(name));
+  }
+}
+
 function snapshotFixture() {
-  const byteLength = 24 + 2 * 30 + 24 + 20;
+  const byteLength = 24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 24 + 20;
   const bytes = new Uint8Array(byteLength);
   const view = new DataView(bytes.buffer);
-  view.setUint8(0, 2);
+  view.setUint8(0, 3);
   view.setUint8(1, 2);
   view.setUint16(2, byteLength, true);
   view.setUint32(4, 0x1020_3040, true);
@@ -90,6 +134,10 @@ function snapshotFixture() {
   view.setUint32(offset + 26, 101, true);
 
   offset += 30;
+  view.setUint16(offset, 12, true);
+  view.setUint16(offset + 7 * 2, 345, true);
+
+  offset += VIEWER_COOLDOWN_BYTES;
   view.setUint32(offset, 800, true);
   view.setUint8(offset + 4, 2);
   view.setUint8(offset + 5, 0);
@@ -102,17 +150,17 @@ function snapshotFixture() {
 
   offset += 24;
   view.setUint32(offset, 900, true);
-  view.setUint8(offset + 4, DAMAGE_EVENT_TYPE);
+  view.setUint8(offset + 4, CAST_EVENT_TYPE);
   view.setUint8(offset + 5, 2);
   view.setUint8(offset + 6, 5);
-  view.setUint8(offset + 7, 0);
+  view.setUint8(offset + 7, 7);
   view.setInt32(offset + 8, 444, true);
   view.setInt32(offset + 12, 555, true);
   view.setInt32(offset + 16, -555, true);
   return bytes;
 }
 
-test('input encoder writes the exact 22-byte v2 wire contract with 3D flight and snapshot ack', () => {
+test('input encoder writes the exact 22-byte v3 wire contract with spells, flight, and snapshot ack', () => {
   const bytes = encodeInputFrame({
     sequence: 0x7856_3412,
     moveX: -127,
@@ -121,17 +169,31 @@ test('input encoder writes the exact 22-byte v2 wire contract with 3D flight and
     yaw: 0xbeef,
     pitch: 63,
     cast: true,
+    spell: 0,
     clientClockMs: 0x1234,
     snapshotAck: 0xfedc_ba98,
   });
   assert.equal(bytes.byteLength, INPUT_FRAME_BYTES);
   assert.deepEqual(Array.from(bytes), [
-    2, 1, 22, 0,
+    3, 1, 22, 0,
     0x12, 0x34, 0x56, 0x78,
     0x81, 0x7f, 0xc0, 0x3f,
     0xef, 0xbe, 1, 0, 0x34, 0x12,
     0x98, 0xba, 0xdc, 0xfe,
   ]);
+  const noCast = encodeInputFrame({
+    sequence: 1,
+    spell: 7,
+  });
+  assert.equal(noCast[14], 0);
+  assert.equal(noCast[15], 0xff, 'an idle input must not imply Firebolt');
+  const mend = encodeInputFrame({
+    sequence: 2,
+    cast: true,
+    spell: 7,
+  });
+  assert.equal(mend[14], 1);
+  assert.equal(mend[15], 7);
   assert.throws(
     () => encodeInputFrame({ sequence: 0, moveX: 0, moveY: 0, yaw: 0, clientClockMs: 0 }),
     ProtocolError,
@@ -152,6 +214,14 @@ test('input encoder writes the exact 22-byte v2 wire contract with 3D flight and
     }),
     ProtocolError,
   );
+  assert.throws(
+    () => encodeInputFrame({ sequence: 1, cast: true, spell: 1 }),
+    ProtocolError,
+  );
+  assert.throws(
+    () => encodeInputFrame({ sequence: 1, cast: false, spell: 13 }),
+    ProtocolError,
+  );
 });
 
 test('browser and authoritative host pin the same acknowledged input contract', () => {
@@ -161,7 +231,7 @@ test('browser and authoritative host pin the same acknowledged input contract', 
   assert.match(browserMatchRoomSource, /outstanding >= MAX_UNACKED_SNAPSHOTS/u);
   assert.match(
     demoWebSocketRouteSource,
-    /publicWebSocketProtocol\(request, "aetherloom\.v2"\)/u,
+    /publicWebSocketProtocol\(request, "aetherloom\.v3"\)/u,
   );
 });
 
@@ -189,6 +259,7 @@ test('snapshot decoder reads all compact records from an offset view', () => {
     maxHealth: 100,
     score: 9,
     entity: 100,
+    spellCooldownTicks: [12, 0, 0, 0, 0, 0, 0, 345, 0, 0, 0, 0, 0],
   });
   assert.deepEqual(snapshot.projectiles[0], {
     entity: 800,
@@ -202,9 +273,28 @@ test('snapshot decoder reads all compact records from an offset view', () => {
   });
   assert.deepEqual(snapshot.events[0], {
     eventId: 900,
-    type: DAMAGE_EVENT_TYPE,
+    type: CAST_EVENT_TYPE,
     actor: 2,
     target: 5,
+    spell: 7,
+    xcm: 444,
+    ycm: 555,
+    zcm: -555,
+  });
+});
+
+test('snapshot decoder preserves authoritative firebolt impact coordinates', () => {
+  const fixture = snapshotFixture();
+  const eventOffset = 24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 24;
+  fixture[eventOffset + 4] = PROJECTILE_IMPACT_EVENT_TYPE;
+  fixture[eventOffset + 6] = 0xff;
+  fixture[eventOffset + 7] = 0;
+  assert.deepEqual(decodeSnapshotFrame(fixture).events[0], {
+    eventId: 900,
+    type: PROJECTILE_IMPACT_EVENT_TYPE,
+    actor: 2,
+    target: 0xff,
+    spell: 0,
     xcm: 444,
     ycm: 555,
     zcm: -555,
@@ -226,7 +316,7 @@ test('snapshot decoder rejects truncation, padding, reserved bits, duplicates, a
   );
 
   const reserved = fixture.slice();
-  reserved[24 + 2 * 30 + 5] = 1;
+  reserved[24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 5] = 1;
   assert.throws(() => decodeSnapshotFrame(reserved), /Projectile reserved/u);
 
   const unknownMatchFlags = fixture.slice();
@@ -247,11 +337,29 @@ test('snapshot decoder rejects truncation, padding, reserved bits, duplicates, a
 
   const invalidProjectilePitch = fixture.slice();
   new DataView(invalidProjectilePitch.buffer).setInt16(
-    24 + 2 * 30 + 22,
+    24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 22,
     -16_385,
     true,
   );
   assert.throws(() => decodeSnapshotFrame(invalidProjectilePitch), /Projectile pitch/u);
+
+  const nonCastEventDetail = fixture.slice();
+  nonCastEventDetail[
+    24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 24 + 4
+  ] = DAMAGE_EVENT_TYPE;
+  assert.throws(() => decodeSnapshotFrame(nonCastEventDetail), /reserved/u);
+
+  const unsupportedCastSpell = fixture.slice();
+  unsupportedCastSpell[
+    24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 24 + 7
+  ] = 1;
+  assert.throws(() => decodeSnapshotFrame(unsupportedCastSpell), ProtocolError);
+
+  const unsupportedImpactSpell = fixture.slice();
+  unsupportedImpactSpell[
+    24 + 2 * 30 + VIEWER_COOLDOWN_BYTES + 24 + 4
+  ] = PROJECTILE_IMPACT_EVENT_TYPE;
+  assert.throws(() => decodeSnapshotFrame(unsupportedImpactSpell), /projectile impact/u);
 
   const duplicateSlot = fixture.slice();
   duplicateSlot[24 + 30] = duplicateSlot[24];
@@ -271,6 +379,10 @@ test('sequence and wrapped clocks handle unsigned rollover', () => {
   assert.equal(isNewerSequence(0, 0xffff_ffff), true);
   assert.equal(isNewerSequence(0xffff_ffff, 0), false);
   assert.equal(isNewerSequence(7, 7), false);
+  assert.equal(sequenceAcknowledges(7, 7), true);
+  assert.equal(sequenceAcknowledges(0, 0xffff_ffff), false);
+  assert.equal(sequenceAcknowledges(1, 0xffff_ffff), true);
+  assert.equal(sequenceAcknowledges(0xffff_ffff, 1), false);
   assert.equal(wrappedClockDelta(5, 65_530), 11);
 });
 
@@ -306,9 +418,12 @@ test('wire pitch spans a truthful first-person vertical aim range', () => {
 
 test('first-person camera uses the immediate yaw/pitch reticle ray', () => {
   const level = firstPersonCamera({ x: 10, y: 20, z: 30, yaw: 0, pitch: 0 });
-  assert.ok(level.cx > level.ex);
-  assert.ok(Math.abs(level.cy - level.ey) < 1e-9);
-  assert.ok(Math.abs(level.cz - level.ez) < 1e-9);
+  assert.equal(level.ex, 10);
+  assert.equal(level.ey, 23);
+  assert.equal(level.ez, 30);
+  assert.equal(level.cx, 90);
+  assert.equal(level.cy, 23);
+  assert.equal(level.cz, 30);
 
   const quarterTurn = firstPersonCamera({
     x: 10,
@@ -342,6 +457,118 @@ test('first-person camera uses the immediate yaw/pitch reticle ray', () => {
   assert.ok(Math.abs(forward[0] * up[0] + forward[1] * up[1] + forward[2] * up[2]) < 1e-9);
 });
 
+test('first-person muzzle and local projectile easing stay aligned with the reticle ray', () => {
+  const viewer = { x: 10, y: 20, z: 30, yaw: 0, pitch: 0 };
+  assert.deepEqual(firstPersonMuzzle(viewer), {
+    x: 16,
+    y: 21.5,
+    z: 31.25,
+    yaw: 0,
+    pitch: 0,
+  });
+
+  const quarterTurn = firstPersonMuzzle({ ...viewer, yaw: 16_384 });
+  assert.ok(Math.abs(quarterTurn.x - 8.75) < 1e-9);
+  assert.equal(quarterTurn.y, 21.5);
+  assert.ok(Math.abs(quarterTurn.z - 36) < 1e-9);
+
+  for (const yaw of [0, 16_384, 41_000]) {
+    for (const pitch of [-10_950, 0, 10_950]) {
+      const pose = { ...viewer, yaw, pitch };
+      const camera = firstPersonCamera(pose);
+      const muzzle = firstPersonMuzzle(pose);
+      const fromEye = [
+        muzzle.x - camera.ex,
+        muzzle.y - camera.ey,
+        muzzle.z - camera.ez,
+      ];
+      const forward = [
+        (camera.cx - camera.ex) / 80,
+        (camera.cy - camera.ey) / 80,
+        (camera.cz - camera.ez) / 80,
+      ];
+      const up = [camera.ux, camera.uy, camera.uz];
+      const right = [
+        forward[1] * up[2] - forward[2] * up[1],
+        forward[2] * up[0] - forward[0] * up[2],
+        forward[0] * up[1] - forward[1] * up[0],
+      ];
+      const depth = fromEye.reduce(
+        (sum, component, index) => sum + component * forward[index],
+        0,
+      );
+      const vertical = fromEye.reduce(
+        (sum, component, index) => sum + component * up[index],
+        0,
+      );
+      const horizontal = fromEye.reduce(
+        (sum, component, index) => sum + component * right[index],
+        0,
+      );
+      assert.ok(depth > 0);
+      assert.ok(Math.abs(vertical / depth) < Math.tan(1.16 / 2));
+      assert.ok(
+        Math.abs(horizontal / depth) <
+          Math.tan(1.16 / 2) * 9 / 16,
+        'the hand muzzle must remain visible even at a portrait aspect ratio',
+      );
+    }
+  }
+
+  const position = { x: 100, y: 50, z: 200, yaw: 0, pitch: 0 };
+  const remote = viewerProjectilePresentation(
+    position,
+    { owner: 3, ttl: 410, yaw: 0, pitch: 0 },
+    2,
+  );
+  assert.deepEqual(remote, position);
+  assert.notEqual(remote, position);
+
+  const fresh = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 410, yaw: 0, pitch: 0 },
+    2,
+  );
+  const halfway = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 404, yaw: 0, pitch: 0 },
+    2,
+  );
+  const halfTick = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 410, yaw: 0, pitch: 0 },
+    2,
+    0.5,
+  );
+  const oneTick = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 410, yaw: 0, pitch: 0 },
+    2,
+    1,
+  );
+  const nearlySettled = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 410, yaw: 0, pitch: 0 },
+    2,
+    11.5,
+  );
+  const settled = viewerProjectilePresentation(
+    position,
+    { owner: 2, ttl: 398, yaw: 0, pitch: 0 },
+    2,
+  );
+  assert.ok(Math.abs(fresh.x - 104.6) < 1e-9);
+  assert.ok(Math.abs(fresh.y - 49.2) < 1e-9);
+  assert.ok(Math.abs(fresh.z - 201.25) < 1e-9);
+  assert.ok(fresh.x > halfTick.x && halfTick.x > oneTick.x);
+  assert.ok(Math.abs((fresh.x - halfTick.x) - (halfTick.x - oneTick.x)) < 1e-12);
+  assert.ok(Math.abs(halfway.x - 102.3) < 1e-9);
+  assert.ok(Math.abs(halfway.y - 49.6) < 1e-9);
+  assert.ok(Math.abs(halfway.z - 200.625) < 1e-9);
+  assert.ok(Math.abs(nearlySettled.x - 100.19166666666666) < 1e-9);
+  assert.deepEqual(settled, position);
+});
+
 test('acknowledging an input preserves the same predicted pose without a snapshot sawtooth', () => {
   const sentAt = 100;
   const history = [
@@ -351,26 +578,26 @@ test('acknowledging an input preserves the same predicted pose without a snapsho
   const sampleAt = sentAt + 2_000 / 64;
   const beforeAck = pendingInputDisplacement(history, sampleAt);
   const afterAck = pendingInputDisplacement(history.slice(1), sampleAt);
-  assert.equal(beforeAck.x, 3.2);
-  assert.equal(beforeAck.y, 2);
-  assert.equal(afterAck.x, 1.6);
-  assert.equal(afterAck.y, 1);
-  assert.equal(1.6 + afterAck.x, beforeAck.x);
-  assert.equal(1 + afterAck.y, beforeAck.y);
+  assert.equal(beforeAck.x, 4);
+  assert.ok(Math.abs(beforeAck.y - 2.4) < 1e-12);
+  assert.equal(afterAck.x, 2);
+  assert.ok(Math.abs(afterAck.y - 1.2) < 1e-12);
+  assert.equal(2 + afterAck.x, beforeAck.x);
+  assert.ok(Math.abs(1.2 + afterAck.y - beforeAck.y) < 1e-12);
 });
 
 test('prediction mirrors host expansion and Rust truncation for partial axes', () => {
   for (const [axis, planar, vertical] of [
     [1, 0, 0],
-    [63, 0.6, 0.4],
-    [90, 1, 0.6],
-    [126, 1.4, 0.8],
-    [127, 1.6, 1],
+    [63, 0.8, 0.4],
+    [90, 1.4, 0.8],
+    [126, 1.8, 1],
+    [127, 2, 1.2],
   ]) {
-    assert.ok(Math.abs(predictedBrowserAxisDisplacement(axis, 8) - planar) < 1e-12);
-    assert.ok(Math.abs(predictedBrowserAxisDisplacement(axis, 5) - vertical) < 1e-12);
-    assert.ok(Math.abs(predictedBrowserAxisDisplacement(-axis, 8) + planar) < 1e-12);
-    assert.ok(Math.abs(predictedBrowserAxisDisplacement(-axis, 5) + vertical) < 1e-12);
+    assert.ok(Math.abs(predictedBrowserAxisDisplacement(axis, 10) - planar) < 1e-12);
+    assert.ok(Math.abs(predictedBrowserAxisDisplacement(axis, 6) - vertical) < 1e-12);
+    assert.ok(Math.abs(predictedBrowserAxisDisplacement(-axis, 10) + planar) < 1e-12);
+    assert.ok(Math.abs(predictedBrowserAxisDisplacement(-axis, 6) + vertical) < 1e-12);
   }
 });
 
@@ -419,18 +646,78 @@ test('first-person prediction follows bilinear terrain between authoritative sna
 
 test('camera-relative movement is quantized into server world axes', () => {
   // The core wire convention is 0 = +X and one quarter-turn = +Z.
-  assert.deepEqual(movementToWorld(0, 127, 0), { x: 127, y: 0 });
-  assert.deepEqual(movementToWorld(0, 127, 16_384), { x: 0, y: 127 });
-  assert.deepEqual(movementToWorld(127, 0, 0), { x: 0, y: 127 });
-  assert.deepEqual(movementToWorld(127, 0, 16_384), { x: -127, y: 0 });
+  assert.deepEqual(movementToWorld(0, 127, 0), { x: 127, y: 0, vertical: 0 });
+  assert.deepEqual(movementToWorld(0, 127, 16_384), { x: 0, y: 127, vertical: 0 });
+  assert.deepEqual(movementToWorld(127, 0, 0), { x: 0, y: 127, vertical: 0 });
+  assert.deepEqual(movementToWorld(127, 0, 16_384), { x: -127, y: 0, vertical: 0 });
+  assert.deepEqual(
+    movementToWorld(0, 127, 0, 8_192),
+    { x: 90, y: 0, vertical: 90 },
+  );
+  assert.deepEqual(
+    movementToWorld(0, 0, 0, 0, 127),
+    { x: 0, y: 0, vertical: 127 },
+  );
   const diagonal = movementToWorld(90, 90, 8_192);
   assert.ok(Math.hypot(diagonal.x, diagonal.y) <= 128);
+  assert.equal(diagonal.vertical, 0);
+});
+
+test('flight input preserves forward authority while reducing strafe dominance', () => {
+  assert.deepEqual(shapeFlightInput(0, 0), { strafe: 0, thrust: 0 });
+  assert.deepEqual(shapeFlightInput(1, 1), { strafe: 0.55, thrust: 1 });
+  assert.deepEqual(shapeFlightInput(-1, -1), { strafe: -0.55, thrust: -1 });
+  assert.deepEqual(shapeFlightInput(0.5, -0.25), { strafe: 0.275, thrust: -0.25 });
+  assert.throws(() => shapeFlightInput(1.01, 0), ProtocolError);
+  assert.throws(() => shapeFlightInput(0, Number.NaN), ProtocolError);
 });
 
 test('positive horizontal look turns toward first-person screen right', () => {
   assert.equal(yawAfterLookDelta(0, 70), 70);
   assert.equal(yawAfterLookDelta(0xffff, 2), 1);
   assert.equal(yawAfterLookDelta(0, -1), 0xffff);
+});
+
+test('gamepad look is render-rate independent, deadzoned, and hitch bounded', () => {
+  const axis = 0.5;
+  const unitsPerSecond = 49_920;
+  const at64Hz = Array.from(
+    { length: 64 },
+    () => gamepadLookDelta(axis, 1_000 / 64, unitsPerSecond),
+  ).reduce((sum, value) => sum + value, 0);
+  const at128Hz = Array.from(
+    { length: 128 },
+    () => gamepadLookDelta(axis, 1_000 / 128, unitsPerSecond),
+  ).reduce((sum, value) => sum + value, 0);
+  assert.ok(Math.abs(at64Hz - at128Hz) < 1e-9);
+  assert.ok(Math.abs(at64Hz - axis * unitsPerSecond) < 1e-9);
+  assert.equal(gamepadLookDelta(0.159, 16, unitsPerSecond), 0);
+  assert.equal(
+    gamepadLookDelta(2, 16, unitsPerSecond),
+    gamepadLookDelta(1, 16, unitsPerSecond),
+  );
+  assert.equal(
+    gamepadLookDelta(1, 250, unitsPerSecond),
+    gamepadLookDelta(1, 50, unitsPerSecond),
+  );
+  assert.throws(() => gamepadLookDelta(0, -1, unitsPerSecond), ProtocolError);
+});
+
+test('authoritative cooldown timing removes measured snapshot transit delay', () => {
+  assert.equal(authoritativeCooldownReadyAt(1_000, 0, 80), 1_000);
+  assert.equal(
+    authoritativeCooldownReadyAt(1_000, 128, 80),
+    1_960,
+  );
+  assert.equal(
+    authoritativeCooldownReadyAt(1_000, 1, 1_000),
+    1_000,
+    'age compensation must never move readiness into the past',
+  );
+  assert.throws(
+    () => authoritativeCooldownReadyAt(1_000, -1, 0),
+    ProtocolError,
+  );
 });
 
 test('wire yaw points camera, carpet, and cast in the same direction', () => {
@@ -482,18 +769,45 @@ test('the Wasm visual templates are finite and copied before the next preview ov
   const { instance } = await WebAssembly.instantiate(wasm, {});
   const sim = instance.exports;
   assert.equal(sim.instStride(), 14);
-  const copy = (scene) => {
-    const count = sim.previewScene(scene, 0);
+  const copy = (scene, variant = 0) => {
+    const count = sim.previewScene(scene, variant);
     assert.ok(count > 0);
     return new Float32Array(sim.memory.buffer, sim.instPtr(), count * 14).slice();
   };
   const player = copy(20);
   const retained = player.slice();
   const rival = copy(21);
-  const firebolt = copy(25);
+  const firebolts = Array.from({ length: 24 }, (_, variant) => copy(25, variant));
   assert.deepEqual(player, retained);
   assert.notDeepEqual(player, rival);
-  for (const template of [player, rival, firebolt]) {
+  assert.notDeepEqual(firebolts[0], firebolts[1]);
+  assert.notDeepEqual(firebolts[23], firebolts[0]);
+  const visualDistance = (left, right) => {
+    assert.equal(left.length, right.length);
+    let squared = 0;
+    for (let index = 0; index < left.length; index += 14) {
+      for (const field of [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13]) {
+        squared += (left[index + field] - right[index + field]) ** 2;
+      }
+      for (const field of [9, 10, 11]) {
+        squared += (
+          Math.sin(left[index + field]) - Math.sin(right[index + field])
+        ) ** 2;
+        squared += (
+          Math.cos(left[index + field]) - Math.cos(right[index + field])
+        ) ** 2;
+      }
+    }
+    return Math.sqrt(squared);
+  };
+  const animationSteps = firebolts.map((frame, variant) =>
+    visualDistance(frame, firebolts[(variant + 1) % firebolts.length]));
+  const ordinaryMaximum = Math.max(...animationSteps.slice(0, -1));
+  assert.ok(
+    animationSteps.at(-1) <= ordinaryMaximum * 1.25,
+    `firebolt loop seam ${animationSteps.at(-1)} exceeds ordinary step ${ordinaryMaximum}`,
+  );
+  for (const template of [player, rival, ...firebolts]) {
     assert.equal(template.length % 14, 0);
     assert.ok(template.every(Number.isFinite));
   }
@@ -511,6 +825,214 @@ test('room and control-plane validation keeps share URLs credential-free', () =>
   );
   assert.throws(() => normalizeControlPlane('http://example.com'), /HTTPS/u);
   assert.throws(() => normalizeControlPlane('https://user:pass@example.com'), /credentials/u);
+  assert.equal(
+    resumeSessionKey('https://example.workers.dev/path', ' Duel-24 '),
+    'aetherloom.demo.resume.https%3A%2F%2Fexample.workers.dev%2Fpath.duel-24',
+  );
+  assert.equal(
+    joinAttemptKey('https://example.workers.dev/path/?secret=nope#fragment', ' Duel-24 '),
+    'aetherloom.demo.join.https%3A%2F%2Fexample.workers.dev%2Fpath.duel-24',
+  );
+  assert.equal(isResumeToken('demo_resume_0123456789abcdefghijklmn'), true);
+  assert.equal(isResumeToken('demo_resume_corrupt'), false);
+  assert.equal(isJoinNonce('demo_join_0123456789abcdefghijklmn'), true);
+  assert.equal(isJoinNonce('demo_join_corrupt'), false);
+});
+
+test('fresh join nonces and resume credentials match a deterministic browser-server vector', async () => {
+  const cryptoProvider = {
+    getRandomValues(bytes) {
+      for (let index = 0; index < bytes.length; index += 1) bytes[index] = index;
+      return bytes;
+    },
+    subtle: webcrypto.subtle,
+  };
+  const nonce = randomJoinNonce(cryptoProvider);
+  assert.equal(nonce, 'demo_join_AAECAwQFBgcICQoLDA0ODxAR');
+  assert.equal(isJoinNonce(nonce), true);
+  assert.equal(
+    await demoResumeToken(' Duel-24 ', nonce, cryptoProvider),
+    'demo_resume_KOnFEg8fnhwwOM84LrvYeUZi',
+  );
+  assert.notEqual(
+    await demoResumeToken('duel-25', nonce, cryptoProvider),
+    'demo_resume_KOnFEg8fnhwwOM84LrvYeUZi',
+  );
+  assert.throws(() => randomJoinNonce({}), /Secure randomness/u);
+  await assert.rejects(
+    demoResumeToken('duel-24', 'demo_join_corrupt', cryptoProvider),
+    /join attempt is invalid/u,
+  );
+});
+
+test('resume tokens stay per-tab, remain scoped, reject corruption, and tolerate unavailable storage', () => {
+  const firstSession = mapStorage();
+  const secondSession = mapStorage();
+  const first = new ResumeTokenStore(firstSession);
+  const second = new ResumeTokenStore(secondSession);
+  const key = resumeSessionKey('https://example.workers.dev', 'duel-24');
+  const otherRoom = resumeSessionKey('https://example.workers.dev', 'duel-25');
+  const token = 'demo_resume_0123456789abcdefghijklmn';
+  first.save(key, token);
+  assert.equal(first.load(key), token);
+  assert.equal(second.load(key), undefined, 'another tab must be able to open player two');
+  assert.equal(second.load(otherRoom), undefined);
+  first.clear(key);
+  assert.equal(first.load(key), undefined);
+
+  const corruptSession = mapStorage(new Map([[key, 'demo_resume_corrupt']]));
+  assert.equal(new ResumeTokenStore(corruptSession).load(key), undefined);
+  assert.equal(corruptSession.getItem(key), null);
+
+  const unavailable = {
+    getItem() { throw new Error('unavailable'); },
+    setItem() { throw new Error('unavailable'); },
+    removeItem() { throw new Error('unavailable'); },
+  };
+  const memoryOnly = new ResumeTokenStore(unavailable);
+  memoryOnly.save(key, token);
+  assert.equal(memoryOnly.load(key), token);
+  memoryOnly.clear(key);
+  assert.equal(memoryOnly.load(key), undefined);
+});
+
+test('join nonce retries are idempotent in one tab and reject corrupt cloned state', () => {
+  const entries = new Map();
+  const storage = mapStorage(entries);
+  const store = new JoinNonceStore(storage);
+  const key = joinAttemptKey('https://example.workers.dev', 'duel-24');
+  const nonce = 'demo_join_0123456789abcdefghijklmn';
+  store.save(key, nonce);
+  assert.equal(store.load(key), nonce);
+  assert.equal(entries.get(key), nonce);
+
+  const unpersistedEntries = new Map();
+  const unpersisted = new JoinNonceStore(mapStorage(unpersistedEntries));
+  unpersisted.save(key, 'demo_join_abcdefghijklmnopqrstuvwx', { persist: false });
+  assert.equal(unpersistedEntries.has(key), false);
+
+  const unavailable = {
+    getItem() { throw new Error('unavailable'); },
+    setItem() { throw new Error('unavailable'); },
+    removeItem() { throw new Error('unavailable'); },
+  };
+  const memoryOnly = new JoinNonceStore(unavailable);
+  memoryOnly.save(key, nonce);
+  assert.equal(memoryOnly.load(key), nonce);
+
+  const corruptEntries = new Map([[key, 'demo_join_corrupt']]);
+  assert.equal(new JoinNonceStore(mapStorage(corruptEntries)).load(key), undefined);
+  assert.equal(corruptEntries.has(key), false);
+  assert.throws(() => store.save(key, 'demo_join_corrupt'), /nonce is invalid/u);
+  store.clear(key);
+  assert.equal(store.load(key), undefined);
+});
+
+test('Web Locks prevent a cloned session from resuming the same staging player', async () => {
+  const room = 'duel-24';
+  const scope = resumeSessionKey('https://example.workers.dev', room);
+  const joinKey = joinAttemptKey('https://example.workers.dev', room);
+  const token = 'demo_resume_0123456789abcdefghijklmn';
+  const nonce = 'demo_join_0123456789abcdefghijklmn';
+  const originalEntries = new Map([[scope, token], [joinKey, nonce]]);
+  const clonedEntries = new Map(originalEntries);
+  assert.equal(new ResumeTokenStore(mapStorage(originalEntries)).load(scope), token);
+  assert.equal(new ResumeTokenStore(mapStorage(clonedEntries)).load(scope), token);
+  assert.equal(new JoinNonceStore(mapStorage(clonedEntries)).load(joinKey), nonce);
+
+  const lockManager = new DeterministicLockManager();
+  const original = new ResumeOwnership(lockManager);
+  const clone = new ResumeOwnership(lockManager);
+  assert.equal(original.supported, true);
+  assert.equal(await original.claim(scope, token), true);
+  assert.equal(await original.claim(scope, token), true, 'the owning tab may reconnect');
+  assert.equal(await clone.claim(scope, token), false, 'a cloned tab must create another player');
+  assert.deepEqual(lockManager.requests[0].options, {
+    ifAvailable: true,
+    mode: 'exclusive',
+  });
+  assert.match(lockManager.requests[0].name, /^aetherloom:resume:/u);
+
+  const independentToken = 'demo_resume_abcdefghijklmnopqrstuvwx';
+  assert.equal(await clone.claim(scope, independentToken), true);
+  assert.equal(await new ResumeOwnership(null).claim(scope, token), false);
+  assert.equal(
+    await new ResumeOwnership({ request() { throw new Error('unavailable'); } }).claim(scope, token),
+    false,
+  );
+});
+
+test('concurrent joins share one admission request and permit a later retry', async () => {
+  const flight = new SingleFlight();
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const first = flight.run(async () => {
+    calls += 1;
+    await gate;
+    return 'joined';
+  });
+  const second = flight.run(() => {
+    calls += 1;
+    return 'duplicate';
+  });
+  assert.equal(first, second);
+  assert.equal(calls, 0);
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  release();
+  assert.deepEqual(await Promise.all([first, second]), ['joined', 'joined']);
+  assert.equal(await flight.run(() => {
+    calls += 1;
+    return 'retried';
+  }), 'retried');
+  assert.equal(calls, 2);
+  flight.reset();
+});
+
+test('local-file multiplayer links hand off to staging without forwarding credentials', async () => {
+  const html = await readFile(new URL('../site/multiplayer.html', import.meta.url), 'utf8');
+  const source = html.match(
+    /<script id="file-staging-handoff">([\s\S]*?)<\/script>/u,
+  )?.[1];
+  assert.ok(source, 'the early local-file handoff script must exist');
+  const run = (href) => {
+    const replacements = [];
+    const parsed = new URL(href);
+    runInNewContext(source, {
+      URL,
+      window: {
+        location: {
+          href,
+          protocol: parsed.protocol,
+          replace: (target) => replacements.push(target),
+        },
+      },
+    });
+    return replacements;
+  };
+  assert.deepEqual(
+    run('file:///tmp/multiplayer.html?room=duel-24&controlPlane=https://evil.example/#secret'),
+    ['https://staging.aetherloom-staging.pages.dev/multiplayer.html?room=duel-24'],
+  );
+  assert.deepEqual(
+    run('file:///tmp/multiplayer.html?room=private-room&resumeToken=secret#secret'),
+    ['https://staging.aetherloom-staging.pages.dev/multiplayer.html'],
+  );
+  assert.deepEqual(
+    run('https://staging.aetherloom-staging.pages.dev/multiplayer.html?room=duel-24'),
+    [],
+  );
+});
+
+test('valid room resumes keep the same short-lived credential', () => {
+  const resumeBranch = browserMatchRoomSource.slice(
+    browserMatchRoomSource.indexOf('if (resumeToken !== undefined && resumeHash !== undefined)'),
+    browserMatchRoomSource.indexOf('const players = this.playerRows()'),
+  );
+  assert.match(resumeBranch, /UPDATE players SET last_seen_at_ms = \? WHERE slot = \?/u);
+  assert.match(resumeBranch, /presentClaim\(room, resumed, resumeToken\)/u);
+  assert.doesNotMatch(resumeBranch, /SET resume_hash/u);
 });
 
 test('the standalone page advertises staging limits and leaves the offline entrypoint intact', async () => {
@@ -523,16 +1045,39 @@ test('the standalone page advertises staging limits and leaves the offline entry
   assert.match(html, /casual staging, not competitive/u);
   assert.match(html, /duel-01 through duel-32/u);
   assert.match(html, /src="\.\/multiplayer\.js"/u);
-  assert.match(source, /\[\s*'aetherloom\.v2',/u);
+  assert.match(html, /id="file-staging-handoff"/u);
+  assert.match(source, /safeBrowserStorage\('sessionStorage'\)/u);
+  assert.match(source, /safeBrowserLocks\(\)/u);
+  assert.doesNotMatch(source, /safeBrowserStorage\('localStorage'\)/u);
+  assert.match(source, /new JoinNonceStore\(sessionStorage\)/u);
+  assert.match(source, /new ResumeOwnership\(safeBrowserLocks\(\)\)/u);
+  assert.match(source, /await this\.resumeOwnership\.claim/u);
+  assert.match(source, /joined\.resumeToken !== attempt\.resumeToken/u);
+  assert.match(source, /this\.joinFlight\.run/u);
+  assert.match(source, /\[\s*'aetherloom\.v3',/u);
   assert.match(source, /`aetherloom\.auth\.\$\{joined\.ticket\}`/u);
-  assert.match(source, /previewScene\(scene, 0\)[\s\S]*?\.slice\(\)/u);
+  assert.match(source, /previewScene\(scene, variant\)[\s\S]*?\.slice\(\)/u);
   assert.match(source, /hurt: 0/u);
   assert.match(source, /WORLD_UNITS_PER_CM = 0\.1/u);
   assert.match(source, /snapshot\.viewerSlot !== this\.joinSlot/u);
   assert.match(source, /socket\.readyState === WebSocket\.CONNECTING/u);
   assert.match(source, /this\.sentClocks\.get\(snapshot\.echoClock\)/u);
   assert.match(source, /if \(player\.slot === this\.latestSnapshot\.viewerSlot\) continue;/u);
-  assert.match(source, /const eyeY = viewer\.y \+ 7\.3;/u);
+  assert.match(source, /const FIRST_PERSON_EYE_HEIGHT = 3;/u);
+  assert.match(source, /const FIRST_PERSON_FOV = 1\.16;/u);
+  assert.match(source, /const eyeY = viewer\.y \+ FIRST_PERSON_EYE_HEIGHT;/u);
+  assert.match(source, /fov: FIRST_PERSON_FOV/u);
+  assert.doesNotMatch(source, /FIREBALL_TEMPLATE_PITCH/u);
+  assert.match(
+    source,
+    /fireboltTemplate[\s\S]*?wirePitchToRadians\(position\.pitch\),/u,
+  );
+  assert.match(source, /firstSeenElapsedTicks[\s\S]*?Math\.max\(0, time -/u);
+  assert.match(source, /\* 128 \/ 1_000/u);
+  assert.match(source, /viewerSlot,\s*elapsedTicks,/u);
+  assert.match(source, /shapeFlightInput\(horizontal, vertical\)/u);
+  assert.match(source, /gamepadLookDelta\([\s\S]*?GAMEPAD_YAW_UNITS_PER_SECOND/u);
+  assert.doesNotMatch(source, /pad\.axes\[2\][\s\S]{0,80}\* 780/u);
   assert.match(source, /event\.movementY/u);
   assert.match(source, /this\.inputHistory/u);
   assert.match(source, /nextPacedDeadline/u);
@@ -545,4 +1090,20 @@ test('the standalone page advertises staging limits and leaves the offline entry
   );
   assert.match(index, /from '\.\/game\.js'/u);
   assert.match(index, /href="\.\/multiplayer\.html"/u);
+  assert.match(browserMatchRoomSource, /const CORE_PROJECTILE_IMPACT_EVENT = 10;/u);
+  assert.match(
+    browserMatchRoomSource,
+    /detailIndex = event\.kind === CORE_PROJECTILE_IMPACT_EVENT \? 3 : 0/u,
+  );
+  assert.match(browserMatchRoomSource, /await demoResumeToken\(roomCode, joinNonce\)/u);
+  assert.match(
+    browserMatchRoomSource,
+    /presentClaim\(room, player, nextResumeToken, true\)/u,
+  );
+  assert.match(browserMatchRoomSource, /CREATE TABLE IF NOT EXISTS consumed_join_nonces/u);
+  assert.match(gatewaySource, /\.\.\.\(joinNonce === undefined \? \{\} : \{ joinNonce \}\)/u);
+  assert.match(
+    gatewaySource,
+    /admission !== undefined &&[\s\S]*?resumeToken === undefined &&[\s\S]*?!claim\.createdPlayer[\s\S]*?refundDemoAdmission/u,
+  );
 });

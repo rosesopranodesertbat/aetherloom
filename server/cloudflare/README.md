@@ -18,8 +18,10 @@ fails and allowing old sessions to drain. It runs the real Rust `MatchState` thr
 simulation ticks in bounded wall-clock batches; Durable Objects do not provide
 the continuous 7.8125 ms pacing or jitter guarantee required for competitive
 play. This host is therefore explicitly casual staging, with progression and
-settlement disabled. New public claims are source-limited, resume tokens rotate,
-and a systems-test session expires after 15 minutes. A host-memory restart
+settlement disabled. New public claims are source-limited, short-lived resume
+tokens are stable within each tab so reconnects reuse a player without merging
+two-player tests, and a systems-test session expires after 15 minutes. A
+host-memory restart
 closes its sockets and starts a fresh round on reconnect; this slice does not
 claim mid-round checkpoint continuity.
 
@@ -56,7 +58,7 @@ with SQLite storage. D1's ordered schema changes are in `migrations/`.
 - Join admission is signed with Ed25519. Only the control plane receives the
   PKCS#8 private key; WSS gateways and dedicated match hosts receive raw public
   keys and therefore cannot mint admission.
-- Browser WebSockets carry `aetherloom.v2` and
+- Browser WebSockets carry `aetherloom.v3` and
   `aetherloom.auth.<join-ticket>` in `Sec-WebSocket-Protocol`; the gateway strips
   the auth pseudo-protocol before forwarding.
 - Internal requests require a short-lived service ticket and an operation

@@ -232,6 +232,7 @@ struct ReplicationState {
     next_envelope_sequence: u32,
     known_entities: BTreeMap<EntityId, EntityState>,
     last_sent_ticks: BTreeMap<EntityId, u64>,
+    last_sent_spell_cooldown_ticks: [u16; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
     needs_keyframe: bool,
     last_keyframe_tick: u64,
 }
@@ -244,6 +245,7 @@ impl ReplicationState {
             next_envelope_sequence: 1,
             known_entities: BTreeMap::new(),
             last_sent_ticks: BTreeMap::new(),
+            last_sent_spell_cooldown_ticks: [0; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
             needs_keyframe: true,
             last_keyframe_tick: 0,
         }
@@ -1491,6 +1493,12 @@ where
             .filter(|entity_id| !current.contains_key(entity_id))
             .copied()
             .collect();
+        let spell_cooldown_ticks = self
+            .state
+            .player(viewer)
+            .map(|player| player.spell_cooldown_ticks)
+            .unwrap_or([0; aetherloom_protocol::SPELL_COOLDOWN_SLOTS]);
+        let cooldowns_changed = spell_cooldown_ticks != replication.last_sent_spell_cooldown_ticks;
         if removed.len() > 64 {
             replication.needs_keyframe = true;
             return Ok(Some(self.keyframe_proposal(
@@ -1501,7 +1509,7 @@ where
                 current,
             )?));
         }
-        if candidates.is_empty() && removed.is_empty() {
+        if candidates.is_empty() && removed.is_empty() && !cooldowns_changed {
             return Ok(None);
         }
 
@@ -1518,10 +1526,11 @@ where
                 .player(viewer)
                 .and_then(|player| player.last_accepted_sequence())
                 .unwrap_or(0),
+            spell_cooldown_ticks,
             &candidates,
             &removed,
         )?;
-        if packed.included.is_empty() && removed.is_empty() {
+        if packed.included.is_empty() && removed.is_empty() && !cooldowns_changed {
             return Ok(None);
         }
         for entity_id in removed {
@@ -1534,13 +1543,18 @@ where
                 .insert(entity.entity_id, self.state.tick());
             replication.known_entities.insert(entity.entity_id, entity);
         }
+        replication.last_sent_spell_cooldown_ticks = spell_cooldown_ticks;
         replication.baseline = snapshot_id;
         replication.advance_cursors();
         Ok(Some(ReplicationProposal {
             packet: OutboundPacket {
                 peer,
                 delivery: DeliveryKind::Datagram,
-                class: packed.highest_interest.egress_class(),
+                class: if cooldowns_changed {
+                    EgressClass::CombatCritical
+                } else {
+                    packed.highest_interest.egress_class()
+                },
                 server_tick: tick,
                 payload: packed.payload,
                 resync_if_dropped: true,
@@ -1596,6 +1610,11 @@ where
                     .player(viewer)
                     .and_then(|player| player.last_accepted_sequence())
                     .unwrap_or(0),
+                spell_cooldown_ticks: self
+                    .state
+                    .player(viewer)
+                    .map(|player| player.spell_cooldown_ticks)
+                    .unwrap_or([0; aetherloom_protocol::SPELL_COOLDOWN_SLOTS]),
                 entities,
                 terrain_revisions,
                 terrain_chunks,
@@ -1609,6 +1628,11 @@ where
             .keys()
             .map(|entity_id| (*entity_id, self.state.tick()))
             .collect();
+        replication.last_sent_spell_cooldown_ticks = self
+            .state
+            .player(viewer)
+            .map(|player| player.spell_cooldown_ticks)
+            .unwrap_or([0; aetherloom_protocol::SPELL_COOLDOWN_SLOTS]);
         replication.needs_keyframe = false;
         replication.last_keyframe_tick = self.state.tick();
         replication.advance_cursors();
@@ -1910,7 +1934,7 @@ fn event_route(kind: TickEventKind) -> (DeliveryKind, EgressClass) {
         | TickEventKind::PlayerLeft
         | TickEventKind::Defeat
         | TickEventKind::Extraction => (DeliveryKind::Reliable, EgressClass::ReliableControl),
-        TickEventKind::Cast | TickEventKind::Damage => {
+        TickEventKind::Cast | TickEventKind::Damage | TickEventKind::ProjectileImpact => {
             (DeliveryKind::Datagram, EgressClass::CombatCritical)
         }
         TickEventKind::EntitySpawned
@@ -1930,6 +1954,7 @@ fn wire_event(event: TickEvent) -> GameEvent {
         TickEventKind::EntitySpawned => EventKind::SPAWN,
         TickEventKind::EntityDespawned => EventKind::DESPAWN,
         TickEventKind::TerrainDeformed => EventKind::TERRAIN_DEFORMED,
+        TickEventKind::ProjectileImpact => EventKind::HIT,
     };
     GameEvent {
         event_id: event.event_id,
@@ -1948,6 +1973,7 @@ fn pack_delta(
     baseline_id: SnapshotId,
     viewer: PlayerId,
     acknowledged_input_sequence: u32,
+    spell_cooldown_ticks: [u16; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
     candidates: &[ReplicationCandidate],
     removed_entities: &[EntityId],
 ) -> Result<PackedDelta, ProtocolError> {
@@ -1976,6 +2002,7 @@ fn pack_delta(
                 baseline_id,
                 viewer,
                 acknowledged_input_sequence,
+                spell_cooldown_ticks,
                 entities: trial.clone(),
                 removed_entities: removed_entities.to_vec(),
             }),
@@ -2003,6 +2030,7 @@ fn pack_delta(
             baseline_id,
             viewer,
             acknowledged_input_sequence,
+            spell_cooldown_ticks,
             entities: included.clone(),
             removed_entities: removed_entities.to_vec(),
         }),

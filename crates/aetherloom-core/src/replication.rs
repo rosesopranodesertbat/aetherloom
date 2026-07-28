@@ -7,7 +7,7 @@ use aetherloom_protocol::{
 
 use crate::entity::EntityKind;
 use crate::state::{
-    MatchState, PLAYER_MAX_ALTITUDE_CM, PLAYER_MIN_ALTITUDE_CM,
+    cap_planar_input, MatchState, PLAYER_MAX_ALTITUDE_CM, PLAYER_MIN_ALTITUDE_CM,
     PLAYER_PLANAR_SPEED_CM_PER_TICK, PLAYER_VERTICAL_SPEED_CM_PER_TICK,
 };
 use crate::terrain::ChunkCoord;
@@ -16,9 +16,10 @@ pub const MIN_INTERPOLATION_DELAY_TICKS: u8 = 2;
 pub const MAX_INTERPOLATION_DELAY_TICKS: u8 = 6;
 pub const MAX_PENDING_PREDICTION_COMMANDS: usize = 256;
 pub const MAX_INTERPOLATION_SAMPLES: usize = 8;
-// Wire sizes from protocol v3. Keeping the budget here prevents replication
+// Wire sizes from protocol v4. Keeping the budget here prevents replication
 // history from acknowledging updates that a 1,200-byte datagram cannot carry.
-const DELTA_FIXED_BYTES: usize = HEADER_BYTES + 18;
+const DELTA_FIXED_BYTES: usize =
+    HEADER_BYTES + 18 + aetherloom_protocol::SPELL_COOLDOWN_SLOTS * 2;
 const DELTA_ENTITY_BYTES: usize = 40;
 const REMOVED_ENTITY_BYTES: usize = 8;
 const MAX_REMOVED_PER_DELTA: usize = 64;
@@ -85,6 +86,7 @@ pub struct Snapshot {
     pub viewer: PlayerId,
     pub server_tick: u64,
     pub acknowledged_input_sequence: u32,
+    pub spell_cooldown_ticks: [u16; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
     pub entities: Vec<ReplicatedEntity>,
     pub removed_entities: Vec<EntityId>,
     pub terrain_revisions: Vec<TerrainRevision>,
@@ -299,6 +301,7 @@ impl MatchState {
             viewer,
             server_tick: self.tick,
             acknowledged_input_sequence,
+            spell_cooldown_ticks: viewer_state.spell_cooldown_ticks,
             entities: changed,
             removed_entities: removed,
             terrain_revisions,
@@ -366,6 +369,7 @@ pub struct ClientReplica {
     interpolation_samples: Vec<ReplicaSample>,
     predicted_position_cm: Option<[i32; 3]>,
     pending_commands: Vec<PlayerCommand>,
+    spell_cooldown_ticks: [u16; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
     /// Newest locally predicted command discarded because the bounded
     /// history filled. Reconciliation is incomplete until the server
     /// acknowledges this command (or a newer one).
@@ -385,6 +389,7 @@ impl ClientReplica {
             interpolation_samples: Vec::new(),
             predicted_position_cm: None,
             pending_commands: Vec::new(),
+            spell_cooldown_ticks: [0; aetherloom_protocol::SPELL_COOLDOWN_SLOTS],
             dropped_prediction_through: None,
         }
     }
@@ -407,6 +412,12 @@ impl ClientReplica {
 
     pub fn terrain_revisions(&self) -> &[TerrainRevision] {
         &self.terrain_revisions
+    }
+
+    pub const fn spell_cooldown_ticks(
+        &self,
+    ) -> &[u16; aetherloom_protocol::SPELL_COOLDOWN_SLOTS] {
+        &self.spell_cooldown_ticks
     }
 
     pub fn interpolation_samples(&self) -> &[ReplicaSample] {
@@ -511,6 +522,7 @@ impl ClientReplica {
         self.terrain_revisions = snapshot.terrain_revisions;
         self.snapshot_id = snapshot.snapshot_id;
         self.server_tick = snapshot.server_tick;
+        self.spell_cooldown_ticks = snapshot.spell_cooldown_ticks;
         let sample = ReplicaSample {
             server_tick: self.server_tick,
             entities: self.entities.clone(),
@@ -645,8 +657,10 @@ fn interpolate_axis(from: i32, to: i32, numerator: u128, denominator: u128) -> i
 }
 
 fn apply_predicted_movement(position: &mut [i32; 3], command: &PlayerCommand) {
+    let (move_x, move_z) =
+        cap_planar_input(i32::from(command.move_x()), i32::from(command.move_y()));
     position[0] = position[0].saturating_add(
-        command.move_x() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+        move_x * PLAYER_PLANAR_SPEED_CM_PER_TICK
             / i32::from(aetherloom_protocol::MAX_MOVE_AXIS),
     );
     position[1] = position[1]
@@ -656,7 +670,7 @@ fn apply_predicted_movement(position: &mut [i32; 3], command: &PlayerCommand) {
         )
         .clamp(PLAYER_MIN_ALTITUDE_CM, PLAYER_MAX_ALTITUDE_CM);
     position[2] = position[2].saturating_add(
-        command.move_y() as i32 * PLAYER_PLANAR_SPEED_CM_PER_TICK
+        move_z * PLAYER_PLANAR_SPEED_CM_PER_TICK
             / i32::from(aetherloom_protocol::MAX_MOVE_AXIS),
     );
 }
