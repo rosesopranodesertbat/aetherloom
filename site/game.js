@@ -184,6 +184,8 @@ class Game {
     this.hurt = 0;
     this.fps = 60; this.frames = 0; this.fpsT = 0;
     this.acc = 0;
+    this.simHz = 128;
+    this.tickDt = 1 / this.simHz;
     this.mapDirty = true;
   }
 
@@ -209,6 +211,8 @@ class Game {
     }
     const { instance } = await WebAssembly.instantiate(bytes, {});
     this.sim = instance.exports;
+    this.simHz = this.sim.authoritativeHz();
+    this.tickDt = 1 / this.simHz;
     this.TW = this.sim.terrainWidth();
     this.cell = this.sim.cellSize();
     this.world = this.sim.worldSize();
@@ -245,6 +249,7 @@ class Game {
 
   startLevel(n, quiet) {
     this.level = n;
+    this.acc = 0;
     this.sim.init((Math.random() * 0xffffffff) >>> 0, n);
     this.views();
     this.r.uploadHeights(this.H, 0, this.TW - 1);
@@ -477,7 +482,10 @@ Game.prototype.updateHUD = function () {
 Game.prototype.loop = function (t) {
   requestAnimationFrame((tt) => this.loop(tt));
   if (this.r.lost) { this.fail(`The GPU device was lost (${this.r.lost}). Reload to continue.`); return; }
-  const dt = Math.min(0.1, this.last ? (t - this.last) / 1000 : 0.016);
+  // Preserve the whole elapsed interval. The bounded loop below limits work
+  // per render frame; any remaining offline simulation time stays in `acc`
+  // and is consumed by later frames instead of being silently discarded.
+  const dt = this.last === undefined ? this.tickDt : Math.max(0, (t - this.last) / 1000);
   this.last = t;
   this.frames++; this.fpsT += dt;
   if (this.fpsT > 0.5) { this.fps = Math.round(this.frames / this.fpsT); this.frames = 0; this.fpsT = 0; }
@@ -487,12 +495,15 @@ Game.prototype.loop = function (t) {
   if (playing) {
     this.acc += dt;
     let steps = 0;
-    while (this.acc >= 1 / 60 && steps < 4) {
+    // The simulation is always 128 Hz. Rendering can vary independently, and
+    // a short hitch is recovered without dropping or stretching game ticks.
+    while (this.acc >= this.tickDt && steps < 32) {
       this.readInputs(steps === 0);
       if (this.firing || this.touchFiring) this.sim.fireSelected();
-      this.sim.step(1 / 60);
-      this.acc -= 1 / 60; steps++;
+      this.sim.advanceTick();
+      this.acc -= this.tickDt; steps++;
     }
+    if (steps > 0) this.sim.extractFrame();
     // terrain edits -> GPU
     const lo = this.sim.dirtyLoRow(), hi = this.sim.dirtyHiRow();
     if (hi >= lo) { this.r.uploadHeights(this.H, lo, hi); this.sim.clearDirty(); this.mapDirty = true; }

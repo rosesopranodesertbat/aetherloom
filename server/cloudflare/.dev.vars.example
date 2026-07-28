@@ -1,0 +1,9 @@
+# Copy this file to .dev.vars and replace every placeholder locally.
+# Generate independent random 32-byte base64url HMAC keys for the player,
+# service and result domains. Join signing uses Ed25519 PKCS#8 private DER;
+# match hosts receive only the corresponding raw 32-byte public key. The
+# public key map and active key ids are ordinary vars in wrangler.jsonc.
+PLAYER_TICKET_KEYS_JSON='{"local-player-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+JOIN_TICKET_SIGNING_KEYS_JSON='{"local-join-v1":"REPLACE_WITH_BASE64URL_ED25519_PKCS8_DER"}'
+SERVICE_TICKET_KEYS_JSON='{"local-service-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'
+RESULT_TICKET_KEYS_JSON='{"local-result-host-v1":"REPLACE_WITH_BASE64URL_32_BYTE_KEY"}'

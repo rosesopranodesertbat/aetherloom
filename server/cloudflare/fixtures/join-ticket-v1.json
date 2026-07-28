@@ -1,0 +1,23 @@
+{
+  "privateKeyPkcs8Base64Url": "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v_VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g",
+  "publicKeyRawBase64Url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "claims": {
+    "v": 1,
+    "iss": "aetherloom-control-plane",
+    "aud": "aetherloom-match",
+    "purpose": "join",
+    "sub": "33333333333333333333333333333333",
+    "iat": 2000000000,
+    "nbf": 1999999998,
+    "exp": 2000000120,
+    "nonce": "44444444444444444444444444444444",
+    "match_id": "11111111111111111111111111111111",
+    "match_epoch": 42,
+    "region": "weur",
+    "build_hash": "22222222222222222222222222222222",
+    "input_pool": "controller",
+    "player_slot": 7,
+    "team_id": 3
+  },
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3QtZWQyNTUxOS12MSIsInR5cCI6IkFFVEhFUkxPT00tSk9JTiIsInYiOjF9.eyJhdWQiOiJhZXRoZXJsb29tLW1hdGNoIiwiYnVpbGRfaGFzaCI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwiZXhwIjoyMDAwMDAwMTIwLCJpYXQiOjIwMDAwMDAwMDAsImlucHV0X3Bvb2wiOiJjb250cm9sbGVyIiwiaXNzIjoiYWV0aGVybG9vbS1jb250cm9sLXBsYW5lIiwibWF0Y2hfZXBvY2giOjQyLCJtYXRjaF9pZCI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwibmJmIjoxOTk5OTk5OTk4LCJub25jZSI6IjQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0IiwicGxheWVyX3Nsb3QiOjcsInB1cnBvc2UiOiJqb2luIiwicmVnaW9uIjoid2V1ciIsInN1YiI6IjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIiwidGVhbV9pZCI6MywidiI6MX0.bCDG3KGWExfJyNUqB28I7Ymkc5P60pHwjefBXj_ZcExZnSQykqqEyPm-_LAdC9wOvXeRziIV63HPUt_JMQzlBg"
+}

@@ -1,0 +1,352 @@
+name: Deploy staging
+run-name: Stage ${{ inputs.source_ref }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: main (the current protected branch head)
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aetherloom-staging
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and validate immutable candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      content_build_id: ${{ steps.manifest.outputs.content_build_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+      - id: source
+        name: Resolve trusted source commit
+        shell: bash
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          if [[ "${SOURCE_REF}" != "main" ]]; then
+            echo "staging accepts only the current protected main head" >&2
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          if [[ ! "${source_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "could not resolve an immutable source commit" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${source_sha}" origin/main; then
+            echo "staging deploys must already be present on origin/main" >&2
+            exit 1
+          fi
+          if [[ "${WORKFLOW_REF}" != "refs/heads/main" || "${source_sha}" != "${WORKFLOW_SHA}" ]]; then
+            echo "staging must run from the protected main workflow at the exact candidate SHA" >&2
+            exit 1
+          fi
+          echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/cloudflare/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-27
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Validate release candidate
+        run: bash scripts/release/validate-release.sh
+      - id: manifest
+        name: Create immutable web artifact manifest
+        shell: bash
+        run: |
+          node scripts/release/release-artifact.mjs create \
+            --site site \
+            --output release-manifest.json \
+            --commit "${{ steps.source.outputs.sha }}"
+          content_build_id="$(
+            node scripts/release/release-artifact.mjs build-id \
+              --manifest release-manifest.json
+          )"
+          echo "content_build_id=${content_build_id}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-release
+          path: |
+            site
+            release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  web:
+    name: Deploy web preview
+    needs: [build, control-plane]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: staging
+      url: https://staging.${{ vars.CLOUDFLARE_PAGES_PROJECT || 'aetherloom-staging' }}.pages.dev
+    env:
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'aetherloom-staging' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/cloudflare/package-lock.json
+      - name: Check protected staging configuration
+        shell: bash
+        run: |
+          test -n "${CLOUDFLARE_PAGES_PROJECT}"
+      - run: npm ci --prefix server/cloudflare
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-release
+          path: release
+      - name: Verify downloaded candidate
+        run: |
+          node scripts/release/release-artifact.mjs verify \
+            --site release/site \
+            --manifest release/release-manifest.json \
+            --commit "${{ needs.build.outputs.source_sha }}"
+      - name: Deploy stable staging preview
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          npm exec --prefix server/cloudflare -- wrangler pages deploy release/site \
+            --project-name "${CLOUDFLARE_PAGES_PROJECT}" \
+            --branch staging \
+            --commit-hash "${{ needs.build.outputs.source_sha }}" \
+            --commit-dirty=false
+      - name: Smoke-test web preview
+        run: node scripts/release/smoke-web.mjs "https://staging.${CLOUDFLARE_PAGES_PROJECT}.pages.dev"
+
+  control-plane:
+    name: Deploy staging control plane
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: staging
+      url: ${{ vars.AETHERLOOM_CONTROL_PLANE_URL }}
+    env:
+      CF_WORKER_NAME: ${{ vars.CF_WORKER_NAME }}
+      CF_WORKERS_DEV: ${{ vars.CF_WORKERS_DEV }}
+      CF_WORKER_CUSTOM_DOMAIN: ${{ vars.CF_WORKER_CUSTOM_DOMAIN }}
+      CF_D1_DATABASE_NAME: ${{ vars.CF_D1_DATABASE_NAME }}
+      CF_D1_DATABASE_ID: ${{ vars.CF_D1_DATABASE_ID }}
+      CF_MATCH_ARCHIVE_BUCKET: ${{ vars.CF_MATCH_ARCHIVE_BUCKET }}
+      CF_SETTLEMENT_QUEUE: ${{ vars.CF_SETTLEMENT_QUEUE }}
+      CF_SETTLEMENT_DLQ: ${{ vars.CF_SETTLEMENT_DLQ }}
+      CF_MATCH_CAPACITY_WORKER: ${{ vars.CF_MATCH_CAPACITY_WORKER }}
+      CF_BROWSER_MATCH_WORKER: ${{ vars.CF_BROWSER_MATCH_WORKER }}
+      CF_MATCHMAKING_SHARD_COUNT: ${{ vars.CF_MATCHMAKING_SHARD_COUNT }}
+      AETHERLOOM_ALLOWED_ORIGINS_JSON: ${{ vars.AETHERLOOM_ALLOWED_ORIGINS_JSON }}
+      AETHERLOOM_RESULT_TICKET_HOSTS_JSON: ${{ vars.AETHERLOOM_RESULT_TICKET_HOSTS_JSON }}
+      AETHERLOOM_CONTROL_PLANE_URL: ${{ vars.AETHERLOOM_CONTROL_PLANE_URL }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'aetherloom-staging' }}
+      JOIN_TICKET_PUBLIC_KEYS_JSON: ${{ vars.JOIN_TICKET_PUBLIC_KEYS_JSON }}
+      ACTIVE_JOIN_TICKET_KID: ${{ vars.ACTIVE_JOIN_TICKET_KID }}
+      ACTIVE_SERVICE_TICKET_KID: ${{ vars.ACTIVE_SERVICE_TICKET_KID || 'staging-service-2026-07' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/cloudflare/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-27
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Check protected staging credentials
+        shell: bash
+        run: |
+          test -n "${AETHERLOOM_CONTROL_PLANE_URL}"
+      - run: npm ci --prefix server/cloudflare
+      - name: Build authoritative browser-match module
+        run: node server/cloudflare/scripts/build-browser-match-wasm.mjs
+      - name: Render private browser-match configuration
+        run: |
+          node server/cloudflare/scripts/render-browser-match-config.mjs \
+            --environment staging \
+            --resources server/cloudflare/deploy/staging.resources.json \
+            --output server/cloudflare/wrangler.generated.browser-match.staging.jsonc \
+            --build-hash "${{ needs.build.outputs.content_build_id }}"
+      - name: Validate private browser-match bundle
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.browser-match.staging.jsonc \
+            --dry-run
+      - name: Render secret-free staging configuration
+        run: |
+          node server/cloudflare/scripts/render-wrangler-config.mjs \
+            --environment staging \
+            --resources server/cloudflare/deploy/staging.resources.json \
+            --output server/cloudflare/wrangler.generated.staging.jsonc \
+            --build-hash "${{ needs.build.outputs.content_build_id }}"
+      - name: Validate deployment bundle
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --dry-run
+      - id: preflight
+        name: Verify remote staging resources and secret names
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          preflight="${RUNNER_TEMP}/aetherloom-cloudflare-preflight"
+          install -d -m 700 "${preflight}"
+          npm exec --prefix server/cloudflare -- wrangler d1 info \
+            aetherloom-control-staging \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --json > "${preflight}/d1.json"
+          npm exec --prefix server/cloudflare -- wrangler r2 bucket info \
+            aetherloom-match-archive-staging \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --json > "${preflight}/r2.json"
+          npm exec --prefix server/cloudflare -- wrangler queues info \
+            aetherloom-settlement-staging \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            > "${preflight}/queue.txt"
+          npm exec --prefix server/cloudflare -- wrangler queues info \
+            aetherloom-settlement-staging-dlq \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            > "${preflight}/dlq.txt"
+          npm exec --prefix server/cloudflare -- wrangler secret list \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --format json > "${preflight}/secrets.json"
+          npm exec --prefix server/cloudflare -- wrangler deployments list \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --json > "${preflight}/deployments.json"
+          node scripts/release/verify-cloudflare-resources.mjs verify \
+            --environment staging \
+            --manifest server/cloudflare/deploy/staging.resources.json \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --d1-info "${preflight}/d1.json" \
+            --r2-info "${preflight}/r2.json" \
+            --settlement-queue-info "${preflight}/queue.txt" \
+            --settlement-dlq-info "${preflight}/dlq.txt" \
+            --secrets "${preflight}/secrets.json" \
+            --deployments "${preflight}/deployments.json"
+          previous_version_id="$(
+            node -e '
+              const fs = require("node:fs");
+              const deployments = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const version = deployments[0]?.versions?.[0]?.version_id;
+              if (typeof version !== "string" || version.length === 0) process.exit(1);
+              process.stdout.write(version);
+            ' "${preflight}/deployments.json"
+          )"
+          echo "previous_version_id=${previous_version_id}" >> "${GITHUB_OUTPUT}"
+      - name: Apply staging D1 migrations
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler d1 migrations apply \
+            aetherloom-control-staging \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --remote
+      - name: Deploy private staging browser-match Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.browser-match.staging.jsonc \
+            --strict \
+            --message "staging browser multiplayer ${{ needs.build.outputs.source_sha }}"
+      - id: deploy_control
+        name: Deploy staging Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler deploy \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --strict \
+            --message "staging ${{ needs.build.outputs.source_sha }}"
+      - name: Prepare protected readiness credential
+        shell: bash
+        env:
+          AETHERLOOM_READINESS_KEYS_B64: ${{ secrets.AETHERLOOM_READINESS_KEYS_B64 }}
+        run: |
+          test -n "${AETHERLOOM_READINESS_KEYS_B64}"
+          umask 077
+          printf '%s' "${AETHERLOOM_READINESS_KEYS_B64}" \
+            | base64 --decode > "${RUNNER_TEMP}/aetherloom-readiness-keys.json"
+          chmod 600 "${RUNNER_TEMP}/aetherloom-readiness-keys.json"
+      - name: Smoke-test staging control plane
+        run: |
+          node scripts/release/smoke-control-plane.mjs \
+            "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            staging \
+            "${{ needs.build.outputs.content_build_id }}"
+      - name: Smoke-test two-client browser multiplayer
+        run: |
+          node scripts/release/smoke-browser-multiplayer.mjs \
+            "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            "https://staging.${CLOUDFLARE_PAGES_PROJECT}.pages.dev" \
+            "${RUNNER_TEMP}/aetherloom-readiness-keys.json" \
+            "${ACTIVE_SERVICE_TICKET_KID}" \
+            "${{ needs.build.outputs.content_build_id }}"
+      - name: Verify authenticated cryptographic readiness
+        run: |
+          node scripts/release/smoke-control-plane-readiness.mjs \
+            --url "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            --environment staging \
+            --expected-build "${{ needs.build.outputs.content_build_id }}" \
+            --secrets-file "${RUNNER_TEMP}/aetherloom-readiness-keys.json" \
+            --service-kid "${ACTIVE_SERVICE_TICKET_KID}"
+      - name: Remove readiness credential
+        if: ${{ always() }}
+        run: rm -f "${RUNNER_TEMP}/aetherloom-readiness-keys.json"
+      - name: Record staging smoke proof
+        run: |
+          node scripts/release/deployment-proof.mjs create \
+            --environment staging \
+            --service control-plane \
+            --commit "${{ needs.build.outputs.source_sha }}" \
+            --build-hash "${{ needs.build.outputs.content_build_id }}" \
+            --url "${AETHERLOOM_CONTROL_PLANE_URL}" \
+            --output control-plane-staging-proof.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: control-plane-staging-proof
+          path: control-plane-staging-proof.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Restore the previous control-plane binding after a failed cutover
+        if: ${{ failure() && steps.deploy_control.outcome != 'skipped' && steps.preflight.outputs.previous_version_id != '' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm exec --prefix server/cloudflare -- wrangler rollback \
+            "${{ steps.preflight.outputs.previous_version_id }}" \
+            --config server/cloudflare/wrangler.generated.staging.jsonc \
+            --message "automatic rollback after failed staging multiplayer proof" \
+            --yes

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aetherloom.invalid/schemas/matchmaking-enqueue.schema.json",
+  "title": "Aetherloom matchmaking enqueue request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["region", "playlist", "inputPool", "reservationIds"],
+  "properties": {
+    "region": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "playlist": {
+      "enum": ["casual-extraction", "solo-extraction", "squad-extraction"]
+    },
+    "inputPool": {
+      "enum": ["browser", "mouse-keyboard", "controller", "mixed"]
+    },
+    "reservationIds": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 4,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  }
+}
+

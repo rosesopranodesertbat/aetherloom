@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "environment": "production",
+  "accountIdSha256": "REPLACE_WITH_SHA256_OF_DOMAIN_SEPARATED_ACCOUNT_ID",
+  "workerName": "aetherloom-control-plane-production",
+  "workersDev": false,
+  "customDomain": "api.example.com",
+  "d1DatabaseName": "aetherloom-control-production",
+  "d1DatabaseId": "REPLACE_WITH_PRODUCTION_D1_ID",
+  "r2BucketName": "aetherloom-match-archive-production",
+  "r2Location": "REPLACE_WITH_R2_LOCATION",
+  "settlementQueue": "aetherloom-settlement-production",
+  "settlementQueueId": "REPLACE_WITH_PRODUCTION_QUEUE_ID",
+  "settlementDeadLetterQueue": "aetherloom-settlement-production-dlq",
+  "settlementDeadLetterQueueId": "REPLACE_WITH_PRODUCTION_DLQ_ID",
+  "matchCapacityWorker": "aetherloom-match-capacity-production",
+  "browserMatchWorker": "aetherloom-browser-match-production",
+  "matchmakingShardCount": 64,
+  "allowedOrigins": [
+    "https://play.example.com"
+  ],
+  "resultTicketHosts": {
+    "production-result-2026-07": "production-match-host"
+  },
+  "joinTicketPublicKeys": {
+    "production-join-2026-07": "REPLACE_WITH_BASE64URL_RAW_ED25519_PUBLIC_KEY"
+  },
+  "activeJoinTicketKid": "production-join-2026-07",
+  "activeServiceTicketKid": "production-service-2026-07",
+  "resourceFingerprint": "REPLACE_WITH_COMPUTED_SHA256"
+}

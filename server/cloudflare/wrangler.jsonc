@@ -1,0 +1,89 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "aetherloom-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "workers_dev": true,
+  "minify": true,
+  "observability": {
+    "enabled": true
+  },
+  "dev": {
+    "port": 8787
+  },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "TICKET_ISSUER": "aetherloom-control-plane",
+    "PLAYER_TICKET_AUDIENCE": "aetherloom-player",
+    "JOIN_TICKET_AUDIENCE": "aetherloom-match",
+    "SERVICE_TICKET_AUDIENCE": "aetherloom-services",
+    "RESULT_TICKET_AUDIENCE": "aetherloom-results",
+    "RESULT_TICKET_HOSTS_JSON": "{\"local-result-host-v1\":\"local-match-host\"}",
+    "JOIN_TICKET_PUBLIC_KEYS_JSON": "{\"local-join-v1\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}",
+    "ACTIVE_JOIN_TICKET_KID": "local-join-v1",
+    "ACTIVE_SERVICE_TICKET_KID": "local-service-v1",
+    "CONTENT_BUILD_HASH": "00000000000000000000000000000001",
+    "ALLOWED_ORIGINS_JSON": "[\"http://localhost:8080\",\"http://127.0.0.1:8080\"]",
+    "MATCHMAKING_SHARD_COUNT": "16",
+    "MATCHMAKING_SKILL_BUCKET_WIDTH": "200",
+    "MAX_ISLAND_CHECKPOINT_BYTES": "8388608"
+  },
+  "secrets": {
+    "required": [
+      "PLAYER_TICKET_KEYS_JSON",
+      "JOIN_TICKET_SIGNING_KEYS_JSON",
+      "SERVICE_TICKET_KEYS_JSON",
+      "RESULT_TICKET_KEYS_JSON"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROFILE_ISLAND",
+        "class_name": "ProfileIslandObject"
+      },
+      {
+        "name": "MATCHMAKING_SHARD",
+        "class_name": "MatchmakingShardObject"
+      }
+    ]
+  },
+  "exports": {
+    "ProfileIslandObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "MatchmakingShardObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "CONTROL_DB"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MATCH_ARCHIVE"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "SETTLEMENT_QUEUE",
+        "queue": "aetherloom-settlement"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "aetherloom-settlement",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+        "dead_letter_queue": "aetherloom-settlement-dlq",
+        "max_concurrency": 8
+      }
+    ]
+  }
+}

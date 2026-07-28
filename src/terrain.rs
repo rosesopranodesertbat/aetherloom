@@ -116,7 +116,7 @@ impl World {
         let mut hash = x
             .wrapping_mul(374_761_393)
             .wrapping_add(y.wrapping_mul(668_265_263))
-            .wrapping_add(self.rng.state() as i32) as u32;
+            .wrapping_add(self.generation_rng.state() as i32) as u32;
         hash = (hash ^ (hash >> 13)).wrapping_mul(1_274_126_177);
         hash ^= hash >> 16;
         (hash & 0xffff) as f32 / 32768.0 - 1.0
@@ -220,16 +220,24 @@ impl World {
 
     // ---- generation --------------------------------------------------------
     pub fn generate_terrain(&mut self) {
-        let island_count = (ISLAND_MIN_COUNT + self.rng.below(ISLAND_EXTRA_COUNT)) as usize;
+        let island_count =
+            (ISLAND_MIN_COUNT + self.generation_rng.below(ISLAND_EXTRA_COUNT)) as usize;
         let mut centre_x = [0.0f32; ISLAND_MAX];
         let mut centre_z = [0.0f32; ISLAND_MAX];
         let mut radius = [0.0f32; ISLAND_MAX];
         let mut peak = [0.0f32; ISLAND_MAX];
         for i in 0..island_count {
-            centre_x[i] = self.rng.range(ISLAND_INSET.0, ISLAND_INSET.1) * WORLD_SIZE;
-            centre_z[i] = self.rng.range(ISLAND_INSET.0, ISLAND_INSET.1) * WORLD_SIZE;
-            radius[i] = self.rng.range(ISLAND_RADIUS_RANGE.0, ISLAND_RADIUS_RANGE.1) * WORLD_SIZE;
-            peak[i] = self.rng.range(ISLAND_PEAK_RANGE.0, ISLAND_PEAK_RANGE.1);
+            centre_x[i] =
+                self.generation_rng.range(ISLAND_INSET.0, ISLAND_INSET.1) * WORLD_SIZE;
+            centre_z[i] =
+                self.generation_rng.range(ISLAND_INSET.0, ISLAND_INSET.1) * WORLD_SIZE;
+            radius[i] = self
+                .generation_rng
+                .range(ISLAND_RADIUS_RANGE.0, ISLAND_RADIUS_RANGE.1)
+                * WORLD_SIZE;
+            peak[i] = self
+                .generation_rng
+                .range(ISLAND_PEAK_RANGE.0, ISLAND_PEAK_RANGE.1);
         }
         for row in 0..GRID_WIDTH {
             for col in 0..GRID_WIDTH {
@@ -270,8 +278,10 @@ impl World {
         const ATTEMPTS: i32 = 4000;
         const EDGE_MARGIN: i32 = 12;
         for _ in 0..ATTEMPTS {
-            let col = EDGE_MARGIN + self.rng.below(GRID_WIDTH - EDGE_MARGIN * 2);
-            let row = EDGE_MARGIN + self.rng.below(GRID_WIDTH - EDGE_MARGIN * 2);
+            let col =
+                EDGE_MARGIN + self.generation_rng.below(GRID_WIDTH - EDGE_MARGIN * 2);
+            let row =
+                EDGE_MARGIN + self.generation_rng.below(GRID_WIDTH - EDGE_MARGIN * 2);
             if self.height_at_cell(col, row) > min_height {
                 return row * GRID_WIDTH + col;
             }
@@ -307,9 +317,11 @@ impl World {
         let mut clump_z = [0.0f32; CLUMPS];
         let mut clump_spread = [0.0f32; CLUMPS];
         for i in 0..CLUMPS {
-            clump_x[i] = self.rng.range(0.0, WORLD_SIZE);
-            clump_z[i] = self.rng.range(0.0, WORLD_SIZE);
-            clump_spread[i] = self.rng.range(CLUMP_SPREAD.0, CLUMP_SPREAD.1);
+            clump_x[i] = self.generation_rng.range(0.0, WORLD_SIZE);
+            clump_z[i] = self.generation_rng.range(0.0, WORLD_SIZE);
+            clump_spread[i] = self
+                .generation_rng
+                .range(CLUMP_SPREAD.0, CLUMP_SPREAD.1);
         }
 
         // Most of the map is ocean and most draws land in it, so the loop
@@ -318,15 +330,20 @@ impl World {
             if self.scenery.count >= MAX_SCENERY {
                 break;
             }
-            let (x, z) = if self.rng.unit() < STRAY_FRACTION {
-                (self.rng.range(0.0, WORLD_SIZE), self.rng.range(0.0, WORLD_SIZE))
+            let (x, z) = if self.generation_rng.unit() < STRAY_FRACTION {
+                (
+                    self.generation_rng.range(0.0, WORLD_SIZE),
+                    self.generation_rng.range(0.0, WORLD_SIZE),
+                )
             } else {
-                let clump = self.rng.below(CLUMPS as i32) as usize;
+                let clump = self.generation_rng.below(CLUMPS as i32) as usize;
                 let spread = clump_spread[clump];
                 // two draws per axis biases toward the middle, so a clump is
                 // dense at its heart and thins out
-                let jitter_x = self.rng.range(-spread, spread) * self.rng.range(0.35, 1.0);
-                let jitter_z = self.rng.range(-spread, spread) * self.rng.range(0.35, 1.0);
+                let jitter_x = self.generation_rng.range(-spread, spread)
+                    * self.generation_rng.range(0.35, 1.0);
+                let jitter_z = self.generation_rng.range(-spread, spread)
+                    * self.generation_rng.range(0.35, 1.0);
                 (
                     clamp(clump_x[clump] + jitter_x, 0.0, WORLD_SIZE),
                     clamp(clump_z[clump] + jitter_z, 0.0, WORLD_SIZE),
@@ -339,7 +356,7 @@ impl World {
             let kind = if height < PALM_LINE {
                 SceneryKind::Palm
             } else if height < TREE_LINE {
-                if self.rng.below(3) == 0 {
+                if self.generation_rng.below(3) == 0 {
                     SceneryKind::Palm
                 } else {
                     SceneryKind::Rock
@@ -349,10 +366,10 @@ impl World {
             };
             // rocks vary far more in size than palms do
             let scale = match kind {
-                SceneryKind::Rock => self.rng.range(0.45, 2.3),
-                SceneryKind::Palm => self.rng.range(0.75, 1.45),
+                SceneryKind::Rock => self.generation_rng.range(0.45, 2.3),
+                SceneryKind::Palm => self.generation_rng.range(0.75, 1.45),
             };
-            let rotation = self.rng.range(0.0, core::f32::consts::TAU);
+            let rotation = self.generation_rng.range(0.0, core::f32::consts::TAU);
             let slot = self.scenery.count;
             self.scenery.pos_x[slot] = x;
             self.scenery.pos_z[slot] = z;

@@ -6,7 +6,8 @@ No original assets are used. Every texture, shape, sound and level is generated 
 
 ## Play it
 
-**Fastest:** open `standalone.html` directly. One file, ~180 KB, WASM embedded as base64, no server needed.
+**Fastest:** open `standalone.html` directly. One file, roughly 520 KB,
+WASM embedded as base64, no server needed.
 
 **As a site:**
 ```bash
@@ -47,21 +48,32 @@ Mana is the whole game, and you never carry it home yourself — your balloons d
 
 ## Architecture
 
-Two halves that barely talk to each other, which is the point.
+The repository now contains a platform-neutral 128 Hz multiplayer foundation
+alongside the playable browser compatibility client. See
+[`docs/multiplayer-architecture.md`](docs/multiplayer-architecture.md) for the
+runtime topology, security boundaries, rollout gates, and the precise list of
+external production integrations.
 
 ```
-src/lib.rs  ──cargo──►  sim.wasm     simulation, camera matrices,
-                          │          mesh prototypes, minimap raster
-                          │          (no imports, no JS calls, no GC)
-                          │  linear memory, read directly as typed arrays
-                          ▼
-site/engine.js         WebGPU calls + WGSL  ───────►  screen
-site/game.js           DOM, input, Web Audio, level flow
+crates/aetherloom-protocol    versioned commands, snapshots, events, results
+            │
+crates/aetherloom-core        owned MatchState, checkpoints, replication
+       ├── crates/aetherloom-client       prediction, input, platform ABI
+       ├── apps/aetherloom-worker-match   authoritative browser-duel Wasm ABI
+       └── aetherloom-server + quic       scheduler, hosts, native QUIC I/O
+                         │
+                         └── apps/aetherloom-dedicated
+                               one authoritative match
+
+server/cloudflare      profiles, islands, matchmaking, routing, settlement
+
+src/lib.rs  ──cargo──► sim.wasm ──► site/game.js + site/engine.js
+             offline/browser compatibility path, fixed at the same 128 Hz
 ```
 
-### Why the other two files are still JavaScript
+### Current browser compatibility adapter
 
-Everything in this project that is *arithmetic* is in Rust. What is left in JS is almost entirely calls into browser APIs, and that is a hard boundary rather than a preference:
+The current playable client still uses JavaScript for browser API calls:
 
 | | lines |
 |---|---|
@@ -69,20 +81,28 @@ Everything in this project that is *arithmetic* is in Rust. What is left in JS i
 | `engine.js` — WebGPU API calls and pipeline descriptors | ~180 |
 | `game.js` — DOM, events, Web Audio, canvas, pointer lock | ~200 |
 
-WebAssembly cannot touch the DOM, WebGPU or Web Audio directly. Reaching them from Rust means `wasm-bindgen`/`web-sys`, which does not remove the JavaScript — it *generates* it, as a glue module that is usually larger than the code it replaces, and it gives the wasm module a few hundred imports. That would invert the property this core is built around: `game.js` instantiates with `WebAssembly.instantiate(bytes, {})`, and `build.mjs` fails the build if a single import appears. It would also make `standalone.html` considerably harder to produce.
+This compatibility module remains freestanding and importless so
+`standalone.html` still works. The portable client boundary is Rust-owned:
+gameplay and presentation types do not depend on WebGPU, and web, desktop, and
+vendor console renderers implement `RendererBackend` separately.
 
-So the split is drawn where it actually pays: arithmetic in Rust, the browser surface in the language that talks to browsers. Camera matrices, the three mesh prototypes and the minimap rasteriser all moved into `src/lib.rs` for exactly this reason — they were pure functions sitting on the wrong side of the line.
+**The compatibility simulation is `no_std` on wasm and compiles to a
+freestanding module with zero imports.** Terrain, creatures, AI, projectiles,
+particles, spells, the mana economy and the win condition live in linear
+memory as flat arrays. JS maps `memory.buffer` once and reads typed views.
 
-**The simulation is `#![no_std]` Rust compiled to a freestanding WASM module with zero imports.** Terrain, creatures, AI, projectiles, particles, spells, the mana economy and the win condition all live in linear memory as flat `f32` arrays. JS never marshals anything: it maps `memory.buffer` once and reads through `Float32Array` views.
-
-The sim doesn't return "entities" — it writes **GPU-ready instance data**. Each frame it emits a packed instance array (position, scale, colour, yaw, glow, shape) that goes almost straight into `writeBuffer`. Measured cost: **~81 µs per 60 Hz step** (~12,000 steps/sec of headroom), so the simulation uses well under 1% of a frame.
+Authoritative catch-up ticks do not rebuild presentation. `game.js` advances
+exact 7.8125 ms ticks and extracts GPU-ready instance data once per rendered
+frame.
 
 ### WASM ABI
 
 Flat and C-like on purpose, so the core is replaceable:
 
 ```
-init(seed: u32, level: i32)          step(dt: f32)
+init(seed: u32, level: i32)          authoritativeHz() → 128
+advanceTick()                        extractFrame()
+simulationTick()                     step(dt)  // fixed-tick compatibility
 setInput(fwd, strafe, up, dyaw, dpitch, fire, brake)
 cast(spell) / fireSelected() / selectSpell(i) / cycleSpell(dir)
 
@@ -94,7 +114,9 @@ evtPtr()     → f32[n*4]         evtCount() / clearEvents()
 statePtr()   → f32[128]         terrainWidth() / cellSize() / worldSize()
 ```
 
-Sound events remain queued across `step()` calls so catch-up simulation cannot
+`step(dt)` retains the old shape for existing hosts, but deliberately ignores
+`dt`; callers cannot alter authoritative time. Sound events remain queued
+across ticks so catch-up simulation cannot
 erase a cue before JavaScript reads it. The consumer calls `clearEvents()` only
 after processing the current `evtPtr()` / `evtCount()` contents.
 
@@ -141,7 +163,10 @@ a trunk — that taper *and* curve *and* twist rather than stepping in a line.
 
 ## The simulation core
 
-`src/lib.rs` and its modules are `#![no_std]` Rust built for `wasm32-unknown-unknown` as a `cdylib`. No allocator, no panic runtime, no host interface. `libm` supplies the transcendentals `core` lacks, and `spin` provides a lock so the world can live in a `static` without unsafe. `build.mjs` fails the build if the output gains a single import.
+`src/lib.rs` and its modules use `no_std` on `wasm32-unknown-unknown` and build
+as both a `cdylib` and an `rlib`. The wasm path has no allocator, panic runtime,
+or host interface. `libm` supplies transcendentals and `spin` provides the
+compatibility ABI lock. `build.mjs` fails if the output gains an import.
 
 ```
 src/
@@ -149,7 +174,7 @@ src/
   types.rs      creature kinds, spells, factions, shapes, blips, cues
   world.rs      state layout, the RNG, and shared operations
   terrain.rs    heightmap sampling, noise, deformation, realm generation
-  session.rs    realm setup and the per-frame update order
+  session.rs    realm setup and the fixed-tick update order
   spells.rs     casting: one function per spell
   creatures.rs  creature AI, projectiles, orbs, particles
   wizards.rs    player flight and the rival AI
@@ -164,15 +189,22 @@ The crate is `#![deny(unsafe_code)]` and contains **no unsafe blocks at all**. S
 
 ### Things that will bite
 
-- **The draw pass runs inside `step()`.** `advance` calls `build_frame`, so a random draw taken while building the frame advances the simulation's generator and changes the world. Worse, anything conditioned on camera distance makes the world depend on where the player is looking. Particle emission for orb sparkles and keep smoke used to live in the draw routines for exactly this reason and has been moved into the simulation; `src/render/` now contains no `self.rng` at all, and it must stay that way.
+- **Presentation is not authoritative.** `advanceTick()` never calls
+  `build_frame`; `extractFrame()` does. Generation, AI, combat, environment,
+  and cosmetic RNG streams are independent, so changing a particle cannot
+  alter replay state.
 - **Wrapping arithmetic.** The value-noise hash multiplies deliberately overflow. Rust panics on overflow in debug where the original wrapped silently, so those sites use `wrapping_mul`/`wrapping_add`. Without them the same seed grows different terrain.
-- **Short-circuit order is load-bearing.** Random draws inside a condition must stay inside it. Hoisting the rival's aggression roll out of its `&&` chain consumed a number on frames where the rival was never going to engage, which shifted the entire sequence and changed the world. Every RNG call site is written to draw exactly when the original did.
+- **Random-stream order is load-bearing inside each subsystem.** Random draws
+  in AI conditions stay inside those conditions, and authoritative hashes
+  exclude the cosmetic stream.
 
 ```rust
 static WORLD: spin::Mutex<World> = spin::Mutex::new(World::new());
 
 #[allow(unsafe_code)] #[no_mangle]
-pub extern "C" fn step(dt: f32) { WORLD.lock().advance(dt); }
+pub extern "C" fn advanceTick() {
+    WORLD.lock().advance_tick(1.0 / 128.0);
+}
 ```
 
 ## Build
@@ -180,38 +212,42 @@ pub extern "C" fn step(dt: f32) { WORLD.lock().advance(dt); }
 ```bash
 rustup target add wasm32-unknown-unknown
 npm run build      # cargo → site/sim.wasm, then inlines site/ into standalone.html
-npm test           # fresh cargo build, core regressions, balance sweep, renderer validation
+npm test           # workspace tests, fresh wasm, balance, renderer and control-plane checks
 ```
 
 `npm run build -- --no-wasm` skips cargo and rebuilds `standalone.html` from the existing `site/sim.wasm`. The extra `--` is required so npm forwards the flag to `build.mjs`. There are no npm dependencies — node is only used for the bundler, the static server and the test harnesses.
 
 `npm test` first rebuilds `site/sim.wasm` from the current Rust sources, then runs:
 
-- **`model-preview-test.mjs`** renders all 29 gallery scenes in all eight variants directly through the WASM preview ABI. It rejects non-finite or out-of-bounds transforms, illegal shapes, invalid sizes and colours, instance-capacity exhaustion, nondeterministic output, and changes to the reviewed byte-level signature baseline.
+- **The Rust workspace suites** cover command/protocol fuzz boundaries,
+  deterministic replay/checkpoint restore, stable entity generations,
+  prediction/reconciliation, transport impairment, and the 128-player
+  performance-gate harness.
+- **`model-preview-test.mjs`** renders all 30 gallery scenes in all eight variants directly through the WASM preview ABI. It rejects non-finite or out-of-bounds transforms, illegal shapes, invalid sizes and colours, instance-capacity exhaustion, nondeterministic output, and changes to the reviewed byte-level signature baseline.
 - **`balance-sim-test.mjs`** checks event-queue lifetime, the realm-eight capacity boundary, and the park-on-castle exploit before driving the WASM core with a scripted bot for thousands of simulated seconds across several seeds and difficulty levels. Win rates remain diagnostic, while invalid outcomes, non-finite state, and broken fortress-capacity invariants fail the test.
 - **`headless-render-test.mjs`** runs the real game loop against a WebGPU stub that *validates arguments* the way the driver would — buffer overflows, non-4-aligned writes, `bytesPerRow` alignment, reads past the end of source arrays. Any validation error fails the process. It also checks every prototype mesh fits its arrays and that no index dangles: the mesh builders drop vertices silently when a shape outgrows its capacity, so an overflowing prototype renders with holes and nothing says why.
+- **The Cloudflare validator** checks bindings, schemas, migrations, security
+  contracts, and the intentionally explicit unbound-island state. CI also
+  installs and strictly type-checks the Worker package before publishing.
 
 ## Deploy
 
-The deployed result is static files with no runtime server build or special
-headers. Deployment CI still compiles and tests the source before publishing.
+Pull requests and pushes to `main` validate without deploying. Staging and
+production are explicit, protected workflow dispatches:
 
-**GitHub Pages** — `.github/workflows/pages.yml` installs the Rust WASM target,
-runs the fresh-build test suite, and publishes the resulting `site/` on every
-push to `main`, including `models.html` and `models.js`. Set Settings → Pages →
-Source to **GitHub Actions** once, then:
-```bash
-git push
-```
-(A *branch* deploy will not work here: GitHub only offers `/` or `/docs` as the folder, and the playable files live in `site/`.)
+- **Deploy staging** builds one immutable web artifact, deploys the
+  `aetherloom-staging` Cloudflare Pages preview, optionally deploys the staging
+  control plane, and records smoke evidence.
+- **Promote web production** accepts only that staged artifact from a
+  successful staging run and deploys it to GitHub Pages after approval.
+- **Promote control-plane production** additionally requires a matching
+  staging control-plane smoke proof.
 
-**Cloudflare Pages / Netlify**
-```bash
-npx wrangler pages deploy site --project-name aetherloom
-netlify deploy --prod --dir site
-```
-
-**Vercel** — `vercel --prod` from inside `site/`.
+Configure GitHub Pages to use **GitHub Actions** and protect the `staging`,
+`production`, and `github-pages` environments before releasing. Resource
+names, key handling, first deployment commands, required GitHub variables, and
+rollback boundaries are in the
+[deployment runbook](docs/deployment-runbook.md).
 
 WASM is fetched with `fetch` + `arrayBuffer`, not `instantiateStreaming`, so hosts that serve `.wasm` with the wrong MIME type work anyway.
 

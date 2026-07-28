@@ -244,3 +244,7 @@ assert.doesNotMatch(
 );
 
 console.log('combat/render contracts: hit flash removed, fire impacts dedicated, fireballs layered');
+
+// Keep the standalone multiplayer wire/presentation suite on the ordinary
+// `npm run test:contracts` path without widening the production build surface.
+await import('./multiplayer-browser-test.mjs');

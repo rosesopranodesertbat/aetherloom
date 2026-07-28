@@ -3,9 +3,25 @@ import fs from 'node:fs';
 
 const x=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync('site/sim.wasm')),{}).exports;
 const S=()=>new Float32Array(x.memory.buffer,x.statePtr(),128);
+const HZ=x.authoritativeHz(),DT=1/HZ;
+const PRESENT_EVERY=4; // 32 Hz, matching browser snapshot/presentation cadence
 
 const outcomeName={0:'in progress',1:'WIN',2:'died',3:'rival won'};
 const close=(actual,expected,tolerance=0.001)=>Math.abs(actual-expected)<=tolerance;
+
+function checkFixedTickContract(){
+  assert.equal(HZ,128,'authoritative rate is a hard protocol invariant');
+  x.init(0x128,1);
+  assert.equal(x.simulationTick(),0);
+  x.step(99); // compatibility argument must never control authoritative time
+  assert.equal(x.simulationTick(),1);
+  assert.ok(close(S()[32],DT,0.000001),`one step must advance exactly ${DT}s`);
+  x.advanceTick();
+  x.extractFrame();
+  assert.equal(x.simulationTick(),2);
+  assert.ok(close(S()[32],2*DT,0.000001),'fixed and split-step ABIs must agree');
+  console.log(`fixed tick: ${HZ} Hz, ${(DT*1000).toFixed(4)} ms`);
+}
 
 // A cast cue is part of the consumer-owned event queue. Simulation catch-up
 // steps may append to that queue, but must not erase an event before JS reads it.
@@ -17,7 +33,7 @@ function checkEventContract(){
   assert.ok(beforeCount>0,'fireSelected must emit a cast cue');
   const before=Array.from(new Float32Array(x.memory.buffer,x.evtPtr(),4));
   x.setInput(0,0,0,0,0,0,0);
-  x.step(1/60);
+  x.step(DT);
   assert.ok(x.evtCount()>=beforeCount,'step must preserve queued cast cues');
   assert.deepEqual(Array.from(new Float32Array(x.memory.buffer,x.evtPtr(),4)),before,
     'step must not overwrite the queued cast cue');
@@ -48,18 +64,20 @@ function checkRealmCapacity(){
 // claiming or attacking. Holding lift keeps this deterministic scenario alive
 // for the full window instead of letting enemies end the check after 16 seconds.
 function checkParkingExploit(){
-  const seconds=240,totalFrames=60*seconds;
+  const seconds=240,totalFrames=HZ*seconds;
   x.init(101,1);
   const initial=S(), startX=initial[0], startZ=initial[2];
   let frames=0,maxDrift=0;
   while(frames<totalFrames&&S()[18]===0){
     x.setInput(0,0,1,0,0,0,1);
-    x.step(1/60);
+    x.advanceTick();
     frames++;
+    if(frames%PRESENT_EVERY===0)x.extractFrame();
     const now=S();
     maxDrift=Math.max(maxDrift,Math.hypot(now[0]-startX,now[2]-startZ));
   }
-  const s=S(), simulated=frames/60;
+  x.extractFrame();
+  const s=S(), simulated=frames/HZ;
   console.log(`hover-over-castle ${simulated.toFixed(1)}s -> stored ${s[54].toFixed(1)} `+
     `progress ${(s[13]*100).toFixed(1)}% outcome ${outcomeName[s[18]]??s[18]}`);
   assert.equal(frames,totalFrames,
@@ -70,6 +88,7 @@ function checkParkingExploit(){
   assert.ok(s[13]<0.001,'parking without claiming must not advance realm progress');
 }
 
+checkFixedTickContract();
 checkEventContract();
 checkRealmCapacity();
 checkParkingExploit();
@@ -79,7 +98,10 @@ checkParkingExploit();
 // is capped or the target needs more room than it can hold.
 function run(seed,lvl,secs){
   x.init(seed,lvl); let s=S();
-  for(let f=0;f<60*secs;f++){
+  const claimEvery=Math.round(HZ*40/60);
+  const fortressEvery=Math.round(HZ*20/60);
+  const fireEvery=Math.round(HZ*34/60);
+  for(let f=0;f<HZ*secs;f++){
     s=S();
     const px=s[0],pz=s[2],yaw=s[3],mana=s[9],hp=s[7];
     const store=s[54],cap=s[55],tgt=s[56],tier=s[16],price=s[112];
@@ -98,15 +120,18 @@ function run(seed,lvl,secs){
     const tx = goHome ? s[33] : gx, tz = goHome ? s[34] : gz;
     let dy=Math.atan2(tx-px,tz-pz)-yaw; while(dy>Math.PI)dy-=2*Math.PI; while(dy<-Math.PI)dy+=2*Math.PI;
     const clr=s[23];
-    x.setInput(1,0,clr<26?1:(clr>52?-0.7:0),-Math.max(-0.05,Math.min(0.05,dy*0.10)),0,0,0);
-    if(!goHome&&f%40===0)x.cast(9);                       // Claim
-    if(goHome&&needTier&&mana>=price&&f%20===0)x.cast(12); // Fortress
-    if(nh<150*150&&mana>70&&f%34===0)x.cast(0);            // Firebolt
+    const yawStep=0.05*60/HZ;
+    x.setInput(1,0,clr<26?1:(clr>52?-0.7:0),-Math.max(-yawStep,Math.min(yawStep,dy*0.10*60/HZ)),0,0,0);
+    if(!goHome&&f%claimEvery===0)x.cast(9);                       // Claim
+    if(goHome&&needTier&&mana>=price&&f%fortressEvery===0)x.cast(12); // Fortress
+    if(nh<150*150&&mana>70&&f%fireEvery===0)x.cast(0);            // Firebolt
     if(hp<62&&s[60+7]>0&&mana>26)x.cast(7);
     if(hp<48&&s[60+6]>0&&mana>24)x.cast(6);
-    x.step(1/60);
-    if(S()[18]!==0){s=S();return{t:(f+1)/60,st:s[18],me:s[13],rv:s[14],tier:s[16],k:s[24],store:s[54],cap:s[55],tgt:s[56]};}
+    x.advanceTick();
+    if((f+1)%PRESENT_EVERY===0)x.extractFrame();
+    if(S()[18]!==0){s=S();return{t:(f+1)/HZ,st:s[18],me:s[13],rv:s[14],tier:s[16],k:s[24],store:s[54],cap:s[55],tgt:s[56]};}
   }
+  x.extractFrame();
   s=S();return{t:secs,st:0,me:s[13],rv:s[14],tier:s[16],k:s[24],store:s[54],cap:s[55],tgt:s[56]};
 }
 const nm={0:'timeout',1:'WIN',2:'died',3:'rival won'};
