@@ -1,0 +1,16 @@
+[package]
+name = "aetherloom-worker-match"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Wasm bridge for the authoritative Aetherloom browser duel slice"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aetherloom-core = { path = "../../crates/aetherloom-core" }
+aetherloom-protocol = { path = "../../crates/aetherloom-protocol" }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }

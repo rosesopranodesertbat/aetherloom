@@ -176,6 +176,7 @@ export interface Env {
   BROWSER_MATCH_ORIGIN?: Fetcher;
 
   ENVIRONMENT: string;
+  ENABLE_MULTIPLAYER_DEMO?: string;
   TICKET_ISSUER: string;
   PLAYER_TICKET_AUDIENCE: string;
   JOIN_TICKET_AUDIENCE: string;

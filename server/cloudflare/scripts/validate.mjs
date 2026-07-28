@@ -53,6 +53,7 @@ const requiredFiles = [
   "wrangler.production.example.jsonc",
   "migrations/0001_control_plane.sql",
   "migrations/0002_match_epoch.sql",
+  "migrations/0003_demo_join_limits.sql",
   "schemas/ticket-claims.schema.json",
   "schemas/join-ticket-claims.schema.json",
   "schemas/settlement-message.schema.json",
@@ -65,6 +66,11 @@ const requiredFiles = [
   "src/match-director.ts",
   "src/island-runtime.ts",
   "src/island-module.ts",
+  "src/browser-match-module.ts",
+  "src/browser-match-room.ts",
+  "src/browser-match-runtime.ts",
+  "src/browser-match-types.ts",
+  "src/browser-match-worker.ts",
   "src/join-tickets.ts",
   "src/readiness.ts",
   "src/settlements.ts",
@@ -123,6 +129,7 @@ assert.equal(stagingResources.version, 1);
 assert.equal(stagingResources.environment, "staging");
 assert.match(stagingResources.accountIdSha256, /^[0-9a-f]{64}$/u);
 assert.match(stagingResources.resourceFingerprint, /^[0-9a-f]{64}$/u);
+assert.equal(stagingResources.browserMatchWorker, "aetherloom-browser-match-staging");
 assert.match(stagingResources.settlementQueueId, /^[0-9a-f]{32}$/u);
 assert.match(stagingResources.settlementDeadLetterQueueId, /^[0-9a-f]{32}$/u);
 
@@ -134,7 +141,9 @@ for (const schemaFile of (await readdir(join(root, "schemas"))).filter((file) =>
 
 const migration = await readFile(join(root, "migrations/0001_control_plane.sql"), "utf8");
 const matchEpochMigration = await readFile(join(root, "migrations/0002_match_epoch.sql"), "utf8");
+const demoLimitMigration = await readFile(join(root, "migrations/0003_demo_join_limits.sql"), "utf8");
 assert.match(matchEpochMigration, /ADD COLUMN match_epoch INTEGER NOT NULL/u);
+assert.match(demoLimitMigration, /CREATE TABLE IF NOT EXISTS demo_join_limits/u);
 for (const table of [
   "match_allocations",
   "profile_projection",
@@ -166,6 +175,10 @@ assert.match(source, /class MatchmakingShardObject/u);
 assert.match(source, /class ServiceBindingMatchDirector/u);
 assert.match(source, /ISLAND_TICK_HZ = 128/u);
 assert.match(source, /class HeadlessWasmIslandSimulation/u);
+assert.match(source, /class BrowserMatchRoom/u);
+assert.match(source, /class BrowserMatchSimulation/u);
+assert.match(source, /BROWSER_MATCH_TICK_HZ = 128/u);
+assert.match(source, /BROWSER_MATCH_MAX_FRAME_BYTES = 1_200/u);
 assert.match(source, /island_command_journal/u);
 assert.match(source, /dormantEconomy: "timestamp-derived"/u);
 assert.match(source, /aetherloom\.auth\./u);

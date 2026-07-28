@@ -11,6 +11,7 @@
     "test:rust": "node scripts/test-rust-workspace.mjs",
     "test:models": "node test/model-preview-test.mjs",
     "test:contracts": "node test/combat-render-contract-test.mjs",
+    "test:multiplayer": "node --test test/multiplayer-browser-test.mjs",
     "test:release": "node --test scripts/release/*.test.mjs",
     "test:cloudflare": "npm test --prefix server/cloudflare"
   }

@@ -3,6 +3,7 @@
   "environment": "staging",
   "accountIdSha256": "7daa42a767d71481fcfd0cd29a42a0116feb7709f7eff26d7ecaa8fc5906b602",
   "workerName": "aetherloom-control-plane-staging",
+  "browserMatchWorker": "aetherloom-browser-match-staging",
   "workersDev": true,
   "d1DatabaseName": "aetherloom-control-staging",
   "d1DatabaseId": "220c38b2-1286-4a35-8c47-a7a24b83f387",
@@ -15,7 +16,8 @@
   "matchmakingShardCount": 16,
   "allowedOrigins": [
     "https://aetherloom-staging.pages.dev",
-    "https://staging.aetherloom-staging.pages.dev"
+    "https://staging.aetherloom-staging.pages.dev",
+    "https://rosesopranodesertbat.github.io"
   ],
   "resultTicketHosts": {
     "staging-result-2026-07": "staging-match-host"
@@ -25,5 +27,5 @@
   },
   "activeJoinTicketKid": "staging-join-2026-07",
   "activeServiceTicketKid": "staging-service-2026-07",
-  "resourceFingerprint": "5476f27282f9de9735cb5cd8406605d5fcae0cb4ea3ef529c30cefbb5d8531f3"
+  "resourceFingerprint": "d59011a66b5afcbfacaa6d401e7ae2b0db22bda8673298ac240fd2e7b0873fc4"
 }

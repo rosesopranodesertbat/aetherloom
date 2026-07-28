@@ -58,16 +58,14 @@ external production integrations.
 crates/aetherloom-protocol    versioned commands, snapshots, events, results
             │
 crates/aetherloom-core        owned MatchState, checkpoints, replication
-       ┌────┴──────────────┐
-       │                   │
-aetherloom-client     aetherloom-server + aetherloom-quic
-prediction/input/     fixed scheduler, hosts, native QUIC I/O
-platform ABI                 │
-                    apps/aetherloom-dedicated
-                     one authoritative match
-                              │
-                    server/cloudflare
-              profiles, islands, matchmaking, settlement
+       ├── crates/aetherloom-client       prediction, input, platform ABI
+       ├── apps/aetherloom-worker-match   authoritative browser-duel Wasm ABI
+       └── aetherloom-server + quic       scheduler, hosts, native QUIC I/O
+                         │
+                         └── apps/aetherloom-dedicated
+                               one authoritative match
+
+server/cloudflare      profiles, islands, matchmaking, routing, settlement
 
 src/lib.rs  ──cargo──► sim.wasm ──► site/game.js + site/engine.js
              offline/browser compatibility path, fixed at the same 128 Hz

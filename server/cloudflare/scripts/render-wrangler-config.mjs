@@ -210,7 +210,14 @@ const browserMatchWorker = value(
   resources,
   environment === "production",
 );
-if (Boolean(matchCapacityWorker) !== Boolean(browserMatchWorker)) {
+const browserMatchService =
+  browserMatchWorker && environment === "staging"
+    ? `${identifier(browserMatchWorker, "browser-match Worker prefix")}-${buildHash.slice(0, 12)}`
+    : browserMatchWorker;
+if (
+  environment === "production" &&
+  Boolean(matchCapacityWorker) !== Boolean(browserMatchWorker)
+) {
   fail("capacity and browser-match service bindings must be configured together");
 }
 
@@ -245,6 +252,8 @@ const config = {
   observability: { enabled: true },
   vars: {
     ENVIRONMENT: environment,
+    ENABLE_MULTIPLAYER_DEMO:
+      environment === "staging" && Boolean(browserMatchWorker) ? "true" : "false",
     TICKET_ISSUER: "aetherloom-control-plane",
     PLAYER_TICKET_AUDIENCE: "aetherloom-player",
     JOIN_TICKET_AUDIENCE: "aetherloom-match",
@@ -309,17 +318,48 @@ const config = {
 if (customDomain) {
   config.routes = [{ pattern: customDomain, custom_domain: true }];
 }
-if (matchCapacityWorker && browserMatchWorker) {
-  config.services = [
+const services = [];
+if (matchCapacityWorker) {
+  services.push(
     {
       binding: "MATCH_CAPACITY_API",
       service: identifier(matchCapacityWorker, "capacity Worker"),
     },
+  );
+}
+if (browserMatchWorker) {
+  services.push(
     {
       binding: "BROWSER_MATCH_ORIGIN",
-      service: identifier(browserMatchWorker, "browser-match Worker"),
+      service: identifier(browserMatchService, "browser-match Worker"),
     },
-  ];
+  );
+}
+if (services.length > 0) {
+  config.services = services;
+}
+
+if (environment === "staging" && browserMatchService) {
+  const companionPath = join(
+    root,
+    "wrangler.generated.browser-match.staging.jsonc",
+  );
+  if (!existsSync(companionPath)) {
+    fail("render the versioned staging browser-match config before the control plane");
+  }
+  const companion = JSON.parse(await readFile(companionPath, "utf8"));
+  if (
+    companion.name !== browserMatchService ||
+    companion.vars?.CONTENT_BUILD_HASH !== buildHash ||
+    companion.vars?.JOIN_TICKET_PUBLIC_KEYS_JSON !==
+      config.vars.JOIN_TICKET_PUBLIC_KEYS_JSON ||
+    !Object.hasOwn(
+      JSON.parse(companion.vars?.JOIN_TICKET_PUBLIC_KEYS_JSON ?? "{}"),
+      activeJoinTicketKid,
+    )
+  ) {
+    fail("staging control-plane and browser-match build/verifier configuration differs");
+  }
 }
 
 await writeFile(output, `${JSON.stringify(config, null, 2)}\n`, {

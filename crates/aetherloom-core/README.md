@@ -18,6 +18,10 @@ Implemented boundaries:
 - 33-tick pose history with targeting rewind capped at 25 ticks;
 - client prediction/reconciliation and a 2–6 tick interpolation window;
 - presentation, renderer, and platform-service boundaries.
+- exact host-selected player spawns and atomic combat-state resets for
+  deterministic arenas, without changing the legacy seeded spawn path.
+- safe player-slot reuse that removes owned projectiles, plus explicit
+  projectile clearing for clean round transitions.
 
 Run this crate independently:
 
@@ -29,4 +33,3 @@ The current gameplay systems are intentionally a small extraction-combat
 vertical slice. Integrating the legacy game’s full spell, creature, terrain,
 and economy rules into `MatchState` remains a separate migration; those rules
 must not call presentation APIs or add new shared RNG draws.
-

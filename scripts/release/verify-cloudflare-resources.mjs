@@ -59,7 +59,9 @@ function assertManifest(manifest, environment, accountId) {
     !HEX_256_RE.test(manifest.resourceFingerprint ?? "") ||
     !UUID_RE.test(manifest.d1DatabaseId ?? "") ||
     !QUEUE_ID_RE.test(manifest.settlementQueueId ?? "") ||
-    !QUEUE_ID_RE.test(manifest.settlementDeadLetterQueueId ?? "")
+    !QUEUE_ID_RE.test(manifest.settlementDeadLetterQueueId ?? "") ||
+    !Array.isArray(manifest.allowedOrigins) ||
+    manifest.allowedOrigins.length < 1
   ) {
     fail("committed Cloudflare resource manifest is incomplete or invalid");
   }
@@ -102,6 +104,15 @@ function assertConfig(manifest, config) {
   ) {
     fail("rendered Wrangler config does not match the committed resource manifest");
   }
+  let renderedOrigins;
+  try {
+    renderedOrigins = JSON.parse(config?.vars?.ALLOWED_ORIGINS_JSON);
+  } catch {
+    fail("rendered allowed origins are not valid JSON");
+  }
+  if (canonicalJson(renderedOrigins) !== canonicalJson(manifest.allowedOrigins)) {
+    fail("rendered allowed origins do not match the committed resource manifest");
+  }
   const route = config?.routes?.find((candidate) => candidate.custom_domain === true);
   if ((route?.pattern ?? null) !== (manifest.customDomain ?? null)) {
     fail("rendered Worker custom domain does not match the committed resource manifest");
@@ -109,9 +120,13 @@ function assertConfig(manifest, config) {
   const services = Object.fromEntries(
     (config?.services ?? []).map((service) => [service.binding, service.service]),
   );
+  const expectedBrowserMatch =
+    manifest.browserMatchWorker && manifest.environment === "staging"
+      ? `${manifest.browserMatchWorker}-${config?.vars?.CONTENT_BUILD_HASH?.slice(0, 12)}`
+      : (manifest.browserMatchWorker ?? null);
   if (
     (services.MATCH_CAPACITY_API ?? null) !== (manifest.matchCapacityWorker ?? null) ||
-    (services.BROWSER_MATCH_ORIGIN ?? null) !== (manifest.browserMatchWorker ?? null)
+    (services.BROWSER_MATCH_ORIGIN ?? null) !== expectedBrowserMatch
   ) {
     fail("rendered service bindings do not match the committed resource manifest");
   }

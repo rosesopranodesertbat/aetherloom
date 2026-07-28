@@ -1,11 +1,27 @@
 # Aetherloom Cloudflare control plane
 
-This directory is a deployable **control-plane scaffold**, not a match server. It
-keeps the 128 Hz authoritative loop off Durable Objects and behind two optional
-service bindings:
+This directory contains the deployable control plane and a separate,
+staging-only browser match Worker. The control-plane Worker is not a match
+server; competitive 128 Hz simulation remains behind replaceable service
+bindings:
 
 - `MATCH_CAPACITY_API` reserves and releases regional WSS or QUIC match hosts.
 - `BROWSER_MATCH_ORIGIN` receives authenticated browser WebSocket upgrades.
+
+For the playable browser systems test, `src/browser-match-worker.ts` binds
+`BROWSER_MATCH_ORIGIN` to a private, content-build-versioned Worker with one
+`BrowserMatchRoom` Durable Object per room. The new Worker is deployed before
+the gateway binding changes, leaving the previous build available if rollout
+fails and allowing old sessions to drain. It runs the real Rust `MatchState` through
+`generated/aetherloom-worker-match.wasm`, caps rooms at eight players, accepts
+64 Hz binary input, and emits 32 Hz snapshots. The host advances fixed 128 Hz
+simulation ticks in bounded wall-clock batches; Durable Objects do not provide
+the continuous 7.8125 ms pacing or jitter guarantee required for competitive
+play. This host is therefore explicitly casual staging, with progression and
+settlement disabled. New public claims are source-limited, resume tokens rotate,
+and a systems-test session expires after 15 minutes. A host-memory restart
+closes its sockets and starts a fresh round on reconnect; this slice does not
+claim mid-round checkpoint continuity.
 
 The Worker owns short-lived authentication, profile and island serialization,
 matchmaking coordination, loadout escrow, settlement delivery, and durable
@@ -26,6 +42,7 @@ Nothing in this scaffold deploys automatically.
 | Headless island boundary | Command-driven 128 Hz tick batching, journal replay, idle checkpointing, dormant timestamp settlement |
 | `MatchmakingShardObject` | Region/playlist/input/MMR/shard queue, bounded leases, per-member private assignment |
 | Match director | Replaceable capacity service contract and D1 allocation record |
+| `BrowserMatchRoom` | Private staging systems-test room, signed admission, authoritative Rust/Wasm duel, reconnect and bot takeover |
 | D1 | Searchable projections, allocation state, match history |
 | R2 | Private island checkpoints and immutable settlement receipts/replay references |
 | Queue | At-least-once settlement delivery with a dead-letter queue |
@@ -136,9 +153,13 @@ Public routes:
 - `POST /v1/matchmaking/status`
 - `POST /v1/matchmaking/cancel`
 - `GET /v1/ws/casual/:matchId` (WebSocket upgrade)
+- `POST /v1/demo/join` (staging only; ephemeral account and empty loadout)
+- `GET /v1/demo/ws/:matchId` (staging-only WebSocket upgrade)
 
 Internal routes:
 
+- `POST /internal/v1/demo/smoke/join`, scope `deployment:verify`; creates an
+  isolated random room for the two-client deployment proof
 - `POST /internal/v1/matchmaking/dispatch`, scope `match:dispatch`
 - `POST /internal/v1/settlements`, scope `result:enqueue`, plus a signed result
 - `PUT /internal/v1/islands/checkpoints/:checkpointId`, scope
@@ -267,6 +288,7 @@ From this directory:
 
 ```bash
 npm install
+npm run build:browser-match
 npm run validate
 npm test
 cp .dev.vars.example .dev.vars
@@ -292,6 +314,12 @@ npm run dev
 `wrangler.jsonc` uses local/automatic resource provisioning and does not include
 the external service bindings, so dispatch and WSS handoff intentionally return
 503 until those services are configured. The production example is a template.
+Staging additionally renders
+`wrangler.generated.browser-match.staging.jsonc`, deploys that private Worker
+before the public control plane, and runs a two-client authoritative damage
+smoke test through the public join and WebSocket routes. The private Worker has
+no public route of its own.
+
 Copy it to the tracked `deploy/production.resources.json`, replace every
 `REPLACE_WITH_...` value, create or bind the named resources, and commit its
 canonical resource fingerprint. The protected workflow compares the generated

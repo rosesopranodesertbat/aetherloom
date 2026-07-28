@@ -7,8 +7,11 @@ cargo check \
   -p aetherloom-protocol \
   -p aetherloom-core \
   -p aetherloom-client \
+  -p aetherloom-worker-match \
   -p aetherloom-sim \
   --target wasm32-unknown-unknown
+
+node server/cloudflare/scripts/build-browser-match-wasm.mjs
 
 clang \
   -std=c11 \

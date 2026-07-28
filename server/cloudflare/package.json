@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:browser-match": "node scripts/build-browser-match-wasm.mjs",
     "check": "tsc --noEmit",
     "dev": "wrangler dev",
     "test": "npm run validate && npm run check",

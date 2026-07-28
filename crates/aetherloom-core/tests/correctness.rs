@@ -1,9 +1,9 @@
 use aetherloom_core::{
     AuthoritativeCheckpoint, ChunkCoord, ClientReplica, CommandRejection, CommandSet,
     Controller, CoreError, Entity, EntityKind, EntityPool, InterestTier, MatchConfig,
-    MatchState, PlayerCommand, PlayerId, PresentationWorld, ReplicaError,
-    ReplicatedEntity, ReplicationError, RewindError, Snapshot, SnapshotId,
-    SnapshotKind, TeamId, WorldSeed, MAX_INTERPOLATION_DELAY_TICKS,
+    MatchState, PlayerCommand, PlayerId, PlayerSpawn, PresentationWorld,
+    ReplicaError, ReplicatedEntity, ReplicationError, RewindError, Snapshot,
+    SnapshotId, SnapshotKind, TeamId, WorldSeed, MAX_INTERPOLATION_DELAY_TICKS,
     MAX_INTERPOLATION_SAMPLES, MAX_PENDING_PREDICTION_COMMANDS,
     MAX_REWIND_TICKS, MIN_INTERPOLATION_DELAY_TICKS, POSE_HISTORY_TICKS,
 };
@@ -46,6 +46,168 @@ fn commands(tick: u64, id: PlayerId, command: PlayerCommand) -> CommandSet {
     let mut set = CommandSet::new(tick);
     set.insert(id, command).unwrap();
     set
+}
+
+#[test]
+fn explicit_spawn_is_exact_and_does_not_consume_generation_rng() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0E1));
+    let generation_before = state.rng_states().generation;
+    let spawn = PlayerSpawn::new([-250, 12, 75], 9_000);
+    let entity_id = state
+        .add_player_at_spawn(player(0), team(3), Controller::Human, spawn)
+        .unwrap();
+
+    assert_eq!(state.rng_states().generation, generation_before);
+    let authoritative_player = state.player(player(0)).unwrap();
+    assert_eq!(authoritative_player.position_cm, spawn.position_cm());
+    assert_eq!(authoritative_player.yaw, spawn.yaw());
+    let authoritative_entity = state.entities().get(entity_id).unwrap();
+    assert_eq!(authoritative_entity.position_cm, spawn.position_cm());
+    assert_eq!(authoritative_entity.yaw, spawn.yaw());
+
+    let mut legacy_first = MatchState::new(config(), WorldSeed::new(0xD0E1));
+    let mut legacy_second = MatchState::new(config(), WorldSeed::new(0xD0E1));
+    legacy_first
+        .add_player(player(0), team(0), Controller::Human)
+        .unwrap();
+    legacy_second
+        .add_player(player(0), team(0), Controller::Human)
+        .unwrap();
+    assert_eq!(
+        legacy_first.player(player(0)).unwrap().position_cm,
+        legacy_second.player(player(0)).unwrap().position_cm
+    );
+    assert_eq!(legacy_first.rng_states(), legacy_second.rng_states());
+}
+
+#[test]
+fn reset_player_at_spawn_restores_combat_state_and_entity_consistency() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0E2));
+    let attacker_entity = state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([-250, 0, 0], 0),
+        )
+        .unwrap();
+    let target_entity = state
+        .add_player_at_spawn(
+            player(1),
+            team(1),
+            Controller::Human,
+            PlayerSpawn::new([250, 0, 0], 32_768),
+        )
+        .unwrap();
+
+    let mut opening_commands = CommandSet::new(0);
+    opening_commands
+        .insert(player(0), command(0, 50, 0, 0, true))
+        .unwrap();
+    opening_commands
+        .insert(player(1), command(0, 70, 0, 0, false))
+        .unwrap();
+    state.advance_tick(opening_commands).unwrap();
+    for tick in 1..24 {
+        state.advance_tick(CommandSet::new(tick)).unwrap();
+    }
+    assert!(state.player(player(1)).unwrap().health < 100);
+    assert!(!state.pose_history().is_empty());
+
+    let reset = PlayerSpawn::new([300, 20, -150], 12_345);
+    state.reset_player_at_spawn(player(1), reset).unwrap();
+    let player_state = state.player(player(1)).unwrap();
+    assert_eq!(player_state.position_cm, reset.position_cm());
+    assert_eq!(player_state.velocity_cm_per_tick, [0; 3]);
+    assert_eq!(player_state.yaw, reset.yaw());
+    assert_eq!(player_state.health, 100);
+    assert_eq!(player_state.cooldown_ticks, 0);
+    assert_eq!(player_state.outcome, aetherloom_core::PlayerOutcome::Active);
+    assert_eq!(player_state.last_accepted_sequence(), Some(70));
+    assert!(state.pose_history().iter().all(|frame| {
+        frame
+            .poses
+            .iter()
+            .all(|pose| pose.entity_id != target_entity)
+    }));
+    assert!(state.pose_history().iter().any(|frame| {
+        frame
+            .poses
+            .iter()
+            .any(|pose| pose.entity_id != target_entity)
+    }));
+    let latest_pose_tick = state.pose_history().last().unwrap().tick;
+    assert!(state
+        .rewind_pose(attacker_entity, latest_pose_tick)
+        .is_ok());
+    assert_eq!(
+        state.rewind_pose(target_entity, latest_pose_tick),
+        Err(RewindError::MissingEntity(target_entity))
+    );
+
+    let entity = state.entities().get(target_entity).unwrap();
+    assert_eq!(entity.position_cm, reset.position_cm());
+    assert_eq!(entity.velocity_cm_per_tick, [0; 3]);
+    assert_eq!(entity.yaw, reset.yaw());
+    assert_eq!(entity.health, 100);
+}
+
+#[test]
+fn removing_and_reusing_a_player_slot_clears_owned_projectiles() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0E4));
+    state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([-250, 0, 0], 0),
+        )
+        .unwrap();
+    state
+        .add_player_at_spawn(
+            player(1),
+            team(1),
+            Controller::Human,
+            PlayerSpawn::new([250, 0, 0], 32_768),
+        )
+        .unwrap();
+    state
+        .advance_tick(commands(0, player(0), command(0, 1, 0, 0, true)))
+        .unwrap();
+    assert!(state
+        .entities()
+        .iter()
+        .any(|entity| entity.kind == EntityKind::Projectile && entity.owner == Some(player(0))));
+
+    state.remove_player(player(0)).unwrap();
+    assert!(state
+        .entities()
+        .iter()
+        .all(|entity| entity.kind != EntityKind::Projectile || entity.owner != Some(player(0))));
+    state
+        .add_player_at_spawn(
+            player(0),
+            team(0),
+            Controller::Human,
+            PlayerSpawn::new([-250, 0, 0], 0),
+        )
+        .unwrap();
+    state.advance_tick(CommandSet::new(1)).unwrap();
+    assert_eq!(state.player(player(0)).unwrap().health, 100);
+}
+
+#[test]
+fn resetting_an_empty_slot_is_rejected_without_mutation() {
+    let mut state = MatchState::new(config(), WorldSeed::new(0xD0E3));
+    let before = state.authoritative_hash();
+    assert_eq!(
+        state.reset_player_at_spawn(
+            player(0),
+            PlayerSpawn::new([0, 0, 0], 0),
+        ),
+        Err(CoreError::PlayerInactive(player(0)))
+    );
+    assert_eq!(state.authoritative_hash(), before);
 }
 
 #[test]

@@ -49,6 +49,7 @@ import {
   requireInteger,
   requireString,
   sha256Base64Url,
+  sha256Hex128,
 } from "./util";
 
 interface MatchmakingBody {
@@ -81,6 +82,27 @@ interface ProfileView {
     updatedAtMs: number;
   } | null;
 }
+
+interface DemoJoinBody {
+  room: string;
+  resumeToken?: string;
+}
+
+interface DemoClaim {
+  matchId: string;
+  matchEpoch: number;
+  accountId: string;
+  playerSlot: number;
+  teamId: number;
+  resumeToken: string;
+  playerCount: number;
+}
+
+const PUBLIC_DEMO_ROOM_RE = /^duel-(?:0[1-9]|[12][0-9]|3[0-2])$/u;
+const SMOKE_DEMO_ROOM_RE = /^smoke-[0-9a-f]{32}$/u;
+const DEMO_JOIN_WINDOW_MS = 5 * 60 * 1_000;
+const DEMO_NEW_CLAIMS_PER_WINDOW = 2;
+const DEMO_RESUMES_PER_WINDOW = 20;
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const id = requestId(request);
@@ -132,11 +154,24 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       response = await matchmakingStatus(request, env, false);
     } else if (request.method === "POST" && url.pathname === "/v1/matchmaking/cancel") {
       response = await matchmakingStatus(request, env, true);
+    } else if (request.method === "POST" && url.pathname === "/v1/demo/join") {
+      response = await joinMultiplayerDemo(request, env, false);
+    } else if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/v1/demo/ws/")
+    ) {
+      return await routeDemoBrowserWebSocket(request, env, url.pathname);
     } else if (
       request.method === "GET" &&
       url.pathname.startsWith("/v1/ws/casual/")
     ) {
       return await routeBrowserWebSocket(request, env, url.pathname);
+    } else if (
+      request.method === "POST" &&
+      url.pathname === "/internal/v1/demo/smoke/join"
+    ) {
+      await serviceRequest(request, env, ["deployment:verify"]);
+      response = await joinMultiplayerDemo(request, env, true);
     } else if (
       request.method === "POST" &&
       url.pathname === "/internal/v1/matchmaking/dispatch"
@@ -169,6 +204,230 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   } catch (error) {
     return withCommonHeaders(errorResponse(error, id), request, env, id);
   }
+}
+
+function requireMultiplayerDemo(env: Env): void {
+  if (
+    env.ENABLE_MULTIPLAYER_DEMO !== "true" ||
+    (env.ENVIRONMENT !== "staging" && env.ENVIRONMENT !== "local")
+  ) {
+    throw new ApiError(
+      404,
+      "multiplayer_demo_disabled",
+      "The multiplayer systems test is not enabled in this environment.",
+    );
+  }
+  if (env.BROWSER_MATCH_ORIGIN === undefined) {
+    throw new ApiError(
+      503,
+      "browser_match_unavailable",
+      "The browser match service is not configured.",
+    );
+  }
+}
+
+async function joinMultiplayerDemo(
+  request: Request,
+  env: Env,
+  deploymentSmoke: boolean,
+): Promise<Response> {
+  requireMultiplayerDemo(env);
+  const body = await readJson<DemoJoinBody>(request, 2_048);
+  assertObject(body, "multiplayer demo join request");
+  const room = requireString(body.room, "room", 64).trim().toLowerCase();
+  const validRoom = deploymentSmoke
+    ? SMOKE_DEMO_ROOM_RE.test(room)
+    : PUBLIC_DEMO_ROOM_RE.test(room);
+  if (!validRoom) {
+    throw new ApiError(
+      400,
+      "invalid_demo_room",
+      deploymentSmoke
+        ? "Deployment smoke rooms must use a random smoke identifier."
+        : "The staging systems test provides rooms duel-01 through duel-32.",
+    );
+  }
+  const resumeToken =
+    body.resumeToken === undefined
+      ? undefined
+      : requireString(body.resumeToken, "resumeToken", 128);
+  const buildHash = requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH");
+  if (!deploymentSmoke) {
+    await enforceDemoAdmission(request, env, buildHash, resumeToken !== undefined);
+  }
+  const matchId = await sha256Hex128(`aetherloom-demo:${buildHash}:${room}`);
+  const claimResponse = await env.BROWSER_MATCH_ORIGIN!.fetch(
+    new Request("https://browser-match.internal/v1/demo/claims", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        room,
+        matchId,
+        buildHash,
+        ...(resumeToken === undefined ? {} : { resumeToken }),
+      }),
+    }),
+  );
+  if (!claimResponse.ok) return claimResponse;
+  const rawClaim = await readJson<DemoClaim>(claimResponse, 4_096);
+  assertObject(rawClaim, "browser match claim");
+  const claim: DemoClaim = {
+    matchId: requireHex128(rawClaim.matchId, "claim matchId"),
+    matchEpoch: requireInteger(
+      rawClaim.matchEpoch,
+      "claim matchEpoch",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    accountId: requireHex128(rawClaim.accountId, "claim accountId"),
+    playerSlot: requireInteger(rawClaim.playerSlot, "claim playerSlot", 0, 7),
+    teamId: requireInteger(rawClaim.teamId, "claim teamId", 0, 7),
+    resumeToken: requireString(rawClaim.resumeToken, "claim resumeToken", 128),
+    playerCount: requireInteger(rawClaim.playerCount, "claim playerCount", 1, 8),
+  };
+  if (claim.matchId !== matchId) {
+    throw new ApiError(
+      502,
+      "browser_match_claim_mismatch",
+      "The browser match service returned a claim for a different match.",
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1_000);
+  const ticket = await signJoinTicket(
+    {
+      v: 1,
+      iss: env.TICKET_ISSUER,
+      aud: env.JOIN_TICKET_AUDIENCE,
+      purpose: "join",
+      sub: claim.accountId,
+      iat: now,
+      nbf: now - 2,
+      exp: now + 120,
+      nonce: randomHex128(),
+      match_id: matchId,
+      match_epoch: claim.matchEpoch,
+      region: "staging",
+      build_hash: buildHash,
+      input_pool: "browser",
+      player_slot: claim.playerSlot,
+      team_id: claim.teamId,
+    },
+    env.JOIN_TICKET_SIGNING_KEYS_JSON,
+    env.ACTIVE_JOIN_TICKET_KID,
+  );
+  const requestUrl = new URL(request.url);
+  requestUrl.protocol = requestUrl.protocol === "https:" ? "wss:" : "ws:";
+  requestUrl.pathname = `/v1/demo/ws/${matchId}`;
+  requestUrl.search = "";
+  requestUrl.hash = "";
+  return jsonResponse({
+    matchId,
+    matchEpoch: claim.matchEpoch,
+    accountId: claim.accountId,
+    slot: claim.playerSlot,
+    teamId: claim.teamId,
+    resumeToken: claim.resumeToken,
+    playerCount: claim.playerCount,
+    webSocketUrl: requestUrl.toString(),
+    ticket,
+    tickHz: 128,
+    inputHz: 64,
+    snapshotHz: 32,
+    progression: "disabled",
+    competitive: false,
+  });
+}
+
+async function enforceDemoAdmission(
+  request: Request,
+  env: Env,
+  buildHash: string,
+  resume: boolean,
+): Promise<void> {
+  let source = request.headers.get("cf-connecting-ip");
+  if (env.ENVIRONMENT === "local" && source === null) source = "local-development";
+  if (source === null || source.length < 2 || source.length > 64) {
+    throw new ApiError(
+      403,
+      "demo_source_unavailable",
+      "The multiplayer systems test could not verify the connection source.",
+    );
+  }
+  const now = Date.now();
+  const cutoff = now - DEMO_JOIN_WINDOW_MS;
+  const sourceKey = await sha256Base64Url(
+    `aetherloom-demo-admission:${buildHash}:${resume ? "resume" : "new"}:${source}`,
+  );
+  const limit = resume ? DEMO_RESUMES_PER_WINDOW : DEMO_NEW_CLAIMS_PER_WINDOW;
+  const result = await env.CONTROL_DB.prepare(
+    `INSERT INTO demo_join_limits (
+       source_key, window_started_at_ms, claim_count, updated_at_ms
+     ) VALUES (?1, ?2, 1, ?2)
+     ON CONFLICT(source_key) DO UPDATE SET
+       window_started_at_ms = CASE
+         WHEN demo_join_limits.window_started_at_ms <= ?3 THEN excluded.window_started_at_ms
+         ELSE demo_join_limits.window_started_at_ms
+       END,
+       claim_count = CASE
+         WHEN demo_join_limits.window_started_at_ms <= ?3 THEN 1
+         ELSE min(demo_join_limits.claim_count + 1, ?4)
+       END,
+       updated_at_ms = excluded.updated_at_ms
+     RETURNING claim_count`,
+  )
+    .bind(sourceKey, now, cutoff, limit + 1)
+    .first<{ claim_count: number }>();
+  if (
+    result === null ||
+    !Number.isInteger(result.claim_count) ||
+    result.claim_count < 1
+  ) {
+    throw new Error("Demo admission limiter returned an invalid result.");
+  }
+  if (result.claim_count > limit) {
+    throw new ApiError(
+      429,
+      "demo_join_rate_limited",
+      resume
+        ? "This connection is reconnecting too frequently. Wait before trying again."
+        : "This connection has already opened two new staging players. Reuse an existing tab or wait five minutes.",
+    );
+  }
+}
+
+async function routeDemoBrowserWebSocket(
+  request: Request,
+  env: Env,
+  pathname: string,
+): Promise<Response> {
+  requireMultiplayerDemo(env);
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw new ApiError(426, "websocket_required", "This endpoint requires a WebSocket upgrade.");
+  }
+  const matchId = requireHex128(pathname.slice("/v1/demo/ws/".length), "matchId");
+  const token = ticketFromRequest(request, true);
+  await verifyJoinTicket(token, env.JOIN_TICKET_PUBLIC_KEYS_JSON, {
+    issuer: env.TICKET_ISSUER,
+    audience: env.JOIN_TICKET_AUDIENCE,
+    matchId,
+    buildHash: requireHex128(env.CONTENT_BUILD_HASH, "CONTENT_BUILD_HASH"),
+    inputPool: "browser",
+  });
+  const protocol = publicWebSocketProtocol(request);
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  headers.set("sec-websocket-protocol", protocol);
+  headers.delete("cookie");
+  return env.BROWSER_MATCH_ORIGIN!.fetch(
+    new Request(
+      `https://browser-match.internal/v1/demo/matches/${encodeURIComponent(matchId)}/ws`,
+      {
+        method: "GET",
+        headers,
+      },
+    ),
+  );
 }
 
 async function advanceIsland(request: Request, env: Env): Promise<Response> {

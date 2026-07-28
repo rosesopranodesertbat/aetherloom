@@ -9,6 +9,7 @@ license = "MIT"
 members = [
     ".",
     "apps/aetherloom-dedicated",
+    "apps/aetherloom-worker-match",
     "crates/aetherloom-client",
     "crates/aetherloom-core",
     "crates/aetherloom-protocol",

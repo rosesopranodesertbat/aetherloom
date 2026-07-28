@@ -134,6 +134,31 @@ pub struct Inventory {
     pub banked_resources: u32,
 }
 
+/// An explicit deterministic player placement.
+///
+/// Match hosts use this when a mode owns its spawn layout. The legacy
+/// [`MatchState::add_player`] path intentionally retains its seeded random
+/// placement and consumes the same generation-RNG draws as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlayerSpawn {
+    position_cm: [i32; 3],
+    yaw: u16,
+}
+
+impl PlayerSpawn {
+    pub const fn new(position_cm: [i32; 3], yaw: u16) -> Self {
+        Self { position_cm, yaw }
+    }
+
+    pub const fn position_cm(self) -> [i32; 3] {
+        self.position_cm
+    }
+
+    pub const fn yaw(self) -> u16 {
+        self.yaw
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PlayerOutcome {
@@ -294,6 +319,7 @@ pub enum CoreError {
     InvalidConfig(&'static str),
     InvalidPlayer(PlayerId),
     PlayerAlreadyActive(PlayerId),
+    PlayerInactive(PlayerId),
     Entity(EntityPoolError),
     Terrain(TerrainError),
     Command(CommandRejection),
@@ -419,6 +445,39 @@ impl MatchState {
         team: TeamId,
         controller: Controller,
     ) -> Result<EntityId, CoreError> {
+        let index = self.validate_player_add(id, controller)?;
+        let spawn = PlayerSpawn::new(
+            [
+                self.generation_rng.range_i32(-8_000, 8_000),
+                0,
+                self.generation_rng.range_i32(-8_000, 8_000),
+            ],
+            0,
+        );
+        self.insert_player_at_spawn(index, id, team, controller, spawn)
+    }
+
+    /// Adds a player at an exact host-selected placement without consuming
+    /// generation RNG.
+    ///
+    /// This is intended for deterministic arenas, replay fixtures, and mode
+    /// transitions whose spawn geometry is already authoritative.
+    pub fn add_player_at_spawn(
+        &mut self,
+        id: PlayerId,
+        team: TeamId,
+        controller: Controller,
+        spawn: PlayerSpawn,
+    ) -> Result<EntityId, CoreError> {
+        let index = self.validate_player_add(id, controller)?;
+        self.insert_player_at_spawn(index, id, team, controller, spawn)
+    }
+
+    fn validate_player_add(
+        &self,
+        id: PlayerId,
+        controller: Controller,
+    ) -> Result<usize, CoreError> {
         let index = id.index();
         if index >= self.players.len() {
             return Err(CoreError::InvalidPlayer(id));
@@ -434,16 +493,22 @@ impl MatchState {
         if self.entities.len() >= self.entities.capacity() as usize {
             return Err(CoreError::Entity(EntityPoolError::Capacity));
         }
+        Ok(index)
+    }
 
-        let position = [
-            self.generation_rng.range_i32(-8_000, 8_000),
-            0,
-            self.generation_rng.range_i32(-8_000, 8_000),
-        ];
+    fn insert_player_at_spawn(
+        &mut self,
+        index: usize,
+        id: PlayerId,
+        team: TeamId,
+        controller: Controller,
+        spawn: PlayerSpawn,
+    ) -> Result<EntityId, CoreError> {
         let mut entity = Entity::new(EntityKind::Player);
         entity.owner = Some(id);
         entity.team = Some(team);
-        entity.position_cm = position;
+        entity.position_cm = spawn.position_cm;
+        entity.yaw = spawn.yaw;
         entity.health = PLAYER_HEALTH;
         let entity_id = self.entities.spawn(entity)?;
 
@@ -452,9 +517,9 @@ impl MatchState {
             team: Some(team),
             controller,
             entity_id: Some(entity_id),
-            position_cm: position,
+            position_cm: spawn.position_cm,
             velocity_cm_per_tick: [0; 3],
-            yaw: 0,
+            yaw: spawn.yaw,
             health: PLAYER_HEALTH,
             cooldown_ticks: 0,
             inventory: Inventory::default(),
@@ -465,15 +530,110 @@ impl MatchState {
         Ok(entity_id)
     }
 
-    pub fn remove_player(&mut self, id: PlayerId) -> Result<(), CoreError> {
-        let Some(player) = self.players.get_mut(id.index()) else {
+    /// Restores an active player to a deterministic combat spawn.
+    ///
+    /// Controller, team, entity identity, inventory, and the accepted command
+    /// sequence are preserved. Pose, health, cooldown, and outcome are reset
+    /// atomically in both the player slot and its authoritative entity. Only
+    /// this entity is removed from pose history, so lag compensation cannot
+    /// rewind it through the teleport without disrupting other players.
+    pub fn reset_player_at_spawn(
+        &mut self,
+        id: PlayerId,
+        spawn: PlayerSpawn,
+    ) -> Result<(), CoreError> {
+        let Some(player) = self.players.get(id.index()) else {
             return Err(CoreError::InvalidPlayer(id));
         };
+        if player.controller == Controller::Empty {
+            return Err(CoreError::PlayerInactive(id));
+        }
+        let entity_id = player.entity_id.ok_or(CoreError::PlayerInactive(id))?;
+        let entity = self
+            .entities
+            .get(entity_id)
+            .ok_or(CoreError::Entity(EntityPoolError::InvalidId))?;
+        if entity.kind != EntityKind::Player || entity.owner != Some(id) {
+            return Err(CoreError::Entity(EntityPoolError::Corrupt(
+                "player slot does not own its player entity",
+            )));
+        }
+
+        let player = &mut self.players[id.index()];
+        player.position_cm = spawn.position_cm;
+        player.velocity_cm_per_tick = [0; 3];
+        player.yaw = spawn.yaw;
+        player.health = PLAYER_HEALTH;
+        player.cooldown_ticks = 0;
+        player.outcome = PlayerOutcome::Active;
+
+        let entity = self
+            .entities
+            .get_mut(entity_id)
+            .ok_or(CoreError::Entity(EntityPoolError::InvalidId))?;
+        entity.position_cm = spawn.position_cm;
+        entity.velocity_cm_per_tick = [0; 3];
+        entity.yaw = spawn.yaw;
+        entity.pitch = 0;
+        entity.health = PLAYER_HEALTH;
+        entity.flags = 0;
+        entity.lifetime_ticks = 0;
+        for frame in &mut self.pose_history {
+            frame.poses.retain(|pose| pose.entity_id != entity_id);
+        }
+        Ok(())
+    }
+
+    pub fn remove_player(&mut self, id: PlayerId) -> Result<(), CoreError> {
+        if self.players.get(id.index()).is_none() {
+            return Err(CoreError::InvalidPlayer(id));
+        }
+        self.remove_projectiles_owned_by(id);
+        let player = &mut self.players[id.index()];
         if let Some(entity) = player.entity_id {
             let _ = self.entities.remove(entity);
         }
         *player = PlayerState::empty(id);
         Ok(())
+    }
+
+    /// Removes every in-flight projectile.
+    ///
+    /// Round hosts call this before repositioning combatants so an earlier
+    /// round cannot damage freshly reset players. This administrative mutation
+    /// emits no gameplay event; callers must publish the resulting snapshot.
+    pub fn clear_projectiles(&mut self) -> usize {
+        let projectile_ids: Vec<EntityId> = self
+            .entities
+            .active_ids_sorted()
+            .into_iter()
+            .filter(|id| {
+                self.entities
+                    .get(*id)
+                    .is_some_and(|entity| entity.kind == EntityKind::Projectile)
+            })
+            .collect();
+        let count = projectile_ids.len();
+        for projectile_id in projectile_ids {
+            let _ = self.entities.remove(projectile_id);
+        }
+        count
+    }
+
+    fn remove_projectiles_owned_by(&mut self, owner: PlayerId) {
+        let projectile_ids: Vec<EntityId> = self
+            .entities
+            .active_ids_sorted()
+            .into_iter()
+            .filter(|id| {
+                self.entities.get(*id).is_some_and(|entity| {
+                    entity.kind == EntityKind::Projectile && entity.owner == Some(owner)
+                })
+            })
+            .collect();
+        for projectile_id in projectile_ids {
+            let _ = self.entities.remove(projectile_id);
+        }
     }
 
     pub fn set_controller(

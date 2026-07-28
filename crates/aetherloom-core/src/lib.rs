@@ -35,8 +35,8 @@ pub use replication::{
 };
 pub use state::{
     CommandRejection, CoreError, Inventory, MatchConfig, MatchState, PlayerOutcome,
-    PlayerState, Pose, PoseFrame, RewindError, RngState, RngStreams, TickEvent,
-    TickEventKind, TickEvents, WorldSeed, MAX_MATCH_ENTITIES,
+    PlayerSpawn, PlayerState, Pose, PoseFrame, RewindError, RngState, RngStreams,
+    TickEvent, TickEventKind, TickEvents, WorldSeed, MAX_MATCH_ENTITIES,
     MAX_MATCH_TERRAIN_CHUNKS, MAX_REWIND_TICKS, MAX_SNAPSHOT_HISTORY_CAPACITY,
     POSE_HISTORY_TICKS,
 };

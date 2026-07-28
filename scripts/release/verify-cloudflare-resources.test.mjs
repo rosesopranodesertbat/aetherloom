@@ -15,6 +15,11 @@ function fixture() {
     environment: "staging",
     accountIdSha256: accountFingerprint(ACCOUNT),
     workerName: "aetherloom-control-plane-staging",
+    browserMatchWorker: "aetherloom-browser-match-staging",
+    allowedOrigins: [
+      "https://aetherloom-staging.pages.dev",
+      "https://staging.aetherloom-staging.pages.dev",
+    ],
     workersDev: true,
     d1DatabaseName: "aetherloom-control-staging",
     d1DatabaseId: "220c38b2-1286-4a35-8c47-a7a24b83f387",
@@ -33,7 +38,15 @@ function fixture() {
     config: {
       name: manifest.workerName,
       workers_dev: true,
-      vars: { ENVIRONMENT: "staging" },
+      vars: {
+        ENVIRONMENT: "staging",
+        CONTENT_BUILD_HASH: "3".repeat(32),
+        ALLOWED_ORIGINS_JSON: JSON.stringify(manifest.allowedOrigins),
+      },
+      services: [{
+        binding: "BROWSER_MATCH_ORIGIN",
+        service: `aetherloom-browser-match-staging-${"3".repeat(12)}`,
+      }],
       d1_databases: [{
         binding: "CONTROL_DB",
         database_name: manifest.d1DatabaseName,
@@ -82,6 +95,12 @@ for (const [label, mutate] of [
   ["Queue id", (value) => {
     value.settlementQueueInfo =
       `Queue Name: ${value.manifest.settlementQueue}\nQueue ID: ${"3".repeat(32)}\n`;
+  }],
+  ["versioned browser-match binding", (value) => {
+    value.config.services[0].service = "aetherloom-browser-match-staging-wrong";
+  }],
+  ["allowed origin set", (value) => {
+    value.config.vars.ALLOWED_ORIGINS_JSON = JSON.stringify(["https://wrong.example"]);
   }],
   ["secret set", (value) => { value.secrets.pop(); }],
   ["Worker deployment", (value) => { value.deployments = []; }],

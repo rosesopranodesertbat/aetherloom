@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aetherloom — Multiplayer Systems Test</title>
+<meta name="description" content="Aetherloom multiplayer systems test for the casual staging service.">
+<meta name="theme-color" content="#090c1b">
+<meta name="referrer" content="no-referrer">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Spectral:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  color-scheme: dark;
+  --night: #070a16;
+  --lapis: #17255a;
+  --lapis-deep: #101a44;
+  --saffron: #e5a73c;
+  --gold: #f2d580;
+  --ivory: #f0e6ce;
+  --cinnabar: #c0392b;
+  --verdigris: #47a78e;
+  --muted: #9da8c5;
+  --panel: rgba(7, 10, 22, .84);
+  --line: rgba(242, 213, 128, .28);
+  --display: "Cinzel", "Palatino Linotype", Georgia, serif;
+  --body: "Spectral", Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--night); }
+body { color: var(--ivory); font-family: var(--body); }
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(36, 76, 143, .46), transparent 42%),
+    linear-gradient(#182858, #090c1b);
+  touch-action: none;
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(3, 5, 13, .58), transparent 25%, transparent 72%, rgba(3, 5, 13, .72)),
+    radial-gradient(ellipse at center, transparent 48%, rgba(2, 4, 11, .45));
+}
+.brand {
+  position: fixed;
+  z-index: 5;
+  top: max(16px, env(safe-area-inset-top));
+  left: max(18px, env(safe-area-inset-left));
+  max-width: min(560px, calc(100vw - 36px));
+  text-shadow: 0 2px 14px #000;
+  pointer-events: none;
+}
+.brand h1 {
+  margin: 0;
+  font: 700 clamp(17px, 2.4vw, 26px)/1.15 var(--display);
+  letter-spacing: .08em;
+  color: var(--gold);
+}
+.brand p {
+  margin: 5px 0 0;
+  color: #d7deef;
+  font: 600 12px/1.25 var(--mono);
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
+.staging-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  padding: 5px 9px;
+  border: 1px solid rgba(229, 167, 60, .7);
+  background: rgba(79, 39, 10, .76);
+  color: #ffe9ac;
+  font: 700 11px/1 var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.staging-label::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--saffron);
+  box-shadow: 0 0 10px var(--saffron);
+}
+.stats {
+  position: fixed;
+  z-index: 6;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  display: grid;
+  grid-template-columns: repeat(4, minmax(68px, auto));
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .34);
+  backdrop-filter: blur(12px);
+}
+.stat {
+  min-width: 72px;
+  padding: 8px 11px 7px;
+  border-left: 1px solid rgba(242, 213, 128, .16);
+  text-align: right;
+}
+.stat:first-child { border-left: 0; }
+.stat span {
+  display: block;
+  color: var(--muted);
+  font: 700 9px/1.1 var(--mono);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.stat strong {
+  display: block;
+  margin-top: 4px;
+  color: #fff5cf;
+  font: 700 14px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.connection {
+  position: fixed;
+  z-index: 7;
+  left: 50%;
+  top: max(18px, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(42vw, 520px);
+  min-height: 31px;
+  padding: 6px 11px;
+  border: 1px solid rgba(157, 168, 197, .28);
+  background: rgba(7, 10, 22, .78);
+  color: #d7deef;
+  font: 700 10px/1.3 var(--mono);
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  backdrop-filter: blur(10px);
+}
+.connection::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7f899f;
+}
+body[data-connection="connecting"] .connection::before,
+body[data-connection="reconnecting"] .connection::before {
+  background: var(--saffron);
+  box-shadow: 0 0 10px var(--saffron);
+  animation: pulse 1s ease-in-out infinite;
+}
+body[data-connection="connected"] .connection::before {
+  background: var(--verdigris);
+  box-shadow: 0 0 10px var(--verdigris);
+}
+body[data-connection="error"] .connection::before { background: #ed6b62; }
+@keyframes pulse { 50% { opacity: .35; } }
+.lobby {
+  position: fixed;
+  z-index: 10;
+  left: 50%;
+  top: 50%;
+  width: min(520px, calc(100vw - 32px));
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(242, 213, 128, .42);
+  background:
+    linear-gradient(135deg, rgba(23, 37, 90, .88), rgba(7, 10, 22, .93)),
+    var(--panel);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .58), inset 0 0 0 3px rgba(7, 10, 22, .52);
+  padding: clamp(22px, 4vw, 36px);
+  backdrop-filter: blur(16px);
+}
+.lobby::before, .lobby::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  width: 38px;
+  height: 38px;
+  border-top: 1px solid var(--saffron);
+}
+.lobby::before { left: 8px; border-left: 1px solid var(--saffron); }
+.lobby::after { right: 8px; border-right: 1px solid var(--saffron); }
+.lobby h2 {
+  margin: 0;
+  color: var(--gold);
+  font: 700 clamp(21px, 4vw, 31px)/1.15 var(--display);
+  letter-spacing: .035em;
+}
+.lobby-copy {
+  margin: 12px 0 20px;
+  color: #cbd3e8;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.room-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--gold);
+  font: 700 10px/1 var(--mono);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.room-row { display: grid; grid-template-columns: 1fr auto; gap: 9px; }
+#room {
+  min-width: 0;
+  height: 46px;
+  border: 1px solid rgba(242, 213, 128, .36);
+  border-radius: 0;
+  outline: 0;
+  background: rgba(2, 4, 12, .74);
+  color: white;
+  padding: 0 13px;
+  font: 700 15px/1 var(--mono);
+  letter-spacing: .035em;
+}
+#room:focus { border-color: var(--saffron); box-shadow: 0 0 0 2px rgba(229, 167, 60, .15); }
+.btn {
+  min-height: 46px;
+  border: 1px solid #f3c761;
+  border-radius: 0;
+  background: linear-gradient(#e8b84e, #b66b1e);
+  color: #140e26;
+  padding: 0 19px;
+  cursor: pointer;
+  font: 700 12px/1 var(--display);
+  letter-spacing: .055em;
+  text-transform: uppercase;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .36), 0 8px 22px rgba(0, 0, 0, .26);
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { cursor: progress; opacity: .58; filter: grayscale(.25); }
+.btn.secondary {
+  border-color: rgba(242, 213, 128, .32);
+  background: rgba(16, 26, 68, .72);
+  color: var(--ivory);
+  box-shadow: none;
+}
+.lobby-actions { display: grid; grid-template-columns: 1fr auto; gap: 9px; margin-top: 10px; }
+#join { width: 100%; }
+.fine {
+  margin: 15px 0 0;
+  color: #aeb8d0;
+  font: 11px/1.45 var(--mono);
+}
+.fine a { color: #f6d884; }
+#error {
+  min-height: 18px;
+  margin: 12px 0 -4px;
+  color: #ff9e94;
+  font: 700 11px/1.4 var(--mono);
+}
+.lobby.joined {
+  top: auto;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  left: max(18px, env(safe-area-inset-left));
+  width: min(440px, calc(100vw - 36px));
+  transform: none;
+  padding: 12px;
+}
+.lobby.joined::before, .lobby.joined::after,
+.lobby.joined h2, .lobby.joined .lobby-copy,
+.lobby.joined .room-label, .lobby.joined #join,
+.lobby.joined .fine, .lobby.joined #error { display: none; }
+.lobby.joined .lobby-actions { margin: 0; grid-template-columns: 1fr auto; }
+.lobby.joined #room { height: 38px; font-size: 12px; pointer-events: none; opacity: .72; }
+.lobby.joined .btn { min-height: 38px; }
+.crosshair {
+  position: fixed;
+  z-index: 4;
+  left: 50%;
+  top: 50%;
+  width: 25px;
+  height: 25px;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s;
+}
+body[data-connection="connected"] .crosshair { opacity: .82; }
+.crosshair::before, .crosshair::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 237, 181, .94);
+  box-shadow: 0 0 4px #070a16;
+}
+.crosshair::before { left: 12px; top: 3px; width: 1px; height: 19px; }
+.crosshair::after { left: 3px; top: 12px; width: 19px; height: 1px; }
+.controls-hint {
+  position: fixed;
+  z-index: 4;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  color: rgba(224, 229, 242, .72);
+  text-align: right;
+  font: 10px/1.55 var(--mono);
+  text-shadow: 0 2px 7px #000;
+  pointer-events: none;
+}
+.controls-hint kbd {
+  border: 1px solid rgba(242, 213, 128, .32);
+  background: rgba(7, 10, 22, .76);
+  color: #ffe7a5;
+  padding: 2px 5px;
+  font: inherit;
+}
+.touch-controls {
+  position: fixed;
+  z-index: 12;
+  inset: auto 0 max(18px, env(safe-area-inset-bottom));
+  display: none;
+  justify-content: space-between;
+  align-items: end;
+  padding: 0 max(18px, env(safe-area-inset-left));
+  pointer-events: none;
+}
+.touch-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 52px);
+  grid-template-rows: repeat(2, 52px);
+  gap: 5px;
+  pointer-events: auto;
+}
+.touch-pad button, .touch-fire {
+  border: 1px solid rgba(242, 213, 128, .46);
+  background: rgba(8, 13, 35, .72);
+  color: #fff0bd;
+  font: 700 20px/1 var(--mono);
+  backdrop-filter: blur(8px);
+  touch-action: none;
+}
+.touch-pad button[data-key="w"] { grid-column: 2; }
+.touch-pad button[data-key="a"] { grid-column: 1; grid-row: 2; }
+.touch-pad button[data-key="s"] { grid-column: 2; grid-row: 2; }
+.touch-pad button[data-key="d"] { grid-column: 3; grid-row: 2; }
+.touch-pad button.active, .touch-fire.active { background: rgba(229, 167, 60, .78); color: #140e26; }
+.touch-fire {
+  width: 82px;
+  height: 82px;
+  border-radius: 50%;
+  pointer-events: auto;
+  font: 700 11px/1 var(--display);
+  letter-spacing: .05em;
+}
+.touch-actions {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  color: rgba(255, 240, 189, .82);
+  font: 700 9px/1 var(--mono);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  text-shadow: 0 2px 5px #000;
+  pointer-events: none;
+}
+#boot {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #090c1b;
+  color: var(--gold);
+  font: 700 13px/1 var(--display);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  transition: opacity .35s;
+}
+#boot.done { opacity: 0; pointer-events: none; }
+@media (max-width: 900px) {
+  .brand { top: max(12px, env(safe-area-inset-top)); }
+  .brand h1 { font-size: 16px; }
+  .brand p { display: none; }
+  .staging-label { margin-top: 6px; }
+  .connection { top: 74px; max-width: calc(100vw - 32px); }
+  .stats { top: auto; bottom: max(18px, env(safe-area-inset-bottom)); grid-template-columns: repeat(2, 72px); }
+  .stat { padding: 7px 8px; }
+  .lobby.joined { bottom: 132px; width: min(360px, calc(100vw - 36px)); }
+  .controls-hint { display: none; }
+}
+@media (pointer: coarse), (max-width: 700px) {
+  body[data-connection="connected"] .touch-controls { display: flex; }
+  body[data-connection="connected"] .stats {
+    display: grid;
+    top: 112px;
+    right: 12px;
+    bottom: auto;
+    left: 12px;
+    width: auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  body[data-connection="connected"] .stat { min-width: 0; text-align: center; }
+  .lobby.joined {
+    z-index: 13;
+    display: block;
+    left: 50%;
+    bottom: max(140px, calc(env(safe-area-inset-bottom) + 122px));
+    width: auto;
+    padding: 0;
+    transform: translateX(-50%);
+    border: 0;
+    background: none;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+  .lobby.joined .room-row { display: none; }
+  .lobby.joined .lobby-actions { display: block; }
+  .lobby.joined #leave { min-height: 44px; padding: 0 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body data-connection="offline">
+<canvas id="view" aria-label="Aetherloom multiplayer arena"></canvas>
+<div class="scrim"></div>
+
+<header class="brand">
+  <h1>Multiplayer Systems Test</h1>
+  <p>Aetherloom browser match telemetry</p>
+  <div class="staging-label">casual staging, not competitive</div>
+</header>
+
+<div class="connection" id="connection" role="status" aria-live="polite">Offline — choose a room</div>
+
+<section class="stats" aria-label="Match statistics">
+  <div class="stat"><span>Players</span><strong id="players">—</strong></div>
+  <div class="stat"><span>Health</span><strong id="health">—</strong></div>
+  <div class="stat"><span>Server tick</span><strong id="tick">—</strong></div>
+  <div class="stat"><span>RTT</span><strong id="rtt">—</strong></div>
+</section>
+
+<main class="lobby" id="lobby">
+  <h2>Meet in the same sky</h2>
+  <p class="lobby-copy">Share a room code, join from another browser, then fly and cast against the same 128 Hz authoritative match.</p>
+  <label class="room-label" for="room">Room code</label>
+  <div class="room-row">
+    <input id="room" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="7" pattern="duel-(0[1-9]|[12][0-9]|3[0-2])" aria-describedby="roomHelp">
+    <button class="btn secondary" id="share" type="button">Copy link</button>
+  </div>
+  <div class="lobby-actions">
+    <button class="btn" id="join" type="button">Join systems test</button>
+    <button class="btn secondary" id="leave" type="button" hidden>Leave</button>
+  </div>
+  <p id="error" role="alert"></p>
+  <p class="fine" id="roomHelp">Public staging rooms are limited to duel-01 through duel-32. Uses binary WebSockets at 64 Hz input / 32 Hz snapshots. Progression and competitive rating are disabled. <a href="./index.html">Play offline</a>.</p>
+</main>
+
+<div class="crosshair" aria-hidden="true"></div>
+<div class="controls-hint"><kbd>W A S D</kbd> fly &nbsp; <kbd>Mouse</kbd> aim &nbsp; <kbd>Click</kbd> fireball &nbsp; controller supported</div>
+
+<div class="touch-controls" aria-label="Touch flight controls">
+  <div class="touch-pad">
+    <button type="button" data-key="w" aria-label="Fly forward">▲</button>
+    <button type="button" data-key="a" aria-label="Fly left">◀</button>
+    <button type="button" data-key="s" aria-label="Fly backward">▼</button>
+    <button type="button" data-key="d" aria-label="Fly right">▶</button>
+  </div>
+  <div class="touch-actions">
+    <span>Drag sky to aim</span>
+    <button class="touch-fire" id="touchFire" type="button">Cast</button>
+  </div>
+</div>
+
+<div id="boot">Weaving the test arena</div>
+<noscript>This multiplayer systems test requires JavaScript and WebGPU.</noscript>
+<script type="module" src="./multiplayer.js"></script>
+</body>
+</html>

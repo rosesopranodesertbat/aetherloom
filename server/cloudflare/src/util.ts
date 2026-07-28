@@ -194,6 +194,14 @@ export async function sha256Base64Url(value: string | ArrayBuffer): Promise<stri
   return bytesToBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", input)));
 }
 
+export async function sha256Hex128(value: string | ArrayBuffer): Promise<string> {
+  const input = typeof value === "string" ? new TextEncoder().encode(value) : value;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  return [...digest.subarray(0, 16)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export function randomToken(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   return `${prefix}_${bytesToBase64Url(bytes)}`;
