@@ -115,6 +115,10 @@ function open(joined) {
       `aetherloom.auth.${joined.ticket}`,
     ]);
     socket.binaryType = "arraybuffer";
+    // Attach the snapshot listener before the upgrade can complete. The first
+    // player may otherwise exhaust the bounded unacknowledged-snapshot window
+    // while a slower second socket is still opening.
+    const observer = observe(socket);
     const timeout = setTimeout(() => {
       socket.close();
       reject(new Error("multiplayer WebSocket did not open in time"));
@@ -128,7 +132,7 @@ function open(joined) {
           reject(new Error("multiplayer WebSocket selected the wrong protocol"));
           return;
         }
-        resolve(socket);
+        resolve({ socket, observer });
       },
       { once: true },
     );
@@ -268,10 +272,10 @@ if (bySlot[0].slot !== 0 || bySlot[1].slot !== 1) {
   throw new Error("fresh multiplayer smoke room did not allocate duel slots zero and one");
 }
 
-const firstSocket = await open(firstJoin);
-const secondSocket = await open(secondJoin);
-const firstObserver = observe(firstSocket);
-const secondObserver = observe(secondSocket);
+const [
+  { socket: firstSocket, observer: firstObserver },
+  { socket: secondSocket, observer: secondObserver },
+] = await Promise.all([open(firstJoin), open(secondJoin)]);
 const firstInput = startInput(
   firstSocket,
   firstJoin.slot === 0 ? 0 : 32_768,

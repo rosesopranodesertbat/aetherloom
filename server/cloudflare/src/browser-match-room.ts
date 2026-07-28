@@ -499,6 +499,10 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
         "This staging session has reached its fifteen-minute limit.",
       );
     }
+    // Validate and construct the authoritative core before consuming the
+    // single-use ticket or accepting a WebSocket. An ABI/startup failure must
+    // remain an ordinary failed upgrade, never a half-accepted connection.
+    const simulation = this.ensureSimulation();
     const nowSeconds = Math.floor(Date.now() / 1_000);
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -557,7 +561,6 @@ export class BrowserMatchRoom extends DurableObject<BrowserMatchEnv> {
     } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server, [`slot:${player.slot}`]);
 
-    const simulation = this.ensureSimulation();
     const attachment = socketAttachment(server);
     attachment.lastSentEventId = this.latestRecentEventId();
     server.serializeAttachment(attachment);

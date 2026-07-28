@@ -11,7 +11,28 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const bytes = await readFile(join(root, "generated", "aetherloom-worker-match.wasm"));
+const roomSource = await readFile(join(root, "src", "browser-match-room.ts"), "utf8");
 const module = new WebAssembly.Module(bytes);
+
+test("a first socket validates the authoritative core before consuming or accepting", () => {
+  const start = roomSource.indexOf("private async acceptPlayerWebSocket");
+  const end = roomSource.indexOf("private ensureSimulation", start);
+  const source = roomSource.slice(start, end);
+  const simulation = source.indexOf("const simulation = this.ensureSimulation();");
+  const consumeTicket = source.indexOf("INSERT INTO consumed_join_nonces");
+  const acceptSocket = source.indexOf("this.ctx.acceptWebSocket");
+  assert.ok(simulation >= 0);
+  assert.ok(simulation < consumeTicket);
+  assert.ok(consumeTicket < acceptSocket);
+  assert.equal(
+    source.indexOf(
+      "this.ensureSimulation()",
+      simulation + "const simulation = this.ensureSimulation();".length,
+    ),
+    -1,
+    "the core must not be initialized for the first time after accepting the socket",
+  );
+});
 
 test("snapshot budgeting never starves the viewer's newest projectiles", () => {
   const projectiles = Array.from({ length: 40 }, (_, index) => ({

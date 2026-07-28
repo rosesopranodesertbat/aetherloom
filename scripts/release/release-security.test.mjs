@@ -69,3 +69,18 @@ test("root Wrangler state is ignored", async () => {
   const ignores = await readFile(new URL(".gitignore", root), "utf8");
   assert.match(ignores, /^\.wrangler\/$/mu);
 });
+
+test("multiplayer smoke observes both sockets before either upgrade can stall", async () => {
+  const source = await readFile(
+    new URL("scripts/release/smoke-browser-multiplayer.mjs", root),
+    "utf8",
+  );
+  const openStart = source.indexOf("function open(joined)");
+  const observeStart = source.indexOf("const observer = observe(socket);", openStart);
+  const openListener = source.indexOf('socket.addEventListener(\n      "open"', openStart);
+  assert.ok(openStart >= 0 && observeStart > openStart && observeStart < openListener);
+  assert.match(
+    source,
+    /resolve\(\{ socket, observer \}\);[\s\S]*?Promise\.all\(\[open\(firstJoin\), open\(secondJoin\)\]\)/u,
+  );
+});
